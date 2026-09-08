@@ -157,6 +157,10 @@ def rule_vault_git(cmd: str, cwd: str | None) -> str | None:
             if not has_pathspec and not assert_form and ("-F" in flags or "--file" in flags):
                 return ("Vault law: `git commit -F <msg>` in ~/Atlas still needs the pathspec: append `-- <file>` "
                         "(everything after `--` is a pathspec), or use the stage→ASSERT→commit form.")
+        if sub == "rm" and "--cached" not in seg:
+            return ("Defaults never delete: `git rm` removes tracked vault files from the working tree without the Trash. "
+                    "Use `git rm --cached` to untrack (the file stays), or move the file to the Trash by hand and commit the "
+                    "deletion path-limited. (Global/Nomos §Data integrity)")
         if sub == "push":
             if not re.search(r"\bpush\s+(?:\S*\s+)*backup\b", seg):
                 return ("Vault law: never push the vault to a cross-machine SYNC remote; only the bare `backup` remote "
@@ -309,6 +313,12 @@ def rule_bash_partition(cmd: str, inp: dict) -> str | None:
     lane, prefixes, marker = lane_for(cwd)
     mode = partition_mode()
     sid = inp.get("session_id", "-")
+    for p, how in targets:
+        if how == "mv-out":
+            rel = vault_rel(p) or ""
+            return (f"Defaults never delete: `mv` moves `{rel}` OUT of its place in the vault — for every reader that is a deletion "
+                    "(a wikilink, an @-import or a lane's partition now points at nothing). Move within the vault with `git mv` and a "
+                    "path-limited commit, or ask. (Global/Nomos §Data integrity)")
     if lane is None and cwd and under(expand(cwd), VAULT):
         log("partition", f"ok\tVAULT-CWD\tbash\tsession={sid}")
         return None                                    # a session opened in the vault itself is the owner's own hand

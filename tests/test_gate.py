@@ -580,3 +580,20 @@ def test_clone_is_not_unique_when_only_the_source_moved_on(tmp_path):
     (src / "log.txt").write_text("1\n2\n3\n")                                     # the SOURCE moves on after cloning
     p = subprocess.run([sys.executable, str(wt), "remove"], input=json.dumps({"cwd": str(src), "worktree_path": str(clone)}), capture_output=True, text=True, env=env)
     assert not clone.exists(), p.stderr                                            # nothing unique to the clone: removed
+
+
+# ------------------------------------------------ council closure round (Melchior), fixed ----
+def test_git_rm_without_cached_in_the_vault_asks(world):
+    v = world["vault"]
+    assert decision(bash(world, f"git -C {v} rm -r -- Mnemosyne/UkrainianCard")) == "ask"
+    assert bash(world, f"git -C {v} rm --cached -- x.md; S=$(git -C {v} diff --cached --name-only); [ \"$S\" = x.md ] || exit 9; git -C {v} commit -F /tmp/m") is None
+
+def test_mv_out_asks_from_the_vault_cwd_too(world):
+    v = world["vault"]
+    assert decision(bash(world, f"mv {v}/Speculum/Canon.md /tmp/", cwd=str(v))) == "ask"
+
+def test_roster_rewrite_via_sed_is_denied(world):
+    v = world["vault"]; (v / "Global" / "fleet-roster.md").write_text("lane: CURSUS\n")
+    world["state"].mkdir(parents=True, exist_ok=True); (world["state"] / "partition.mode").write_text("deny")
+    assert decision(bash(world, f"sed -i '' 's/CURSUS/CARD/' {v}/Global/fleet-roster.md")) == "deny"
+    assert bash(world, f"echo 'path: Pharos/new' >> {v}/Global/fleet-roster.md") is None
