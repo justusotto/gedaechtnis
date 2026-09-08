@@ -500,3 +500,13 @@ def test_clone_remove_keeps_side_branches_and_files_in_untracked_dirs(tmp_path):
     clone2 = Path(p.stdout.strip().splitlines()[-1]); (clone2 / "scratch" / "new.txt").write_text("unique\n")
     p = subprocess.run([sys.executable, str(wt), "remove"], input=json.dumps({"cwd": str(src), "worktree_path": str(clone2)}), capture_output=True, text=True, env=env)
     assert clone2.exists() and "unique to the clone" in p.stderr
+
+
+def test_every_redirect_spelling_is_seen_by_the_partition_door(world):
+    v = world["vault"]; world["state"].mkdir(parents=True, exist_ok=True); (world["state"] / "partition.mode").write_text("deny")
+    for form in ("1>", "&>", ">|", "2>", "1>>", "&>>"):
+        cmd = f"echo x {form} {v}/Speculum/Position.md"
+        assert decision(bash(world, cmd)) == "deny", form
+    assert decision(bash(world, f"echo x >|{v}/Speculum/Position.md")) == "deny"
+    assert bash(world, f"echo x 2>&1 | grep y") is None                                   # fd dup is not a file write
+    assert bash(world, f"echo '- 2026-09-09 CARD x' 1>> {v}/Speculum/Inbox.md") is None    # append to a shared surface, any spelling

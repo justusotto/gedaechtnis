@@ -260,12 +260,16 @@ def bash_write_targets(cmd: str, cwd: str | None) -> list[tuple[Path, str]]:
         except ValueError:
             w = seg.split()
         for i, tok in enumerate(w):
-            if tok in (">", ">>") and i + 1 < len(w):
-                out.append((expand(w[i + 1], cwd), "redirect-append" if tok == ">>" else "redirect"))
-            elif tok.startswith(">>"):
-                out.append((expand(tok[2:], cwd), "redirect-append"))
-            elif tok.startswith(">") and len(tok) > 1 and not tok.startswith(">&"):
-                out.append((expand(tok[1:], cwd), "redirect"))
+            # every output-redirect spelling: > >> 1> 2> &> >| >>| 1>> &>> — with the target attached or as the next token
+            m = re.match(r"^(?:\d+|&)?(>>|>)\|?(.*)$", tok)
+            if not m or tok.startswith(">&") or re.match(r"^\d+>&", tok):
+                continue
+            how = "redirect-append" if m.group(1) == ">>" else "redirect"
+            target = m.group(2)
+            if not target and i + 1 < len(w):
+                target = w[i + 1]
+            if target and target != "|" and not target.startswith("&"):
+                out.append((expand(target, cwd), how))
         if not w:
             continue
         j = 0
