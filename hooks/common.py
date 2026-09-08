@@ -198,35 +198,68 @@ def row_ok(kind: str, line: str) -> bool:
     return False
 
 
-def pure_append(kind: str, path: Path, tool: str, ti: dict) -> tuple[bool, str]:
-    """Is this Edit/Write a pure tail-append of well-formed rows? Returns (ok, why)."""
+def pure_append(kind: str, path: Path, tool: str, ti: dict, lane: str | None = None) -> tuple[bool, str]:
+    """Is this Edit/Write a pure append of well-formed rows to a shared surface? Returns (ok, why)."""
     try:
         cur = path.read_text(encoding="utf-8") if path.is_file() else ""
     except OSError:
         return False, "cannot read the current file"
     if kind == "roster":
-        # the roster's consumer (marker_check) reads ONLY the ```fleet-roster fence: an append lands INSIDE it, i.e. just
-        # before the closing fence — a row after the fence is admitted-and-invisible (Caspar, closure round)
-        fence_end = cur.rfind("\n```")
-        if fence_end == -1 or "```fleet-roster" not in cur:
+        # The roster's consumer (marker_check) reads ONLY the ```fleet-roster fence, block by block: a row belongs to the
+        # LAST `lane:` header above it. So an append is admitted only INSIDE THE APPENDER'S OWN BLOCK — at its end — or
+        # as a NEW block `lane: <own lane>` before the closing fence when no block for that lane exists. A `lane:` header
+        # for any other lane, or a row under another lane's header, is refused (Balthasar, closure round).
+        if not lane:
+            return False, "roster append needs a resolved lane (no .atlas-lane marker for this cwd)"
+        f0 = cur.find("```fleet-roster"); f1 = cur.rfind("\n```")
+        if f0 == -1 or f1 == -1 or f1 <= f0:
             return False, "roster has no fleet-roster fence to append inside"
-        head, tail = cur[:fence_end + 1], cur[fence_end + 1:]
-        new = ti.get("content") if tool == "Write" else None
-        if tool != "Write":
+        if tool == "Write":
+            new = ti.get("content") or ""
+        else:
             old, rep = ti.get("old_string") or "", ti.get("new_string") or ""
-            if not old or not cur.endswith(old) or not rep.endswith(old):
-                return False, "roster Edit must replace the closing fence (file tail) with rows + the same closing fence"
-            new = cur[: len(cur) - len(old)] + rep
-        if not new.startswith(head) or not new.endswith(tail):
-            return False, "roster append must sit inside the fleet-roster fence (before the closing ```)"
-        added = new[len(head): len(new) - len(tail)]
-        rows = [l for l in added.splitlines() if l.strip()]
-        bad = [l for l in rows if not row_ok(kind, l)]
+            k = cur.find(old)
+            if not old or k == -1 or cur.count(old) != 1 or not rep.startswith(old) and not rep.endswith(old):
+                return False, "roster Edit must extend a unique anchor (rows added after the anchor, or before the closing fence)"
+            new = cur[:k] + rep + cur[k + len(old):]
+        # the change must be ONE insertion: common prefix + inserted text + common suffix
+        a = 0
+        while a < min(len(cur), len(new)) and cur[a] == new[a]:
+            a += 1
+        b = 0
+        while b < min(len(cur), len(new)) - a and cur[-1 - b] == new[-1 - b]:
+            b += 1
+        if len(new) < len(cur) or cur[:a] + cur[len(cur) - b:] != cur:
+            return False, "roster change is not a pure insertion"
+        inserted = new[a: len(new) - b]
+        if a < f0 or a > f1 + 1:
+            return False, "roster append must sit inside the fleet-roster fence"
+        rows = [l for l in inserted.splitlines() if l.strip()]
         if not rows:
             return False, "nothing appended"
+        bad = [l for l in rows if not row_ok(kind, l)]
         if bad:
             return False, f"appended line is not a well-formed roster row: {bad[0][:80]!r}"
-        return True, f"pure append of {len(rows)} roster row(s) inside the fence"
+        # which block does the insertion point fall in? the last `lane:` header above it in the ORIGINAL text
+        before = cur[f0:a]
+        heads = _re.findall(r"^\s*lane:\s*(\S+)", before, _re.M)
+        block_lane = heads[-1] if heads else None
+        after_txt = cur[a:f1 + 1]
+        at_block_end = _re.match(r"^\s*(?:#[^\n]*\n\s*)*(?:lane:|\s*$)", after_txt) is not None or a >= f1
+        new_heads = [_re.match(r"^\s*lane:\s*(\S+)", l).group(1) for l in rows if _re.match(r"^\s*lane:", l)]
+        if new_heads:
+            if new_heads != [lane] or rows[0].strip().split(":")[0] != "lane":
+                return False, f"a new roster block may only be `lane: {lane}` (the appender's own lane), as the first inserted line"
+            if _re.search(r"^\s*lane:\s*" + _re.escape(lane) + r"\s*$", cur[f0:f1], _re.M):
+                return False, f"lane {lane} already has a block — append inside it, do not open a second"
+            if a < f1:
+                return False, "a new roster block goes before the closing fence"
+            return True, f"new roster block for {lane} ({len(rows)} row(s))"
+        if block_lane != lane:
+            return False, f"roster rows may only be appended inside the appender's own block (`lane: {lane}`), not under `lane: {block_lane}`"
+        if not at_block_end:
+            return False, "roster rows are appended at the END of the appender's block (before the next `lane:` header)"
+        return True, f"pure append of {len(rows)} roster row(s) inside block {lane}"
     if tool == "Write":
         new = ti.get("content") or ""
         if not new.startswith(cur):

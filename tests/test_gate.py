@@ -522,11 +522,19 @@ def test_fleet_roster_is_append_only_for_everyone(world):
     v = world["vault"]; r = v / "Global" / "fleet-roster.md"; r.write_text("# roster\n\n```fleet-roster\nlane: CURSUS\nrepo: Projects/x\n```\n\ntrailing prose\n")
     world["state"].mkdir(parents=True, exist_ok=True); (world["state"] / "partition.mode").write_text("deny")
     cur = r.read_text(); inside = cur.replace("repo: Projects/x\n```", "repo: Projects/x\npath: Pharos/new\n```")
-    ok = run("gate.py", "write", {"cwd": str(world["repo"]), "tool_name": "Write", "session_id": "t", "tool_input": {"file_path": str(r), "content": inside}}, world["env"])
-    assert ok is None                                                                         # a row INSIDE the fence
+    under_other = run("gate.py", "write", {"cwd": str(world["repo"]), "tool_name": "Write", "session_id": "t", "tool_input": {"file_path": str(r), "content": inside}}, world["env"])
+    assert decision(under_other) == "deny"                                                    # CARD appending under CURSUS's block: refused
+    own_block = cur.replace("repo: Projects/x\n```", "repo: Projects/x\nlane: CARD\nrepo: Projects/card\n```")
+    ok = run("gate.py", "write", {"cwd": str(world["repo"]), "tool_name": "Write", "session_id": "t", "tool_input": {"file_path": str(r), "content": own_block}}, world["env"])
+    assert ok is None                                                                         # a NEW block for the appender's own lane
+    r.write_text(own_block); cur = own_block
+    inside_own = cur.replace("repo: Projects/card\n```", "repo: Projects/card\npath: Mnemosyne/UkrainianCard\n```")
+    assert run("gate.py", "write", {"cwd": str(world["repo"]), "tool_name": "Write", "session_id": "t", "tool_input": {"file_path": str(r), "content": inside_own}}, world["env"]) is None
+    foreign_head = cur.replace("repo: Projects/card\n```", "repo: Projects/card\nlane: VOCAB\nrepo: Projects/v\n```")
+    assert decision(run("gate.py", "write", {"cwd": str(world["repo"]), "tool_name": "Write", "session_id": "t", "tool_input": {"file_path": str(r), "content": foreign_head}}, world["env"])) == "deny"
     past = run("gate.py", "write", {"cwd": str(world["repo"]), "tool_name": "Write", "session_id": "t", "tool_input": {"file_path": str(r), "content": cur + "path: Pharos/new\n"}}, world["env"])
     assert decision(past) == "deny"                                                           # a row after the fence: invisible to marker_check
-    edit_ok = run("gate.py", "write", {"cwd": str(world["repo"]), "tool_name": "Edit", "session_id": "t", "tool_input": {"file_path": str(r), "old_string": "```\n\ntrailing prose\n", "new_string": "path: Pharos/other\n```\n\ntrailing prose\n"}}, world["env"])
+    edit_ok = run("gate.py", "write", {"cwd": str(world["repo"]), "tool_name": "Edit", "session_id": "t", "tool_input": {"file_path": str(r), "old_string": "repo: Projects/card\n", "new_string": "repo: Projects/card\npath: Pharos/other\n"}}, world["env"])
     assert edit_ok is None
     bad = run("gate.py", "write", {"cwd": str(world["repo"]), "tool_name": "Write", "session_id": "t", "tool_input": {"file_path": str(r), "content": "lane: CARD\nrepo: mine\n"}}, world["env"])
     assert decision(bad) == "deny"                                                            # a rewrite, even though Global/ is declared
@@ -601,4 +609,19 @@ def test_roster_rewrite_via_sed_is_denied(world):
     v = world["vault"]; (v / "Global" / "fleet-roster.md").write_text("lane: CURSUS\n")
     world["state"].mkdir(parents=True, exist_ok=True); (world["state"] / "partition.mode").write_text("deny")
     assert decision(bash(world, f"sed -i '' 's/CURSUS/CARD/' {v}/Global/fleet-roster.md")) == "deny"
+    (v / "Global" / "fleet-roster.md").write_text("```fleet-roster\nlane: CURSUS\n```\n")
     assert decision(bash(world, f"echo 'path: Pharos/new' >> {v}/Global/fleet-roster.md")) == "deny"
+
+
+def test_session_start_is_keyed_by_session_id(world):
+    import hashlib
+    run("session_start.py", "", {"cwd": str(world["repo"]), "session_id": "guardian", "source": "startup"}, world["env"])
+    g = world["state"] / "session-start-guardian.json"; j = json.loads(g.read_text()); j["vault_head"] = "1" * 40; g.write_text(json.dumps(j))
+    run("session_start.py", "", {"cwd": str(world["repo"]), "session_id": "worker", "source": "startup"}, world["env"])
+    assert json.loads(g.read_text())["vault_head"] == "1" * 40                                   # the worker did not overwrite the guardian's record
+    assert (world["state"] / "session-start-worker.json").is_file()
+
+def test_heredoc_message_with_inner_quote_is_not_refused(world):
+    v = world["vault"]
+    cmd = "\n".join([f'git -C {v} commit -m "$(cat <<' + "'EOF'", 'he said "no -a here"; fine', "EOF", ')" -- Global/Map.md'])
+    assert bash(world, cmd) is None

@@ -56,9 +56,12 @@ def main() -> None:
     payload = json.dumps({
         "session_id": sid, "cwd": cwd, "lane": lane, "marker": str(marker) if marker else None,
         "vault_head": vault_head, "partition_mode": mode, "ts": time.strftime("%Y-%m-%dT%H:%M:%S")}, indent=1)
-    (STATE / f"session-start-{key}.json").write_text(payload, encoding="utf-8")   # per lane repo: seven lanes never overwrite each other
-    (STATE / "session-start.json").write_text(payload, encoding="utf-8")            # the latest, for a reader that knows no cwd
-    lines = ["Gedächtnis session facts (hook-generated):"]
+    sid_file = STATE / f"session-start-{sid}.json"
+    if not sid_file.exists() or inp.get("source") == "startup":
+        sid_file.write_text(payload, encoding="utf-8")                              # per SESSION: two sessions in one repo never collide
+    (STATE / f"session-start-{key}.json").write_text(payload, encoding="utf-8")   # per cwd, for a reader that knows only its cwd
+    (STATE / "session-start.json").write_text(payload, encoding="utf-8")            # the latest
+    lines = ["Gedächtnis session facts (hook-generated):", f"- Session id {sid}; this session's start record is ~/.claude/gedaechtnis/session-start-{sid}.json (pass that path to the debriefer)."]
     if lane:
         lines.append(f"- Lane {lane}, declared by {marker}; vault write partition: {', '.join(prefixes)}.")
     else:

@@ -131,6 +131,7 @@ def rule_vault_git(cmd: str, cwd: str | None) -> str | None:
                     "automated committer runs…')")
         if sub == "commit":
             body = seg[seg.index("commit")+6:]
+            body = re.sub(r"<<-?\s*(['\"]?)(\w+)\1.*?\n\2\s*$", "HEREDOC", body, flags=re.S | re.M)   # a heredoc body is text, whatever it contains
             flags = re.sub(r"'[^']*'|\"(?:[^\"\\\\]|\\\\.)*\"", " Q ", body)   # quoted text cannot carry a flag
             if re.search(r"(?:\s|^)(?:-[a-zA-Z]*a[a-zA-Z]*|--all)(?:\s|$)", flags):
                 return "Vault law: never `git commit -a` in ~/Atlas. Commit path-limited: `git -C ~/Atlas commit -m '<msg>' -- <file>`."
@@ -138,7 +139,7 @@ def rule_vault_git(cmd: str, cwd: str | None) -> str | None:
                 return ("Vault law: NO-AMEND — never `git commit --amend` on an Atlas commit; forward-fix with a new commit. "
                         "(Speculum/Kernel 'Standing constraints')")
             m = re.search(r'-m\s+"([^"]*)"', body)
-            if m and ("`" in m.group(1) or "$(" in m.group(1)) and not re.match(r"^\$\(cat\s*<<", m.group(1).strip()):
+            if m and ("`" in m.group(1) or "$(" in m.group(1)) and not re.match(r"^\$\(cat\s*(?:<<|HEREDOC)", m.group(1).strip()):
                 # `-m "$(cat <<'EOF' … EOF)"` is the DELIBERATE quoted-heredoc idiom, not an accident
                 return ("A backtick or `$(` inside a DOUBLE-quoted `git commit -m` is command-substituted: the word vanishes "
                         "and the commit still succeeds, permanently (NO-AMEND). Use single quotes, or `git commit -F <msgfile>`. "
@@ -412,7 +413,7 @@ def do_write(inp: dict) -> None:
         log("partition", f"ok\t{lane}\t{rel}\tsession={sid}")
         return
     if kind:
-        ok, why = pure_append(kind, p, inp.get("tool_name") or "Edit", ti)
+        ok, why = pure_append(kind, p, inp.get("tool_name") or "Edit", ti, lane)
         log("partition", f"{mode}\t{lane}\t{rel}\tshared={kind}\tappend={'ok' if ok else 'NO'}\t{why}\tsession={sid}")
         if ok:
             return                                   # the narrow audited exception: a keyed row, appended
