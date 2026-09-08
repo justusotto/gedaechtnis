@@ -4,7 +4,7 @@
     python3 worktree.py create   # stdin: {name, cwd}; prints the clone path (last line)
     python3 worktree.py remove   # stdin: {worktree_path, cwd}
 
-Why a clone and not `git worktree`: measured 2026-09-08 on atlas-system (15 GB apparent, .git 1.1 GB):
+Why a clone and not `git worktree`: measured 2026-09-08 on a 15 GB working repo (.git 1.1 GB):
 `cp -c -R` 14 s at ZERO extra disk, and the clone carries the 371 UNTRACKED arc directories and the
 working state a build needs; `git worktree add` 4.5 s but tracked files only. Remove: every commit
 the clone made is fetched back into the source repo as `refs/gedaechtnis/<name>` FIRST; then, if the
@@ -14,9 +14,11 @@ uncommitted work it is moved to the Trash by Finder, never rm'd. Defaults never 
 from __future__ import annotations
 import json, os, shutil, subprocess, sys, time
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import config
 
-HOME = Path.home()
-ROOT = Path(os.environ.get("GEDAECHTNIS_WORKTREES", str(HOME / ".claude" / "worktrees")))
+HOME = config.HOME
+ROOT = config.WORKTREES
 
 
 def sh(args, cwd=None, timeout=600):
@@ -66,7 +68,7 @@ def remove(inp: dict) -> int:
                 unique = True
                 print(f"{len(new_dirt)} uncommitted path(s) unique to the clone — moving it to the Trash, not deleting", file=sys.stderr)
     if unique:
-        if os.environ.get("GEDAECHTNIS_NO_TRASH"):
+        if config.no_trash():
             print(f"left in place (GEDAECHTNIS_NO_TRASH): {wt}", file=sys.stderr); return 0
         sh(["osascript", "-e", f'tell application "Finder" to delete POSIX file "{wt}"'], timeout=300)
         return 0

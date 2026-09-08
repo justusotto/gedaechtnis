@@ -4,18 +4,18 @@
 Writes <state>/session-start.json (session id, cwd, lane, vault HEAD at start) — the debriefer
 reads `vault_head` to scope "what changed this session" to the session instead of the last commit.
 Prints one short additionalContext block: the lane and its partition, the partition-hook mode,
-vault dirt, and the owner-answers summary (~/Downloads swept BY NAME — an empty result is
-UNREADABLE, never zero; the script that knows this is owner_pages_status.py).
+vault dirt, and — only when `owner_pages_status` is configured (see config.py) — that script's
+answered-pages summary. With no such script configured the hook says nothing about it at all,
+rather than guessing where one might live.
 """
 from __future__ import annotations
 import json, os, subprocess, sys, time
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import read_input, context, log, lane_for, VAULT, STATE, HOME, guarded
+import config
+from common import read_input, context, log, lane_for, VAULT, STATE, guarded
 
 EV = "SessionStart"
-OPS = HOME / "PycharmProjects" / "atlas-system" / "scripts" / "owner_pages_status.py"
-PY = HOME / "PycharmProjects" / "atlas-system" / ".venv" / "bin" / "python"
 
 
 def sh(args, cwd=None, timeout=8):
@@ -53,21 +53,21 @@ def main() -> None:
     lines.append(f"- Partition hook mode: {mode.upper()} (" + ("logs would-be refusals to ~/.claude/gedaechtnis/partition.log, blocks nothing" if mode == "warn" else "writes outside the partition are refused") + ").")
     if vault_head:
         lines.append(f"- Vault HEAD at session start: {vault_head[:8]}; dirty paths in the vault right now: {n_dirty}.")
-    if OPS.is_file():
-        py = str(PY) if PY.is_file() else "python3"
-        rc, out, err = sh([py, str(OPS), "--json"], timeout=8)
-        if rc in (0, 1) and out:                       # owner_pages_status exits 1 when it has findings; 2 = UNREADABLE
+    ops = config.owner_pages_status()                  # None unless config.json names a script
+    if ops:
+        rc, out, err = sh([config.python(), str(ops), "--json"], timeout=8)
+        if rc in (0, 1) and out:                       # the script exits 1 when it has findings; 2 = UNREADABLE
             try:
                 j = json.loads(out)
                 st = j.get("status") or j.get("verdict") or ""
                 counts = {k: v for k, v in j.items() if isinstance(v, int)}
-                lines.append(f"- Owner answers in ~/Downloads (by name): {st or 'see counts'} {json.dumps(counts) if counts else ''}".rstrip())
+                lines.append(f"- Answered review pages (swept by name): {st or 'see counts'} {json.dumps(counts) if counts else ''}".rstrip())
             except json.JSONDecodeError:
-                lines.append("- Owner answers in ~/Downloads: owner_pages_status.py returned non-JSON; UNMEASURED.")
+                lines.append(f"- Answered review pages: {ops.name} returned non-JSON; UNMEASURED.")
         elif rc == 2:
-            lines.append("- Owner answers in ~/Downloads: UNREADABLE (owner_pages_status.py exit 2 — a TCC-blocked listing looks empty; do not read as zero).")
+            lines.append(f"- Answered review pages: UNREADABLE ({ops.name} exit 2 — a permission-blocked listing looks empty; do not read it as zero).")
         else:
-            lines.append(f"- Owner answers in ~/Downloads: UNMEASURED (owner_pages_status.py rc={rc}).")
+            lines.append(f"- Answered review pages: UNMEASURED ({ops.name} rc={rc}).")
     if lane:
         # Inbox rows in this lane's regions (paths declared as `<Umbrella>/<Region>` dirs)
         for pre in prefixes:

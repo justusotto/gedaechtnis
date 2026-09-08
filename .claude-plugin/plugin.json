@@ -2,6 +2,6 @@
   "name": "gedaechtnis",
   "version": "0.1.0",
   "description": "Das Gedächtnis — the enforcement layer of the persistent-memory vault: PreToolUse locked doors (vault git law, model pinning, data integrity, write partition), PostToolUse chores (artifact index, queue newline, SHA check) and session-start facts.",
-  "author": { "name": "Justus" },
+  "author": { "name": "the Gedächtnis authors" },
   "hooks": "./hooks/hooks.json"
 }

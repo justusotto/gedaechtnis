@@ -5,21 +5,22 @@ prints a JSON decision on stdout (exit 0) or prints nothing (exit 0 = no opinion
 never exits non-zero on its own bugs: a crashing guard must not take the session down, so
 `main()` wrappers catch everything and log to the state dir.
 
-Paths are overridable by environment so the test suite never touches the real vault or the
-real state directory (Global/Errata: a suite that writes the application's real sidecar makes
-its own verdict depend on the machine's state):
-  GEDAECHTNIS_VAULT      the vault root            (default ~/Atlas)
-  GEDAECHTNIS_STATE_DIR  where hooks keep state    (default ~/.claude/gedaechtnis)
-  GEDAECHTNIS_FLEET_ROSTER  fleet roster path      (default <vault>/Global/fleet-roster.md)
+Every path comes from `config.py` — environment first, then ~/.claude/gedaechtnis/config.json,
+then a default. Nothing here names a directory of its own, which is also what lets the test suite
+redirect the whole plugin into a tmp dir and never touch the real vault or the real state
+directory (Global/Errata: a suite that writes the application's real sidecar makes its own verdict
+depend on the machine's state).
 """
 from __future__ import annotations
 import json, os, re, sys, time, traceback
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import config
 
-HOME = Path(os.path.expanduser("~"))
-VAULT = Path(os.environ.get("GEDAECHTNIS_VAULT", str(HOME / "Atlas"))).expanduser()
-STATE = Path(os.environ.get("GEDAECHTNIS_STATE_DIR", str(HOME / ".claude" / "gedaechtnis"))).expanduser()
-ROSTER = Path(os.environ.get("GEDAECHTNIS_FLEET_ROSTER", str(VAULT / "Global" / "fleet-roster.md")))
+HOME = config.HOME
+VAULT = config.VAULT
+STATE = config.STATE
+ROSTER = config.ROSTER
 
 ROLE_STEMS = frozenset(("Map","Vision","Position","Course","Canon","Patterns","Aporia","Eidos",
                         "Errata","Apparatus","Annales","Nomos","Lexicon","Ethos","Praxis","Exempla","Kernel"))

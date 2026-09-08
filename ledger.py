@@ -22,10 +22,12 @@ of well-formed rows.
 from __future__ import annotations
 import argparse, json, os, re, sys, time
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
+import config
 
-HOME = Path.home()
-VAULT = Path(os.environ.get("GEDAECHTNIS_VAULT", str(HOME / "Atlas")))
-STATE = Path(os.environ.get("GEDAECHTNIS_STATE_DIR", str(HOME / ".claude" / "gedaechtnis")))
+HOME = config.HOME
+VAULT = config.VAULT
+STATE = config.STATE
 LEDGER_DIR = VAULT / "Channels" / "ledger"
 KINDS = ("fact", "notice", "request", "handoff", "read", "ack")
 ROW = re.compile(r"^(N-\d{4}-\d{2}-\d{2}-\d{4})\t(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\t([A-Z][A-Z0-9-]*)\t([A-Z][A-Z0-9-]*|\*)\t(fact|notice|request|handoff|read|ack)\t([^\t]*)\t([^\t\n]*)$")

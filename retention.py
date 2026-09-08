@@ -19,6 +19,8 @@ Finder. Nothing here ever calls rm. The Trash is never emptied.
 from __future__ import annotations
 import argparse, hashlib, html, json, os, re, subprocess, sys, time
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
+import config
 
 DERIVED_DIRS = {"_shots", "shots", "_render_check", "_smoke", "_fonts", "node_modules", "__pycache__",
                 "downloads-dupes", "_stale-dev-renders", "renders", "_renders", "screenshots", "_screens"}
@@ -209,7 +211,7 @@ def apply(review_root: Path, rep: dict, trash: bool) -> Path:
         body.append(f"<tr><td>{html.escape(arc)}</td><td>{html.escape(path)}</td><td>{b:,}</td><td>{html.escape(why)}</td><td>{html.escape(str(closed))}</td></tr>")
     body.append("</table>")
     readme.write_text("\n".join(body), encoding="utf-8")
-    if trash:
+    if trash and not config.no_trash():          # GEDAECHTNIS_NO_TRASH leaves the bundle in place
         script = f'tell application "Finder" to delete POSIX file "{bundle}"'
         subprocess.run(["osascript", "-e", script], check=False, stdin=subprocess.DEVNULL, timeout=120)
     return bundle

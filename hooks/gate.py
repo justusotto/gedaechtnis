@@ -10,8 +10,8 @@ and is at most reported by a PostToolUse chore (see chore.py). Each deny cites t
 enforces so the model learns the why, not just the wall. First deny wins; silence means "no
 opinion" and the normal permission flow continues.
 
-Partition mode: `<state>/partition.mode` holds `warn` (default when absent) or `deny`. His ruling
-2026-09-08: warn for one week, read the log, then flip the word.
+Partition mode: `<state>/partition.mode` holds `warn` (default when absent) or `deny`. The intended
+adoption path is warn for a week, read the log, then flip the word.
 """
 from __future__ import annotations
 import re, sys, os
@@ -157,7 +157,7 @@ def rule_data_integrity(cmd: str) -> str | None:
                 if "vault" in why and re.search(r"Atlas/(?:\.atlas-locks|\.atlas-writer\.lock|[^\s]*\.pre-)", seg):
                     continue
                 return (f"Defaults never delete: {why}. Deletions go to the Trash via Finder in one `Cleanup YYYY-MM-DD/` "
-                        "bundle with a README, never `rm`; and this class asks Justus first. (Global/Nomos §Data integrity)")
+                        "bundle with a README, never `rm`; and this class asks the owner first. (Global/Nomos §Data integrity)")
     return None
 
 
@@ -181,7 +181,7 @@ def rule_artifact_not_file(cmd: str, cwd: str | None) -> str | None:
                 continue
             if re.search(r"""claude\.use\(\s*["'](?:db|artifact|self)["']""", head) or "data-answer-store" in head:
                 return ("This page keeps its answers in the ARTIFACT's own store; a `file://` copy has no store, and an "
-                        "answer given there strands the work in his browser (it happened twice on 2026-09-07). Open the "
+                        "answer given there strands the work in the reviewer's browser (it happened twice on 2026-09-07). Open the "
                         "artifact URL instead — look it up in ~/Atlas/Pharos/artifacts-index.md, or publish/republish via "
                         "the Artifact tool and `open` that URL.")
     return None
