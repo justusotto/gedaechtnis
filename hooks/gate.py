@@ -66,6 +66,8 @@ def _split_shell(cmd: str) -> list[str]:
             heredoc = m.group(2); cur.append(m.group(0)); i += len(m.group(0)); continue
         if cmd.startswith("&&", i) or cmd.startswith("||", i):
             out.append("".join(cur)); cur = []; i += 2; continue
+        if c == "|" and "".join(cur).rstrip().endswith(">"):
+            cur.append(c); i += 1; continue           # `>|` / `>>|` clobber-redirects are not pipes
         if c in ";|\n":
             out.append("".join(cur)); cur = []; i += 1; continue
         cur.append(c); i += 1
@@ -212,6 +214,9 @@ def rule_data_integrity(cmd: str) -> str | None:
     for seg in segments(cmd):
         if not _DESTROY.search(seg):
             continue
+        w0 = seg.split()
+        if w0 and w0[0] == "git" and not re.search(r"\bgit\s+(?:-C\s+\S+\s+)?clean\b", seg):
+            continue                                  # `git rm --cached` etc. are index operations; the vault-git rule owns them
         for rx, why in _PROTECTED:
             if rx.search(seg):
                 # allow rm inside the vault's gitignored scratch (.atlas-locks, .pre-* backups) explicitly
@@ -286,6 +291,9 @@ def bash_write_targets(cmd: str, cwd: str | None) -> list[tuple[Path, str]]:
             args = [x for x in w[j + 1:] if not x.startswith("-")]
             if verb in ("cp", "mv", "install") and args:
                 out.append((expand(args[-1], cwd), verb))
+                if verb == "mv":
+                    for src in args[:-1]:
+                        out.append((expand(src, cwd), "mv-out"))      # the SOURCE leaves its place: a deletion in disguise
             elif verb in ("tee", "rm", "touch", "truncate"):
                 for x in args:
                     out.append((expand(x, cwd), verb))
@@ -302,10 +310,15 @@ def rule_bash_partition(cmd: str, inp: dict) -> str | None:
     sid = inp.get("session_id", "-")
     for p, how in targets:
         rel = vault_rel(p) or ""
+        if how == "mv-out":
+            return (f"Defaults never delete: `mv` moves `{rel}` OUT of its place in the vault — for every reader that is a deletion "
+                    "(a wikilink, an @-import or a lane's partition now points at nothing). Move within the vault with `git mv` and a "
+                    "path-limited commit, or ask. (Global/Nomos §Data integrity)")
         if rel.startswith("Concilium/") and p.stem in ROLE_STEMS:
             return f"Concilium STEM RULE: `{rel}` carries a vault role stem; refused (Bash write via {how})."
         kind = shared_surface(rel)
-        if lane and path_in_partition(rel, prefixes) and kind != "umbrella-shared":
+        if lane and path_in_partition(rel, prefixes) and kind not in ("umbrella-shared", "roster"):
+            log("partition", f"ok\t{lane}\t{rel}\tbash={how}\tsession={sid}")     # the WARN week's denominator, Bash half
             continue
         if kind and how == "redirect-append":
             log("partition", f"{mode}\t{lane}\t{rel}\tshared={kind}\tbash-append\tsession={sid}")
@@ -328,7 +341,7 @@ def do_bash(inp: dict) -> None:
         r = fn()
         if r:
             log("deny", f"bash\t{r.split('.')[0][:80]}\t{cmd[:200].replace(chr(10),' ')}")
-            if r.startswith("Defaults never delete") or r.startswith("The Trash is never emptied") or r.startswith("Destructive SQL"):
+            if r.startswith(("Defaults never delete", "The Trash is never emptied", "Destructive SQL")):
                 ask(EV, r)                            # data-destroying acts REFUSE AND ASK: the owner may still say yes
             else:
                 deny(EV, r)
@@ -375,7 +388,7 @@ def do_write(inp: dict) -> None:
                       "region, or relay through your outbox. (Speculum/Kernel 'Never write another lane's partition')"))
         return
     kind = shared_surface(rel)
-    if path_in_partition(rel, prefixes) and kind != "umbrella-shared":
+    if path_in_partition(rel, prefixes) and kind not in ("umbrella-shared", "roster"):
         log("partition", f"ok\t{lane}\t{rel}\tsession={sid}")
         return
     if kind:

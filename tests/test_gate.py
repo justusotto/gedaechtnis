@@ -510,3 +510,37 @@ def test_every_redirect_spelling_is_seen_by_the_partition_door(world):
     assert decision(bash(world, f"echo x >|{v}/Speculum/Position.md")) == "deny"
     assert bash(world, f"echo x 2>&1 | grep y") is None                                   # fd dup is not a file write
     assert bash(world, f"echo '- 2026-09-09 CARD x' 1>> {v}/Speculum/Inbox.md") is None    # append to a shared surface, any spelling
+
+
+# ------------------------------------------------ council iteration-2 findings (Melchior, Caspar), fixed ----
+def test_mv_out_of_the_vault_asks(world):
+    v = world["vault"]
+    assert decision(bash(world, f"mv {v}/Speculum/Canon.md /tmp/")) == "ask"
+    assert bash(world, f"mv /tmp/x.md {v}/Mnemosyne/UkrainianCard/notes.md") is None      # into own lane: fine
+
+def test_fleet_roster_is_append_only_for_everyone(world):
+    v = world["vault"]; r = v / "Global" / "fleet-roster.md"; r.write_text("```fleet-roster\nlane: CURSUS\nrepo: PycharmProjects/x\n```\n")
+    world["state"].mkdir(parents=True, exist_ok=True); (world["state"] / "partition.mode").write_text("deny")
+    ok = run("gate.py", "write", {"cwd": str(world["repo"]), "tool_name": "Write", "session_id": "t", "tool_input": {"file_path": str(r), "content": r.read_text() + "path: Pharos/new\n"}}, world["env"])
+    assert ok is None
+    bad = run("gate.py", "write", {"cwd": str(world["repo"]), "tool_name": "Write", "session_id": "t", "tool_input": {"file_path": str(r), "content": "lane: CARD\nrepo: mine\n"}}, world["env"])
+    assert decision(bad) == "deny"                                                            # a rewrite, even though Global/ is declared
+
+def test_git_rm_cached_does_not_ask(world):
+    v = world["vault"]
+    assert bash(world, f"git -C {v} rm --cached -- x.md; S=$(git -C {v} diff --cached --name-only); [ \"$S\" = x.md ] || exit 9; git -C {v} commit -F /tmp/m") is None
+
+def test_foreign_shared_append_is_committed_by_the_chore(world):
+    v = world["vault"]; q = v / "Pharos" / "queues" / "regions" / "mining-ops.md"
+    q.write_text("- [ ] `q:MN-2026-09-01-X-1` r | q:MN-2026-09-01-X-1\n")
+    subprocess.run(["git", "-C", str(v), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(v), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "seed"], check=True)
+    q.write_text(q.read_text() + "- [ ] `q:MN-2026-09-09-NEW-1` from CARD | q:MN-2026-09-09-NEW-1\n")
+    res = run("chore.py", "write", {"cwd": str(world["repo"]), "tool_name": "Write", "session_id": "t", "tool_input": {"file_path": str(q), "content": q.read_text()}}, world["env"])
+    assert "committed as atlas@local" in res["hookSpecificOutput"]["additionalContext"]
+    log = subprocess.run(["git", "-C", str(v), "log", "-1", "--format=%an %s"], capture_output=True, text=True).stdout
+    assert log.startswith("atlas queue: append by CARD")
+
+def test_in_partition_bash_write_is_logged_as_ok(world):
+    v = world["vault"]; bash(world, f"echo x >> {v}/Mnemosyne/UkrainianCard/Position.md")
+    assert "ok\tCARD\tMnemosyne/UkrainianCard/Position.md\tbash=redirect-append" in (world["state"] / "partition.log").read_text()

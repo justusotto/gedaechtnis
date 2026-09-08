@@ -173,6 +173,8 @@ def shared_surface(rel: str) -> str | None:
         return "queue"
     if _re.match(r"^[^/]+/[^/]+/Inbox\.md$", rel) or _re.match(r"^Speculum/Inbox\.md$", rel):
         return "inbox"
+    if rel == "Global/fleet-roster.md":
+        return "roster"                    # the intended write partition: every lane may APPEND a declaration row, nobody rewrites it
     if rel == "Pharos/artifacts-index.md":
         return "artifacts-index"
     if rel in ("Mnemosyne/Canon.md", "Mnemosyne/Position.md"):
@@ -189,6 +191,8 @@ def row_ok(kind: str, line: str) -> bool:
         return _re.match(r"^- \d{4}-\d{2}-\d{2} [A-Z][A-Z0-9-]* ", line) is not None
     if kind == "artifacts-index":
         return _re.match(r"^\| \d{4}-\d{2}-\d{2} \| [^|]+ \| `[0-9a-f-]{36}` \|$", line) is not None
+    if kind == "roster":
+        return _re.match(r"^\s*(?:#.*|(?:lane|repo|path):\s*\S.*)$", line) is not None
     if kind == "umbrella-shared":
         return bool(line.strip())                 # any content, as long as it is APPENDED
     return False
