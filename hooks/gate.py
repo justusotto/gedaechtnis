@@ -18,7 +18,7 @@ import re, sys, os
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import (read_input, deny, log, expand, under, vault_rel, lane_for, path_in_partition,
-                    VAULT, HOME, STATE, ROLE_STEMS, guarded)
+                    VAULT, HOME, STATE, ROLE_STEMS, guarded, shared_surface, pure_append)
 
 EV = "PreToolUse"
 
@@ -238,6 +238,17 @@ def do_write(inp: dict) -> None:
                       "region, or relay through your outbox. (Speculum/Kernel 'Never write another lane's partition')"))
         return
     if path_in_partition(rel, prefixes):
+        return
+    kind = shared_surface(rel)
+    if kind:
+        ok, why = pure_append(kind, p, inp.get("tool_name") or "Edit", ti)
+        log("partition", f"{mode}\t{lane}\t{rel}\tshared={kind}\tappend={'ok' if ok else 'NO'}\t{why}\tsession={sid}")
+        if ok:
+            return                                   # the narrow audited exception: a keyed row, appended
+        if mode == "deny":
+            deny(EV, (f"`{rel}` is a SHARED surface ({kind}): any lane may APPEND a keyed row to it, nothing else — and this "
+                      f"write is not a pure append ({why}). Append a row instead (queue: `- [ ] `q:…``; ledger: `gedaechtnis/ledger.py append`; "
+                      "inbox: `- YYYY-MM-DD LANE …`)."))
         return
     log("partition", f"{mode}\t{lane}\t{rel}\tmarker={marker}\tsession={sid}")
     if mode == "deny":

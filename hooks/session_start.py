@@ -68,6 +68,25 @@ def main() -> None:
             lines.append("- Owner answers in ~/Downloads: UNREADABLE (owner_pages_status.py exit 2 — a TCC-blocked listing looks empty; do not read as zero).")
         else:
             lines.append(f"- Owner answers in ~/Downloads: UNMEASURED (owner_pages_status.py rc={rc}).")
+    if lane:
+        # Inbox rows in this lane's regions (paths declared as `<Umbrella>/<Region>` dirs)
+        for pre in prefixes:
+            if pre.count("/") == 1 and not pre.endswith(".md"):
+                ib = VAULT / pre / "Inbox.md"
+                if ib.is_file():
+                    n = sum(1 for l in ib.read_text(encoding="utf-8").splitlines() if l.startswith("- "))
+                    if n:
+                        lines.append(f"- {pre}/Inbox.md holds {n} unfolded row(s) written by other lanes about work in this region: read and fold them first.")
+        led = Path(__file__).resolve().parent.parent / "ledger.py"
+        if led.is_file():
+            rc, out, _ = sh([sys.executable, str(led), "read", "--to", lane, "--since-cursor", "--json"], timeout=8)
+            if rc == 0 and out.strip():
+                try:
+                    rows = json.loads(out)
+                    if rows:
+                        lines.append(f"- Channels ledger: {len(rows)} new row(s) addressed to {lane} since the last boot (ids {rows[0]['id']} … {rows[-1]['id']}); reply with `gedaechtnis/ledger.py ack --from {lane} <id>`.")
+                except json.JSONDecodeError:
+                    pass
     envf = os.environ.get("CLAUDE_ENV_FILE")
     if envf:
         try:

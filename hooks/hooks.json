@@ -1,22 +1,97 @@
 {
   "hooks": {
     "PreToolUse": [
-      { "matcher": "Bash",
-        "hooks": [ { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/hooks/gate.py bash", "timeout": 10 } ] },
-      { "matcher": "Edit|Write|MultiEdit|NotebookEdit",
-        "hooks": [ { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/hooks/gate.py write", "timeout": 10 } ] },
-      { "matcher": "Agent",
-        "hooks": [ { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/hooks/gate.py agent", "timeout": 10 } ] }
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/hooks/gate.py bash",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/hooks/gate.py write",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/hooks/gate.py agent",
+            "timeout": 10
+          }
+        ]
+      }
     ],
     "PostToolUse": [
-      { "matcher": "Artifact",
-        "hooks": [ { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/hooks/chore.py artifact", "timeout": 30 } ] },
-      { "matcher": "Edit|Write|MultiEdit",
-        "hooks": [ { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/hooks/chore.py write", "timeout": 20 } ] }
+      {
+        "matcher": "Artifact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/hooks/chore.py artifact",
+            "timeout": 30
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/hooks/chore.py write",
+            "timeout": 20
+          },
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/hooks/chore.py inbox",
+            "timeout": 20
+          }
+        ]
+      }
     ],
     "SessionStart": [
-      { "matcher": "startup|resume|clear|compact",
-        "hooks": [ { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/hooks/session_start.py", "timeout": 15 } ] }
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/hooks/session_start.py",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "WorktreeCreate": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/hooks/worktree.py create",
+            "timeout": 600
+          }
+        ]
+      }
+    ],
+    "WorktreeRemove": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/hooks/worktree.py remove",
+            "timeout": 600
+          }
+        ]
+      }
     ]
   }
 }

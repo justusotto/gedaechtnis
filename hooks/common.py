@@ -153,3 +153,75 @@ def guarded(fn):
     except Exception:
         log("hook-errors", traceback.format_exc().replace("\n", " | "))
     sys.exit(0)
+
+
+# ---- shared surfaces: ANY lane may APPEND one keyed row; nothing else (his ruling 2026-09-08, round 2) ----
+import re as _re
+
+def shared_surface(rel: str) -> str | None:
+    """Return the surface kind for a vault-relative path, or None."""
+    if _re.match(r"^Channels/ledger/\d{4}-\d{2}\.tsv$", rel):
+        return "ledger"
+    if _re.match(r"^Pharos/queues/regions/[^/]+\.md$", rel):
+        return "queue"
+    if _re.match(r"^[^/]+/[^/]+/Inbox\.md$", rel) or _re.match(r"^Speculum/Inbox\.md$", rel):
+        return "inbox"
+    return None
+
+
+def row_ok(kind: str, line: str) -> bool:
+    if kind == "ledger":
+        return _re.match(r"^N-\d{4}-\d{2}-\d{2}-\d{4}\t\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\t[A-Z][A-Z0-9-]*\t(?:[A-Z][A-Z0-9-]*|\*)\t(?:fact|notice|request|handoff|read|ack)\t[^\t]*\t[^\t]*$", line) is not None
+    if kind == "queue":
+        return _re.match(r"^- \[ \] `q:[A-Z]+-\d{4}-\d{2}-\d{2}-[A-Z0-9-]+`", line) is not None or line.startswith("  - ")
+    if kind == "inbox":
+        return _re.match(r"^- \d{4}-\d{2}-\d{2} [A-Z][A-Z0-9-]* ", line) is not None
+    return False
+
+
+def pure_append(kind: str, path: Path, tool: str, ti: dict) -> tuple[bool, str]:
+    """Is this Edit/Write a pure tail-append of well-formed rows? Returns (ok, why)."""
+    try:
+        cur = path.read_text(encoding="utf-8") if path.is_file() else ""
+    except OSError:
+        return False, "cannot read the current file"
+    if tool == "Write":
+        new = ti.get("content") or ""
+        if not new.startswith(cur):
+            return False, "Write does not start with the file's current content (not an append)"
+        added = new[len(cur):]
+    else:
+        old, new = ti.get("old_string") or "", ti.get("new_string") or ""
+        if not cur.rstrip("\n").endswith(old.rstrip("\n")) or not new.startswith(old):
+            return False, "Edit is not at the tail, or the replacement does not start with the replaced text (not an append)"
+        added = new[len(old):]
+    rows = [l for l in added.splitlines() if l.strip()]
+    if not rows:
+        return False, "nothing appended"
+    bad = [l for l in rows if not row_ok(kind, l)]
+    if bad:
+        return False, f"appended line is not a well-formed {kind} row: {bad[0][:80]!r}"
+    return True, f"pure append of {len(rows)} {kind} row(s)"
+
+
+def region_of_repo(repo: Path) -> str | None:
+    """The vault region a repo belongs to, read from its CLAUDE.md @-imports (`<Umbrella>/<Region>/(Kernel|Position).md`)."""
+    try:
+        txt = (repo / "CLAUDE.md").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    for m in _re.finditer(r"^@" + _re.escape(str(VAULT)) + r"/([^/\s]+/[^/\s]+)/(?:Kernel|Position)\.md", txt, _re.M):
+        if m.group(1).split("/")[0] not in ("Global",):
+            return m.group(1)
+    return None
+
+
+def repo_root_of(path: Path) -> Path | None:
+    d = path if path.is_dir() else path.parent
+    for _ in range(12):
+        if (d / ".git").exists():
+            return d
+        if d == d.parent or d == HOME:
+            return None
+        d = d.parent
+    return None

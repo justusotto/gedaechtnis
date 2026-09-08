@@ -11,7 +11,8 @@ from __future__ import annotations
 import json, re, subprocess, sys, time
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import read_input, context, log, expand, under, vault_rel, fleet_repos, VAULT, guarded
+from common import (read_input, context, log, expand, under, vault_rel, fleet_repos, VAULT, STATE, guarded,
+                    lane_for, path_in_partition, region_of_repo, repo_root_of, shared_surface)
 
 EV = "PostToolUse"
 UUID = re.compile(r"https://claude\.ai/code/artifact/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})")
@@ -178,10 +179,88 @@ def other_occurrences(terms: list[str], exclude: Path, limit: int = 12) -> dict[
     return out
 
 
+# ---- foreign-work record: work done outside the session's lane is recorded in THAT region's Inbox.md ----
+
+def _inbox_target(p: Path, cwd: str | None) -> tuple[str | None, str | None]:
+    """(region, what) when the written path is outside this session's lane: a vault path in another region, or a
+    file inside another lane's repo. Returns (None, None) when the write is within the lane or unattributable."""
+    lane, prefixes, _ = lane_for(cwd)
+    if under(p, VAULT):
+        rel = vault_rel(p) or ""
+        if lane and path_in_partition(rel, prefixes):
+            return None, None
+        if shared_surface(rel):
+            return None, None                      # an append to a shared surface IS the record
+        parts = rel.split("/")
+        if len(parts) >= 3 and parts[0] not in ("Global", "Pharos", "Channels", "Workflows", "Limen", "Concilium", ".hooks", ".tools"):
+            return "/".join(parts[:2]), f"vault file {rel}"
+        if parts[0] == "Speculum":
+            return "Speculum", f"vault file {rel}"
+        return None, None
+    repo = repo_root_of(p)
+    if not repo:
+        return None, None
+    region = region_of_repo(repo)
+    if not region:
+        return None, None
+    own = repo_root_of(Path(cwd)) if cwd else None
+    if own and own.resolve() == repo.resolve():
+        return None, None
+    try:
+        rel = str(p.relative_to(repo))
+    except ValueError:
+        rel = p.name
+    return region, f"{repo.name}/{rel}"
+
+
+def do_inbox(inp: dict) -> None:
+    ti = inp.get("tool_input") or {}
+    fp = ti.get("file_path") or ""
+    if not fp:
+        return
+    cwd = inp.get("cwd"); p = expand(fp, cwd)
+    region, what = _inbox_target(p, cwd)
+    if not region:
+        return
+    lane, _, _ = lane_for(cwd)
+    lane = lane or "UNKNOWN-LANE"
+    sid = inp.get("session_id", "-")
+    inbox = VAULT / region / "Inbox.md"
+    if not (VAULT / region).is_dir():
+        return
+    # one row per session × region × file; the seen-set lives in the state dir
+    seen_f = STATE / "inbox-seen.txt"
+    key = f"{sid}\t{region}\t{what}"
+    try:
+        seen = set(seen_f.read_text(encoding="utf-8").splitlines()) if seen_f.is_file() else set()
+    except OSError:
+        seen = set()
+    if key in seen:
+        return
+    day = time.strftime("%Y-%m-%d")
+    row = f"- {day} {lane} wrote `{what}` from `{cwd}` (session {sid[:8]}) — fold or verify at your next boot; the writer's own notes live in its lane, not here.\n"
+    new = not inbox.is_file()
+    try:
+        with open(inbox, "a", encoding="utf-8") as fh:
+            if new:
+                fh.write(f"# {region} — Inbox\n\nAppend-only. Rows are written by the Gedächtnis hooks when ANOTHER lane works in this region or its repo, so the record lands where the work happened. The owning lane folds each row into its state files at its next boot and deletes it here.\n\n")
+            fh.write(row)
+        STATE.mkdir(parents=True, exist_ok=True)
+        with open(seen_f, "a", encoding="utf-8") as fh:
+            fh.write(key + "\n")
+    except OSError:
+        return
+    rel = f"{region}/Inbox.md"
+    sha = commit_path_limited(VAULT, rel, f"{region} Inbox: {lane} wrote {what.split('/')[-1]}")
+    log("chore", f"inbox\t{region}\t{lane}\t{what}\tcommit={sha}")
+    context(EV, f"Recorded in {rel} that {lane} wrote `{what}` (this region is not this session's lane). The owning lane sees it at its next boot"
+                + (f"; committed {sha}." if sha else "; NOT committed (see chore.log)."))
+
+
 def main() -> None:
     which = sys.argv[1] if len(sys.argv) > 1 else ""
     inp = read_input()
-    {"artifact": do_artifact, "write": do_write}.get(which, lambda _i: None)(inp)
+    {"artifact": do_artifact, "write": do_write, "inbox": do_inbox}.get(which, lambda _i: None)(inp)
 
 
 if __name__ == "__main__":
