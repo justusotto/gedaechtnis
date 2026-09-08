@@ -68,6 +68,14 @@ def main() -> None:
             lines.append("- Owner answers in ~/Downloads: UNREADABLE (owner_pages_status.py exit 2 — a TCC-blocked listing looks empty; do not read as zero).")
         else:
             lines.append(f"- Owner answers in ~/Downloads: UNMEASURED (owner_pages_status.py rc={rc}).")
+    envf = os.environ.get("CLAUDE_ENV_FILE")
+    if envf:
+        try:
+            with open(envf, "a", encoding="utf-8") as fh:
+                fh.write("export PYTHONDONTWRITEBYTECODE=1\n")
+            lines.append("- PYTHONDONTWRITEBYTECODE=1 is set for this session's shells: no __pycache__/.pyc droppings inside arcs.")
+        except OSError:
+            pass
     log("session", f"{sid}\tlane={lane}\tcwd={cwd}\thead={vault_head}")
     context(EV, "\n".join(lines))
 

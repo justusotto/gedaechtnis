@@ -128,9 +128,54 @@ def do_write(inp: dict) -> None:
                 notes.append(f"SHA tokens in the text just written to {rel} that resolve in NO fleet repo or the vault: "
                              f"{', '.join(bad)}. A SHA is read back from `git log -1 --format=%h`, never written from expectation "
                              "(Global/Errata 'A commit SHA written from expectation…').")
+    old_text = ti.get("old_string") or ""
+    if p.suffix == ".md" and old_text and new_text:
+        gone = vanished_terms(old_text, new_text)
+        if gone:
+            hits = other_occurrences(gone, exclude=p)
+            if hits:
+                lines = [f"Change-everywhere lookup: the edit to {rel} removed or renamed {len(gone)} term(s) that still occur elsewhere in the vault:"]
+                for term, locs in hits.items():
+                    lines.append(f"  `{term}` → " + "; ".join(locs[:8]) + (f"; +{len(locs)-8} more" if len(locs) > 8 else ""))
+                lines.append("A renamed heading or id leaves every wikilink/citation to the old name dangling with no error (Global/Patterns 'A correction that does not locate the ORIGIN does not stop the propagation').")
+                notes.append("\n".join(lines))
     if notes:
         log("chore", f"write\t{rel}\t{' | '.join(n[:80] for n in notes)}")
-        context(EV, " ".join(notes))
+        context(EV, "\n".join(notes))
+
+
+# ---- change-everywhere lookup (his note: "look for all entries of it everywhere so they all get changed") ----
+_HEAD = re.compile(r"^#{1,6}\s+(.+?)\s*$", re.M)
+_ID = re.compile(r"`(q:[A-Z]+-\d{4}-\d{2}-\d{2}-[A-Z0-9-]+|owner-ruling-[a-z0-9-]+|N-\d{4}-\d{2}-\d{2}-[a-z0-9-]+)`")
+
+
+def vanished_terms(old: str, new: str) -> list[str]:
+    """Headings and ids present in the replaced text but absent from the replacement."""
+    terms = set(m.group(1) for m in _HEAD.finditer(old)) | set(_ID.findall(old))
+    keep = set(m.group(1) for m in _HEAD.finditer(new)) | set(_ID.findall(new))
+    return sorted(t for t in (terms - keep) if len(t) >= 6)
+
+
+def other_occurrences(terms: list[str], exclude: Path, limit: int = 12) -> dict[str, list[str]]:
+    out: dict[str, list[str]] = {}
+    skip = ("Workflows/anthropic-archive", ".git/", "/.tools/")
+    for term in terms[:limit]:
+        try:
+            p = subprocess.run(["grep", "-rIl", "--include=*.md", "-F", "--", term, str(VAULT)],
+                               capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=15)
+        except (subprocess.TimeoutExpired, OSError):
+            continue
+        locs = []
+        for line in p.stdout.splitlines():
+            if any(s in line for s in skip):
+                continue
+            q = Path(line)
+            if q.resolve() == exclude.resolve():
+                continue
+            locs.append(vault_rel(q) or line)
+        if locs:
+            out[term] = sorted(locs)
+    return out
 
 
 def main() -> None:
