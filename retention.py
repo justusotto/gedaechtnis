@@ -114,6 +114,7 @@ def closed_date(d: Path) -> str | None:
 
 
 def scan(review_root: Path) -> dict:
+    review_root = review_root.resolve()
     root = repo_root(review_root) or review_root
     tracked = tracked_files(root)
     arcs = sorted(p for p in review_root.iterdir() if p.is_dir() and not p.name.startswith("."))
