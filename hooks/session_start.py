@@ -56,7 +56,7 @@ def main() -> None:
     if OPS.is_file():
         py = str(PY) if PY.is_file() else "python3"
         rc, out, err = sh([py, str(OPS), "--json"], timeout=8)
-        if rc == 0 and out:
+        if rc in (0, 1) and out:                       # owner_pages_status exits 1 when it has findings; 2 = UNREADABLE
             try:
                 j = json.loads(out)
                 st = j.get("status") or j.get("verdict") or ""
