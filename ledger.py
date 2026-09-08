@@ -2,7 +2,8 @@
 """ledger.py — the Channels ledger: one shared, append-only file; rows, not files.
 
     python3 ledger.py append --from CARD --to MINING-OPS --kind fact --ref <path-or-id> "one-line body"
-    python3 ledger.py read   --to MINING-OPS [--since-cursor]      # unread rows for a lane; advances the cursor
+    python3 ledger.py read   --to MINING-OPS --unacked             # rows the lane has not answered (the act is the receipt)
+    python3 ledger.py read   --to MINING-OPS [--since-cursor]      # rows since the lane last LOOKED (advances a cursor; a report, not a receipt)
     python3 ledger.py ack    --from MINING-OPS N-2026-09-08-0007   # a read receipt is a two-word row
     python3 ledger.py check  [--file <ledger>]                     # grammar + monotone ids + size
 
@@ -20,7 +21,7 @@ old id. The append-only hook (gate.py) refuses any write to a ledger file that i
 of well-formed rows.
 """
 from __future__ import annotations
-import argparse, json, os, re, sys, time
+import argparse, fcntl, json, os, re, sys, time
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
 import config
@@ -84,16 +85,28 @@ def append(frm: str, to: str, kind: str, ref: str, body: str) -> str:
         raise SystemExit(f"refused: {err}")
     LEDGER_DIR.mkdir(parents=True, exist_ok=True)
     f = month_file(day)
-    new = not f.exists()
-    with open(f, "a", encoding="utf-8") as fh:
-        if new:
-            fh.write("# Channels ledger — append-only; id\tts\tfrom\tto\tkind\tref\tbody (see gedaechtnis/ledger.py)\n")
-        fh.write(line + "\n")
+    lock = LEDGER_DIR / ".lock"
+    with open(lock, "w") as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)              # mint + append under one lock: no duplicate ids from two lanes
+        rid = mint_id(day)
+        line = f"{rid}\t{ts}\t{frm}\t{to}\t{kind}\t{ref}\t{body}"
+        new = not f.exists()
+        with open(f, "a", encoding="utf-8") as fh:
+            if new:
+                fh.write("# Channels ledger — append-only; id\tts\tfrom\tto\tkind\tref\tbody (see gedaechtnis/ledger.py)\n")
+            fh.write(line + "\n")
     return rid
 
 
 def cursor_path(lane: str) -> Path:
     return STATE / f"ledger-cursor-{lane}.txt"
+
+
+def unacked(to: str) -> list[tuple]:
+    """Rows addressed to `to` (or *) that `to` has not answered with a read/ack row. No cursor: the act is the receipt."""
+    rows = all_rows()
+    answered = {r[5] for r in rows if r[2] == to and r[4] in ("read", "ack")}
+    return [r for r in rows if r[3] in (to, "*") and r[2] != to and r[0] not in answered]
 
 
 def read(to: str, since_cursor: bool) -> list[tuple]:
@@ -134,7 +147,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(); sub = ap.add_subparsers(dest="cmd", required=True)
     a = sub.add_parser("append"); a.add_argument("--from", dest="frm", required=True); a.add_argument("--to", required=True)
     a.add_argument("--kind", choices=KINDS, required=True); a.add_argument("--ref", default="-"); a.add_argument("body")
-    r = sub.add_parser("read"); r.add_argument("--to", required=True); r.add_argument("--since-cursor", action="store_true"); r.add_argument("--json", action="store_true")
+    r = sub.add_parser("read"); r.add_argument("--to", required=True); r.add_argument("--since-cursor", action="store_true"); r.add_argument("--unacked", action="store_true"); r.add_argument("--json", action="store_true")
     k = sub.add_parser("ack"); k.add_argument("--from", dest="frm", required=True); k.add_argument("row_id"); k.add_argument("--kind", choices=("read", "ack"), default="read")
     c = sub.add_parser("check"); c.add_argument("--file")
     args = ap.parse_args()
@@ -146,7 +159,7 @@ def main() -> int:
             raise SystemExit(f"refused: {args.row_id} is not a row in the ledger")
         print(append(args.frm, rows[args.row_id][2], args.kind, args.row_id, f"{args.kind} {args.row_id}")); return 0
     if args.cmd == "read":
-        rows = read(args.to, args.since_cursor)
+        rows = unacked(args.to) if args.unacked else read(args.to, args.since_cursor)
         if args.json:
             print(json.dumps([dict(zip(("id", "ts", "from", "to", "kind", "ref", "body"), r)) for r in rows], indent=1))
         else:

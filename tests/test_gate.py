@@ -4,7 +4,7 @@ suite never reads the real vault or writes the real ~/.claude/gedaechtnis (Globa
 that writes the application's real sidecar makes its own verdict depend on the machine's state).
 """
 from __future__ import annotations
-import json, os, subprocess, sys
+import json, os, re, subprocess, sys
 from pathlib import Path
 import pytest
 
@@ -99,8 +99,11 @@ def test_claude_launch_without_model_denied(world):
 def test_claude_launch_pinned_allowed(world):
     assert bash(world, "claude -p 'hello' --model claude-sonnet-5 --effort medium") is None
 
-def test_claude_launch_model_but_no_effort_denied(world):
-    assert decision(bash(world, "claude -p 'hello' --model claude-sonnet-5")) == "deny"
+def test_claude_launch_model_but_no_effort_denied_only_under_owner_policy(world):
+    assert bash(world, "claude -p 'hello' --model claude-sonnet-5") is None
+    env = dict(world["env"], GEDAECHTNIS_REQUIRE_LAUNCH_EFFORT="1")
+    res = run("gate.py", "bash", {"cwd": str(world["repo"]), "tool_name": "Bash", "tool_input": {"command": "claude -p 'hello' --model claude-sonnet-5"}}, env)
+    assert decision(res) == "deny"
 
 def test_claude_subcommands_exempt(world):
     assert bash(world, "claude plugin list") is None
@@ -124,8 +127,8 @@ HOMEDIR = "/" + "Users/someone"
     "sqlite3 anki_mining.db 'DELETE FROM cards'",
     "find media/ -name '*.mp3' -delete",
 ])
-def test_destructive_on_protected_denied(world, cmd):
-    assert decision(bash(world, cmd)) == "deny"
+def test_destructive_on_protected_refuses_and_asks(world, cmd):
+    assert decision(bash(world, cmd)) == "ask"          # refuse AND ask: the owner may still say yes
 
 @pytest.mark.parametrize("cmd", [
     "rm -rf /tmp/build",
@@ -183,10 +186,13 @@ def test_concilium_stem_always_denied(world):
 def agent(w, ti):
     return run("gate.py", "agent", {"cwd": str(w["repo"]), "tool_name": "Agent", "tool_input": ti}, w["env"])
 
-def test_agent_without_model_denied(world):
+def test_agent_without_model_denied_only_under_owner_policy(world):
+    assert agent(world, {"subagent_type": "general-purpose", "prompt": "x"}) is None
+    world["env"]["GEDAECHTNIS_REQUIRE_AGENT_MODEL"] = "1"
     assert decision(agent(world, {"subagent_type": "general-purpose", "prompt": "x"})) == "deny"
 
 def test_agent_pinned_or_fork_or_defined_allowed(world):
+    world["env"]["GEDAECHTNIS_REQUIRE_AGENT_MODEL"] = "1"
     assert agent(world, {"subagent_type": "general-purpose", "prompt": "x", "model": "sonnet"}) is None
     assert agent(world, {"subagent_type": "fork", "prompt": "x"}) is None
     d = world["repo"] / ".claude" / "agents"; d.mkdir(parents=True)
@@ -359,9 +365,13 @@ def test_session_start_reports_inbox_and_ledger(world):
     subprocess.run([sys.executable, str(led), "append", "--from", "CURSUS", "--to", "CARD", "--kind", "fact", "--ref", "-", "a fact for CARD"], env=world["env"], check=True, capture_output=True)
     res = run("session_start.py", "", {"cwd": str(world["repo"]), "session_id": "s1", "source": "startup"}, world["env"])
     ctx = res["hookSpecificOutput"]["additionalContext"]
-    assert "Inbox.md holds 2 unfolded row(s)" in ctx and "ledger: 1 new row(s) addressed to CARD" in ctx
+    assert "Inbox.md holds 2 unfolded row(s)" in ctx and "ledger: 1 row(s) addressed to CARD" in ctx
     res2 = run("session_start.py", "", {"cwd": str(world["repo"]), "session_id": "s2", "source": "startup"}, world["env"])
-    assert "ledger:" not in res2["hookSpecificOutput"]["additionalContext"]        # the cursor advanced
+    assert "ledger: 1 row(s)" in res2["hookSpecificOutput"]["additionalContext"]    # re-announced until ACTED on
+    rid = json.loads(subprocess.run([sys.executable, str(led), "read", "--to", "CARD", "--unacked", "--json"], env=world["env"], capture_output=True, text=True).stdout)[0]["id"]
+    subprocess.run([sys.executable, str(led), "ack", "--from", "CARD", rid], env=world["env"], check=True, capture_output=True)
+    res3 = run("session_start.py", "", {"cwd": str(world["repo"]), "session_id": "s3", "source": "startup"}, world["env"])
+    assert "ledger:" not in res3["hookSpecificOutput"]["additionalContext"]         # the ack is the receipt
 
 
 # ------------------------------------------------------------------------------ the ledger CLI ----
@@ -400,5 +410,93 @@ def test_clone_worktree_create_and_clean_remove(tmp_path):
     # a clone with NEW uncommitted work is never deleted
     p = subprocess.run([sys.executable, str(wt), "create"], input=json.dumps({"cwd": str(src), "name": "dirty"}), capture_output=True, text=True, env=env)
     clone2 = Path(p.stdout.strip().splitlines()[-1]); (clone2 / "unique.txt").write_text("keep me\n")
+    p = subprocess.run([sys.executable, str(wt), "remove"], input=json.dumps({"cwd": str(src), "worktree_path": str(clone2)}), capture_output=True, text=True, env=env)
+    assert clone2.exists() and "unique to the clone" in p.stderr
+
+
+# ------------------------------------------------ council iteration-1 findings (blind seat), fixed ----
+def test_region_of_repo_handles_one_segment_region(world, tmp_path):
+    from pathlib import Path as P
+    import importlib.util, sys as _s
+    spec = importlib.util.spec_from_file_location("common_t", str(HOOKS / "common.py")); m = importlib.util.module_from_spec(spec)
+    _s.modules["common_t"] = m; os.environ["GEDAECHTNIS_VAULT"] = str(world["vault"]); spec.loader.exec_module(m)
+    r = tmp_path / ("atlas-" + "system"); r.mkdir(); (r / "CLAUDE.md").write_text(f"@{world['vault']}/Global/Map.md\n@{world['vault']}/Speculum/Kernel.md\n")
+    assert m.region_of_repo(r) == "Speculum"
+    r2 = tmp_path / "card"; r2.mkdir(); (r2 / "CLAUDE.md").write_text(f"@{world['vault']}/Mnemosyne/UkrainianCard/Kernel.md\n")
+    assert m.region_of_repo(r2) == "Mnemosyne/UkrainianCard"
+
+def test_bash_writes_go_through_the_partition_door(world):
+    v = world["vault"]; world["state"].mkdir(parents=True, exist_ok=True); (world["state"] / "partition.mode").write_text("deny")
+    assert decision(bash(world, f"echo hi >> {v}/Speculum/Position.md")) == "deny"
+    assert decision(bash(world, f"sed -i '' 's/a/b/' {v}/Speculum/Position.md")) == "deny"
+    assert decision(bash(world, f"cp /tmp/x.md {v}/Speculum/Position.md")) == "deny"
+    assert bash(world, f"echo hi >> {v}/Mnemosyne/UkrainianCard/Position.md") is None                     # own lane
+    assert bash(world, f"echo '- 2026-09-08 CARD x' >> {v}/Speculum/Inbox.md") is None                     # append to a shared surface
+    assert decision(bash(world, f"echo x > {v}/Speculum/Inbox.md")) == "deny"                              # overwrite of a shared surface
+    assert decision(bash(world, f"touch {v}/Concilium/Position.md")) == "deny"                             # stem rule via Bash
+
+def test_umbrella_shared_files_are_append_only_even_for_declaring_lanes(world):
+    v = world["vault"]; (v / "Mnemosyne" / "Position.md").write_text("# Mnemosyne Position\n\n- old\n")
+    marker = world["repo"] / ".atlas-lane"; marker.write_text(marker.read_text() + "path: Mnemosyne/Position.md\n")
+    world["state"].mkdir(parents=True, exist_ok=True); (world["state"] / "partition.mode").write_text("deny")
+    f = v / "Mnemosyne" / "Position.md"
+    ok = run("gate.py", "write", {"cwd": str(world["repo"]), "tool_name": "Edit", "session_id": "t", "tool_input": {
+        "file_path": str(f), "old_string": "- old\n", "new_string": "- old\n- CARD: new line\n"}}, world["env"])
+    assert ok is None
+    bad = run("gate.py", "write", {"cwd": str(world["repo"]), "tool_name": "Edit", "session_id": "t", "tool_input": {
+        "file_path": str(f), "old_string": "- old", "new_string": "- rewritten"}}, world["env"])
+    assert decision(bad) == "deny"
+
+
+
+# ------------------------------------------------ council iteration-1 findings (Caspar, Melchior, Balthasar), fixed ----
+def test_quoted_semicolon_in_commit_message_is_not_a_bare_commit(world):
+    v = world["vault"]
+    assert bash(world, f"git -C {v} commit -m 'fix a; b | c' -- Global/Map.md") is None
+    heredoc = "\n".join([f'git -C {v} commit -m "$(cat <<' + "'EOF'", "one; two | three", "EOF", ')" -- Global/Map.md'])
+    assert bash(world, heredoc) is None
+
+def test_commit_am_and_bash_c_and_git_dir_are_caught(world):
+    v = world["vault"]
+    assert decision(bash(world, f'git -C {v} commit -am "x" -- Global/Map.md')) == "deny"
+    assert decision(bash(world, f'bash -c "git -C {v} add -A"')) == "deny"
+    assert decision(bash(world, f"git --git-dir={v}/.git add -A")) == "deny"
+
+def test_git_rm_cached_is_not_a_data_deletion_but_the_pathspec_commit_trap_is_caught(world):
+    v = world["vault"]
+    res = bash(world, f"git -C {v} rm --cached -- x.md && git -C {v} commit -m 'untrack' -- x.md")
+    assert decision(res) == "deny" and "DISCARDS the staged deletion" in res["hookSpecificOutput"]["permissionDecisionReason"]
+    assert bash(world, f"git -C {v} rm --cached -- x.md; S=$(git -C {v} diff --cached --name-only); [ \"$S\" = x.md ] || exit 9; git -C {v} commit -F /tmp/m") is None
+
+def test_vault_cwd_session_is_the_owners_hand(world):
+    world["state"].mkdir(parents=True, exist_ok=True); (world["state"] / "partition.mode").write_text("deny")
+    assert write(world, world["vault"] / "Speculum" / "Position.md", cwd=str(world["vault"])) is None
+
+def test_queue_continuation_must_be_keyed(world):
+    q = world["vault"] / "Pharos" / "queues" / "regions" / "mining-ops.md"; q.write_text("- [ ] `q:MN-2026-09-01-X-1` r | q:MN-2026-09-01-X-1\n")
+    world["state"].mkdir(parents=True, exist_ok=True); (world["state"] / "partition.mode").write_text("deny")
+    ok = run("gate.py", "write", {"cwd": str(world["repo"]), "tool_name": "Write", "session_id": "t", "tool_input": {"file_path": str(q), "content": q.read_text() + "  - note: from CARD\n"}}, world["env"])
+    assert ok is None
+    bad = run("gate.py", "write", {"cwd": str(world["repo"]), "tool_name": "Write", "session_id": "t", "tool_input": {"file_path": str(q), "content": q.read_text() + "  - free prose\n"}}, world["env"])
+    assert decision(bad) == "deny"
+
+def test_clone_remove_keeps_side_branches_and_files_in_untracked_dirs(tmp_path):
+    src = tmp_path / "src"; src.mkdir(); subprocess.run(["git", "init", "-q", str(src)], check=True)
+    (src / "a.txt").write_text("a\n"); (src / "scratch").mkdir(); (src / "scratch" / "old.txt").write_text("o\n")
+    subprocess.run(["git", "-C", str(src), "add", "a.txt"], check=True)
+    subprocess.run(["git", "-C", str(src), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "one"], check=True)
+    env = dict(os.environ, GEDAECHTNIS_WORKTREES=str(tmp_path / "wts"), GEDAECHTNIS_NO_TRASH="1")
+    wt = Path(__file__).resolve().parents[1] / "hooks" / "worktree.py"
+    p = subprocess.run([sys.executable, str(wt), "create"], input=json.dumps({"cwd": str(src), "name": "side"}), capture_output=True, text=True, env=env)
+    clone = Path(p.stdout.strip().splitlines()[-1])
+    subprocess.run(["git", "-C", str(clone), "checkout", "-q", "-b", "side-branch"], check=True)
+    (clone / "b.txt").write_text("b\n"); subprocess.run(["git", "-C", str(clone), "add", "b.txt"], check=True)
+    subprocess.run(["git", "-C", str(clone), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "side"], check=True)
+    subprocess.run(["git", "-C", str(clone), "checkout", "-q", "-"], check=True)
+    p = subprocess.run([sys.executable, str(wt), "remove"], input=json.dumps({"cwd": str(src), "worktree_path": str(clone)}), capture_output=True, text=True, env=env)
+    refs = subprocess.run(["git", "-C", str(src), "for-each-ref", "--format=%(refname)", "refs/gedaechtnis/"], capture_output=True, text=True).stdout
+    assert re.search(r"refs/gedaechtnis/side-[0-9-]+/branches/side-branch", refs), refs
+    p = subprocess.run([sys.executable, str(wt), "create"], input=json.dumps({"cwd": str(src), "name": "dirt"}), capture_output=True, text=True, env=env)
+    clone2 = Path(p.stdout.strip().splitlines()[-1]); (clone2 / "scratch" / "new.txt").write_text("unique\n")
     p = subprocess.run([sys.executable, str(wt), "remove"], input=json.dumps({"cwd": str(src), "worktree_path": str(clone2)}), capture_output=True, text=True, env=env)
     assert clone2.exists() and "unique to the clone" in p.stderr

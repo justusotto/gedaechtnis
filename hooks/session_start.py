@@ -42,9 +42,13 @@ def main() -> None:
     except OSError:
         pass
     STATE.mkdir(parents=True, exist_ok=True)
-    (STATE / "session-start.json").write_text(json.dumps({
+    import hashlib
+    key = hashlib.sha1(cwd.encode()).hexdigest()[:10]
+    payload = json.dumps({
         "session_id": sid, "cwd": cwd, "lane": lane, "marker": str(marker) if marker else None,
-        "vault_head": vault_head, "partition_mode": mode, "ts": time.strftime("%Y-%m-%dT%H:%M:%S")}, indent=1), encoding="utf-8")
+        "vault_head": vault_head, "partition_mode": mode, "ts": time.strftime("%Y-%m-%dT%H:%M:%S")}, indent=1)
+    (STATE / f"session-start-{key}.json").write_text(payload, encoding="utf-8")   # per lane repo: seven lanes never overwrite each other
+    (STATE / "session-start.json").write_text(payload, encoding="utf-8")            # the latest, for a reader that knows no cwd
     lines = ["Gedächtnis session facts (hook-generated):"]
     if lane:
         lines.append(f"- Lane {lane}, declared by {marker}; vault write partition: {', '.join(prefixes)}.")
@@ -79,12 +83,12 @@ def main() -> None:
                         lines.append(f"- {pre}/Inbox.md holds {n} unfolded row(s) written by other lanes about work in this region: read and fold them first.")
         led = Path(__file__).resolve().parent.parent / "ledger.py"
         if led.is_file():
-            rc, out, _ = sh([sys.executable, str(led), "read", "--to", lane, "--since-cursor", "--json"], timeout=8)
+            rc, out, _ = sh([sys.executable, str(led), "read", "--to", lane, "--unacked", "--json"], timeout=8)
             if rc == 0 and out.strip():
                 try:
                     rows = json.loads(out)
                     if rows:
-                        lines.append(f"- Channels ledger: {len(rows)} new row(s) addressed to {lane} since the last boot (ids {rows[0]['id']} … {rows[-1]['id']}); reply with `gedaechtnis/ledger.py ack --from {lane} <id>`.")
+                        lines.append(f"- Channels ledger: {len(rows)} row(s) addressed to {lane} not yet answered (ids {rows[0]['id']} … {rows[-1]['id']}); they are re-announced every boot until `gedaechtnis/ledger.py ack --from {lane} <id>`.")
                 except json.JSONDecodeError:
                     pass
     envf = os.environ.get("CLAUDE_ENV_FILE")

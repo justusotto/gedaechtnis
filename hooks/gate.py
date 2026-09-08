@@ -17,8 +17,10 @@ from __future__ import annotations
 import re, sys, os
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import (read_input, deny, log, expand, under, vault_rel, lane_for, path_in_partition,
+from common import (read_input, deny, ask, log, expand, under, vault_rel, lane_for, path_in_partition,
                     VAULT, HOME, STATE, ROLE_STEMS, guarded, shared_surface, pure_append)
+import shlex
+import config as _cfg
 
 EV = "PreToolUse"
 
@@ -28,8 +30,58 @@ _SPLIT = re.compile(r"\s*(?:&&|\|\||;|\n|\|)\s*")
 _GIT_C = re.compile(r"(?:^|\s)-C\s+(\S+)")
 
 
+def _split_shell(cmd: str) -> list[str]:
+    """Split on && || ; | and newlines OUTSIDE quotes, $( ), and heredoc bodies. Conservative: on any doubt
+    the text stays in one segment (an under-split can only make a rule miss; an over-split made it refuse
+    legitimate commits — Balthasar, council 2026-09-08)."""
+    out, cur, i, n = [], [], 0, len(cmd)
+    q = None; depth = 0; heredoc = None
+    while i < n:
+        c = cmd[i]
+        if heredoc is not None:
+            cur.append(c)
+            if c == "\n":
+                j = cmd.find("\n", i + 1); line = cmd[i + 1: j if j != -1 else n]
+                if line.strip() == heredoc:
+                    cur.append(line); i = (j if j != -1 else n); heredoc = None
+                    continue
+            i += 1; continue
+        if q:
+            cur.append(c)
+            if c == "\\" and q == '"' and i + 1 < n:
+                cur.append(cmd[i + 1]); i += 2; continue
+            if c == q:
+                q = None
+            i += 1; continue
+        if c in ("'", '"'):
+            q = c; cur.append(c); i += 1; continue
+        if cmd.startswith("$(", i):
+            depth += 1; cur.append("$("); i += 2; continue
+        if c == ")" and depth:
+            depth -= 1; cur.append(c); i += 1; continue
+        if depth:
+            cur.append(c); i += 1; continue
+        m = re.match(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1", cmd[i:])
+        if m:
+            heredoc = m.group(2); cur.append(m.group(0)); i += len(m.group(0)); continue
+        if cmd.startswith("&&", i) or cmd.startswith("||", i):
+            out.append("".join(cur)); cur = []; i += 2; continue
+        if c in ";|\n":
+            out.append("".join(cur)); cur = []; i += 1; continue
+        cur.append(c); i += 1
+    out.append("".join(cur))
+    return [x.strip() for x in out if x.strip()]
+
+
 def segments(cmd: str) -> list[str]:
-    return [s.strip() for s in _SPLIT.split(cmd) if s.strip()]
+    out = []
+    for s in _split_shell(cmd):
+        m = re.match(r"^(?:bash|sh|zsh|/bin/(?:ba|z)?sh)\s+(?:-[a-zA-Z]*c\s+)(['\"])(.*)\1\s*$", s, re.S)
+        if m:
+            out.extend(segments(m.group(2)))      # `bash -c "git … add -A"` is still a git command
+            continue
+        out.append(s)
+    return out
 
 
 def git_segments(cmd: str, cwd: str | None):
@@ -49,6 +101,9 @@ def git_segments(cmd: str, cwd: str | None):
             continue
         m = _GIT_C.search(seg)
         repo = expand(m.group(1), str(cur)) if m else cur
+        g = re.search(r"--git-dir[= ](\S+)", seg)
+        if g:
+            repo = expand(g.group(1), str(cur)).parent if expand(g.group(1), str(cur)).name == ".git" else expand(g.group(1), str(cur))
         yield seg, repo
 
 
@@ -74,18 +129,24 @@ def rule_vault_git(cmd: str, cwd: str | None) -> str | None:
                     "automated committer runs…')")
         if sub == "commit":
             body = seg[seg.index("commit")+6:]
-            if re.search(r"(?:\s|^)(?:-a|--all)(?:\s|$)", body):
+            if re.search(r"(?:\s|^)(?:-[a-zA-Z]*a[a-zA-Z]*|--all)(?:\s|$)", body):
                 return "Vault law: never `git commit -a` in ~/Atlas. Commit path-limited: `git -C ~/Atlas commit -m '<msg>' -- <file>`."
             if "--amend" in body:
                 return ("Vault law: NO-AMEND — never `git commit --amend` on an Atlas commit; forward-fix with a new commit. "
                         "(Speculum/Kernel 'Standing constraints')")
             m = re.search(r'-m\s+"([^"]*)"', body)
-            if m and ("`" in m.group(1) or "$(" in m.group(1)):
+            if m and ("`" in m.group(1) or "$(" in m.group(1)) and not re.match(r"^\$\(cat\s*<<", m.group(1).strip()):
+                # `-m "$(cat <<'EOF' … EOF)"` is the DELIBERATE quoted-heredoc idiom, not an accident
                 return ("A backtick or `$(` inside a DOUBLE-quoted `git commit -m` is command-substituted: the word vanishes "
                         "and the commit still succeeds, permanently (NO-AMEND). Use single quotes, or `git commit -F <msgfile>`. "
                         "(Global/Errata 'Backticks inside a DOUBLE-quoted git commit -m…')")
             has_pathspec = re.search(r"\s--(?:\s|$)", body) is not None
             assert_form = "diff --cached --name-only" in cmd
+            if has_pathspec and re.search(r"\brm\s+(?:-r\s+)?--cached\b", cmd):
+                return ("`git rm --cached` followed by a pathspec commit (`commit … -- <paths>`) commits the WORKING TREE and silently "
+                        "DISCARDS the staged deletion — the commit lies about its contents. Use the stage → ASSERT "
+                        "(`diff --cached --name-only`) → commit-with-NO-pathspec form in one invocation. (Global/Errata "
+                        "'`git commit -- <paths>` commits the WORKING TREE and DISCARDS what you staged…')")
             if not has_pathspec and not assert_form and "-F" not in body and "--file" not in body:
                 return ("Vault law: never a bare `git commit` in ~/Atlas — the pathspec is the guarantee. Use "
                         "`git -C ~/Atlas commit -m '<msg>' -- <file>`; or, ONLY for a `git rm --cached`, the stage→ASSERT "
@@ -124,7 +185,7 @@ def rule_launch_model(cmd: str) -> str | None:
                     "silent routing authority — a bare launch once routed a seven-worker wave to Fable at 2× cost. "
                     "Add `--model <id> --effort <level>` from the queue row. (Global/Errata 'A settings-file model "
                     "default is silent routing authority…'; Global/Map §Models)")
-        if "--effort" not in w and not any(x.startswith("--effort=") for x in w):
+        if _cfg.flag("require_launch_effort") and "--effort" not in w and not any(x.startswith("--effort=") for x in w):
             return ("This `claude` launch pins `--model` but not `--effort`; the platform default is `high`, and the "
                     "ruled defaults hold ONLY if the launch pins them. Add `--effort <low|medium|high>`. (Global/Map §Models)")
     return None
@@ -138,7 +199,7 @@ _PROTECTED = [
     (re.compile(r"\.Trash"), "the Trash is NEVER emptied — it is his permanent restore net"),
     (re.compile(r"(?:~|/Users/[^/\s]+|\$HOME|\$\{HOME\})/Atlas(?:/|\s|$)"), "the vault and its history"),
 ]
-_DESTROY = re.compile(r"(?:^|\s)(?:rm|unlink|shred|rmdir)\s|\bfind\b.*\s-delete\b|\bgit\s+clean\b|>\s*\S*_cache\.json")
+_DESTROY = re.compile(r"(?<!git )(?:^|\s)(?:rm|unlink|shred|rmdir)\s|\bfind\b.*\s-delete\b|\bgit\s+clean\b|>\s*\S*_cache\.json")
 
 
 def rule_data_integrity(cmd: str) -> str | None:
@@ -187,17 +248,86 @@ def rule_artifact_not_file(cmd: str, cwd: str | None) -> str | None:
     return None
 
 
+_WRITE_VERBS = {"tee", "cp", "mv", "rm", "touch", "truncate", "install"}
+
+
+def bash_write_targets(cmd: str, cwd: str | None) -> list[tuple[Path, str]]:
+    """Heuristic: vault paths a Bash command writes. (path, how) — how ∈ redirect-append · redirect · sed-i · verb."""
+    out = []
+    for seg in segments(cmd):
+        try:
+            w = shlex.split(seg)
+        except ValueError:
+            w = seg.split()
+        for i, tok in enumerate(w):
+            if tok in (">", ">>") and i + 1 < len(w):
+                out.append((expand(w[i + 1], cwd), "redirect-append" if tok == ">>" else "redirect"))
+            elif tok.startswith(">>"):
+                out.append((expand(tok[2:], cwd), "redirect-append"))
+            elif tok.startswith(">") and len(tok) > 1 and not tok.startswith(">&"):
+                out.append((expand(tok[1:], cwd), "redirect"))
+        if not w:
+            continue
+        j = 0
+        while j < len(w) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", w[j]):
+            j += 1
+        if j >= len(w):
+            continue
+        verb = w[j]
+        if verb == "sed" and any(x.startswith("-i") for x in w[j + 1:]):
+            for x in w[j + 1:]:
+                if not x.startswith("-") and not x.startswith("s") and "/" in x:
+                    out.append((expand(x, cwd), "sed-i"))
+        elif verb in _WRITE_VERBS:
+            args = [x for x in w[j + 1:] if not x.startswith("-")]
+            if verb in ("cp", "mv", "install") and args:
+                out.append((expand(args[-1], cwd), verb))
+            elif verb in ("tee", "rm", "touch", "truncate"):
+                for x in args:
+                    out.append((expand(x, cwd), verb))
+    return [(p, how) for p, how in out if under(p, VAULT)]
+
+
+def rule_bash_partition(cmd: str, inp: dict) -> str | None:
+    cwd = inp.get("cwd")
+    targets = bash_write_targets(cmd, cwd)
+    if not targets:
+        return None
+    lane, prefixes, marker = lane_for(cwd)
+    mode = partition_mode()
+    sid = inp.get("session_id", "-")
+    for p, how in targets:
+        rel = vault_rel(p) or ""
+        if rel.startswith("Concilium/") and p.stem in ROLE_STEMS:
+            return f"Concilium STEM RULE: `{rel}` carries a vault role stem; refused (Bash write via {how})."
+        kind = shared_surface(rel)
+        if lane and path_in_partition(rel, prefixes) and kind != "umbrella-shared":
+            continue
+        if kind and how == "redirect-append":
+            log("partition", f"{mode}\t{lane}\t{rel}\tshared={kind}\tbash-append\tsession={sid}")
+            continue                                   # `>>` to a shared surface: the append exception (row grammar checked by the chore)
+        log("partition", f"{mode}\t{lane or 'UNKNOWN-LANE'}\t{rel}\tbash={how}\tsession={sid}")
+        if mode == "deny":
+            return (f"Bash write ({how}) to `{rel}`, outside lane {lane or 'UNKNOWN'}'s partition. The partition door binds Bash "
+                    "writes too: use `>>` for a keyed-row append to a shared surface, or relay. (Speculum/Kernel 'Never write another lane's partition')")
+    return None
+
+
 def do_bash(inp: dict) -> None:
     cmd = (inp.get("tool_input") or {}).get("command") or ""
     cwd = inp.get("cwd")
     if not cmd:
         return
     for fn in (lambda: rule_vault_git(cmd, cwd), lambda: rule_launch_model(cmd),
-               lambda: rule_data_integrity(cmd), lambda: rule_artifact_not_file(cmd, cwd)):
+               lambda: rule_data_integrity(cmd), lambda: rule_artifact_not_file(cmd, cwd),
+               lambda: rule_bash_partition(cmd, inp)):
         r = fn()
         if r:
             log("deny", f"bash\t{r.split('.')[0][:80]}\t{cmd[:200].replace(chr(10),' ')}")
-            deny(EV, r)
+            if r.startswith("Defaults never delete") or r.startswith("The Trash is never emptied") or r.startswith("Destructive SQL"):
+                ask(EV, r)                            # data-destroying acts REFUSE AND ASK: the owner may still say yes
+            else:
+                deny(EV, r)
             return
 
 
@@ -230,6 +360,9 @@ def do_write(inp: dict) -> None:
     lane, prefixes, marker = lane_for(cwd)
     mode = partition_mode()
     sid = inp.get("session_id", "-")
+    if lane is None and cwd and under(expand(cwd), VAULT):
+        log("partition", f"ok\tVAULT-CWD\t{rel}\tsession={sid}")
+        return                                   # a session opened in the vault itself is the owner's own hand
     if lane is None:
         log("partition", f"{mode}\tUNKNOWN-LANE\t{rel}\tcwd={cwd}\tsession={sid}")
         if mode == "deny":
@@ -237,9 +370,10 @@ def do_write(inp: dict) -> None:
                       "~/Atlas. Lane identity is DECLARED, never inferred: open the session in the repo that owns this "
                       "region, or relay through your outbox. (Speculum/Kernel 'Never write another lane's partition')"))
         return
-    if path_in_partition(rel, prefixes):
-        return
     kind = shared_surface(rel)
+    if path_in_partition(rel, prefixes) and kind != "umbrella-shared":
+        log("partition", f"ok\t{lane}\t{rel}\tsession={sid}")
+        return
     if kind:
         ok, why = pure_append(kind, p, inp.get("tool_name") or "Edit", ti)
         log("partition", f"{mode}\t{lane}\t{rel}\tshared={kind}\tappend={'ok' if ok else 'NO'}\t{why}\tsession={sid}")
@@ -293,6 +427,8 @@ def do_agent(inp: dict) -> None:
         return
     if agent_definition_has_model(kind, inp.get("cwd")):
         return
+    if not _cfg.flag("require_agent_model"):
+        return                                   # a stranger's default: never deny a built-in agent on first use
     deny(EV, (f"This Agent call names no `model` and `{kind or 'general-purpose'}` has no `model:` in its definition, so it "
               "would inherit the session model — under Fable that is 2× Opus, silently. Pin `model: \"sonnet\"|\"opus\"|"
               "\"haiku\"` per the task→model table (judge-class = sonnet medium; build = opus medium). (Global/Map §Models)"))

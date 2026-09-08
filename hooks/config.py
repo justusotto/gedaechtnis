@@ -105,3 +105,14 @@ def no_trash() -> bool:
     """GEDAECHTNIS_NO_TRASH=1 leaves a bundle/clone in place instead of sending it to the Trash.
     Nothing here ever deletes either way; this only removes the Finder round trip."""
     return bool(os.environ.get("GEDAECHTNIS_NO_TRASH"))
+
+
+def flag(key: str, default: bool = False) -> bool:
+    """A boolean policy from the JSON layer (env GEDAECHTNIS_<KEY>=1/0 wins). Owner-fleet policies such as
+    `require_agent_model` and `require_launch_effort` default to False: a stranger's install must not deny
+    an Agent call or a launch on first use for a rule that is one owner's cost policy."""
+    env = os.environ.get("GEDAECHTNIS_" + key.upper())
+    if env is not None:
+        return env.strip() not in ("", "0", "false", "no")
+    v = _load().get(key)
+    return bool(v) if v is not None else default

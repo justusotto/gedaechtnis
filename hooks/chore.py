@@ -8,7 +8,7 @@ A chore never denies (the act already happened). It repairs what is mechanically
 reports the rest as `additionalContext` — factual statements, never orders.
 """
 from __future__ import annotations
-import json, re, subprocess, sys, time
+import json, os, re, subprocess, sys, time
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import (read_input, context, log, expand, under, vault_rel, fleet_repos, VAULT, STATE, guarded,
@@ -78,7 +78,9 @@ def do_artifact(inp: dict) -> None:
         txt = txt[:j + 1] + row + txt[j + 1:] if j != -1 else txt[:i] + row + "\n" + txt[i:]
     else:
         txt = txt.rstrip("\n") + "\n" + row
-    INDEX.write_text(txt, encoding="utf-8")
+    tmp = INDEX.with_suffix(".md.tmp-" + uid[:8])
+    tmp.write_text(txt, encoding="utf-8")
+    os.replace(tmp, INDEX)                                  # atomic: no reader ever sees a half-written index
     sha = commit_path_limited(VAULT, "Pharos/artifacts-index.md", f"artifacts-index: {title} ({uid[:8]})")
     log("chore", f"artifact-index\t{uid}\t{title}\tcommit={sha}")
     context(EV, f"Artifact {uid} (“{title}”) is now a row in ~/Atlas/Pharos/artifacts-index.md"

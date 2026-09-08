@@ -49,6 +49,12 @@ def deny(event: str, reason: str) -> None:
                                              "permissionDecisionReason": reason}}))
 
 
+def ask(event: str, reason: str) -> None:
+    print(json.dumps({"hookSpecificOutput": {"hookEventName": event,
+                                             "permissionDecision": "ask",
+                                             "permissionDecisionReason": reason}}))
+
+
 def context(event: str, text: str) -> None:
     print(json.dumps({"hookSpecificOutput": {"hookEventName": event, "additionalContext": text}}))
 
@@ -167,6 +173,10 @@ def shared_surface(rel: str) -> str | None:
         return "queue"
     if _re.match(r"^[^/]+/[^/]+/Inbox\.md$", rel) or _re.match(r"^Speculum/Inbox\.md$", rel):
         return "inbox"
+    if rel == "Pharos/artifacts-index.md":
+        return "artifacts-index"
+    if rel in ("Mnemosyne/Canon.md", "Mnemosyne/Position.md"):
+        return "umbrella-shared"          # ACT2: shared by four lanes, atomic single-Edit APPENDS only
     return None
 
 
@@ -174,9 +184,13 @@ def row_ok(kind: str, line: str) -> bool:
     if kind == "ledger":
         return _re.match(r"^N-\d{4}-\d{2}-\d{2}-\d{4}\t\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\t[A-Z][A-Z0-9-]*\t(?:[A-Z][A-Z0-9-]*|\*)\t(?:fact|notice|request|handoff|read|ack)\t[^\t]*\t[^\t]*$", line) is not None
     if kind == "queue":
-        return _re.match(r"^- \[ \] `q:[A-Z]+-\d{4}-\d{2}-\d{2}-[A-Z0-9-]+`", line) is not None or line.startswith("  - ")
+        return _re.match(r"^- \[ \] `q:[A-Z]+-\d{4}-\d{2}-\d{2}-[A-Z0-9-]+`", line) is not None or _re.match(r"^  - [a-z_]+:", line) is not None
     if kind == "inbox":
         return _re.match(r"^- \d{4}-\d{2}-\d{2} [A-Z][A-Z0-9-]* ", line) is not None
+    if kind == "artifacts-index":
+        return _re.match(r"^\| \d{4}-\d{2}-\d{2} \| [^|]+ \| `[0-9a-f-]{36}` \|$", line) is not None
+    if kind == "umbrella-shared":
+        return bool(line.strip())                 # any content, as long as it is APPENDED
     return False
 
 
@@ -211,8 +225,11 @@ def region_of_repo(repo: Path) -> str | None:
         txt = (repo / "CLAUDE.md").read_text(encoding="utf-8")
     except OSError:
         return None
-    for m in _re.finditer(r"^@" + _re.escape(str(VAULT)) + r"/([^/\s]+/[^/\s]+)/(?:Kernel|Position)\.md", txt, _re.M):
-        if m.group(1).split("/")[0] not in ("Global",):
+    for m in _re.finditer(r"^@" + _re.escape(str(VAULT)) + r"/((?:[^/\s]+/)?[^/\s]+)/(?:Kernel|Position)\.md", txt, _re.M):
+        top = m.group(1).split("/")[0]
+        if top in ("Global", "Pharos", "Channels", "Workflows", "Limen", "Concilium"):
+            continue
+        if "/" in m.group(1) or top == "Speculum":
             return m.group(1)
     return None
 

@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/hooks/gate.py bash",
+            "command": "python3 -B \"${CLAUDE_PLUGIN_ROOT}\"/hooks/gate.py bash",
             "timeout": 10
           }
         ]
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/hooks/gate.py write",
+            "command": "python3 -B \"${CLAUDE_PLUGIN_ROOT}\"/hooks/gate.py write",
             "timeout": 10
           }
         ]
@@ -26,7 +26,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/hooks/gate.py agent",
+            "command": "python3 -B \"${CLAUDE_PLUGIN_ROOT}\"/hooks/gate.py agent",
             "timeout": 10
           }
         ]
@@ -38,7 +38,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/hooks/chore.py artifact",
+            "command": "python3 -B \"${CLAUDE_PLUGIN_ROOT}\"/hooks/chore.py artifact",
             "timeout": 30
           }
         ]
@@ -48,12 +48,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/hooks/chore.py write",
+            "command": "python3 -B \"${CLAUDE_PLUGIN_ROOT}\"/hooks/chore.py write",
             "timeout": 20
           },
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/hooks/chore.py inbox",
+            "command": "python3 -B \"${CLAUDE_PLUGIN_ROOT}\"/hooks/chore.py inbox",
             "timeout": 20
           }
         ]
@@ -65,7 +65,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/hooks/session_start.py",
+            "command": "python3 -B \"${CLAUDE_PLUGIN_ROOT}\"/hooks/session_start.py",
             "timeout": 15
           }
         ]
@@ -76,7 +76,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/hooks/worktree.py create",
+            "command": "python3 -B \"${CLAUDE_PLUGIN_ROOT}\"/hooks/worktree.py create",
             "timeout": 600
           }
         ]
@@ -87,7 +87,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/hooks/worktree.py remove",
+            "command": "python3 -B \"${CLAUDE_PLUGIN_ROOT}\"/hooks/worktree.py remove",
             "timeout": 600
           }
         ]

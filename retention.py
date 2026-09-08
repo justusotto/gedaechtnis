@@ -25,8 +25,9 @@ import config
 DERIVED_DIRS = {"_shots", "shots", "_render_check", "_smoke", "_fonts", "node_modules", "__pycache__",
                 "downloads-dupes", "_stale-dev-renders", "renders", "_renders", "screenshots", "_screens"}
 DERIVED_DIR_PREFIXES = ("_fonts_", "_stale", "_shots", "round-shots")
-DERIVED_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".pdf", ".woff2", ".woff", ".ttf", ".zip", ".pyc",
-               ".mp4", ".mp3", ".wav", ".m4a", ".mov", ".heic", ".tiff", ".tif", ".bmp"}
+# NOT here on purpose: .heic .mov .wav .m4a .mp3 .mp4 .tiff .raw — camera and recording formats are ORIGINALS until a
+# manifest says otherwise (Balthasar, council 2026-09-08). Unknown means irreplaceable.
+DERIVED_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".pdf", ".woff2", ".woff", ".ttf", ".zip", ".pyc"}
 EVIDENCE_EXT = {".md", ".json", ".py", ".sh", ".tsv", ".csv", ".txt", ".js", ".toml", ".yaml", ".yml", ".sql"}
 GENERATOR_GLOBS = ("build_*.py", "*.py", "*.sh", "Makefile", "*.js")
 ROUND_DIR = re.compile(r"^(?:answers[-_])?round[-_]?\d+$", re.I)

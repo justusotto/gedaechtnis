@@ -36,9 +36,16 @@ def create(inp: dict) -> int:
     src = repo_root(cwd) or Path(cwd)
     ROOT.mkdir(parents=True, exist_ok=True)
     dst = ROOT / f"{src.name}--{name}-{time.strftime('%Y%m%d-%H%M%S')}"
-    p = sh(["cp", "-c", "-R", str(src), str(dst)])
+    p = sh(["cp", "-c", "-R", str(src), str(dst)])            # APFS clonefile
     if p.returncode != 0:
-        print(p.stderr, file=sys.stderr); return 1
+        p = sh(["cp", "-R", "--reflink=auto", str(src), str(dst)])   # Linux reflink (Btrfs/XFS) or plain copy
+    if p.returncode != 0:
+        print(f"copy-on-write clone unavailable ({p.stderr.strip()[:120]}); falling back to git worktree", file=sys.stderr)
+        p = sh(["git", "-C", str(src), "worktree", "add", "--detach", str(dst), "HEAD"])
+        if p.returncode != 0:
+            print(p.stderr, file=sys.stderr); return 1
+        (dst / ".gedaechtnis-clone-of").write_text(str(src) + "\nkind: git-worktree\n", encoding="utf-8")
+        print(str(dst)); return 0
     (dst / ".gedaechtnis-clone-of").write_text(str(src) + "\n", encoding="utf-8")
     print(f"clonefile copy of {src} → {dst}", file=sys.stderr)
     print(str(dst))
@@ -52,28 +59,44 @@ def remove(inp: dict) -> int:
     marker = wt / ".gedaechtnis-clone-of"
     if not marker.is_file():
         print(f"{wt} is not a gedaechtnis clone; leaving it alone", file=sys.stderr); return 0
-    src = Path(marker.read_text(encoding="utf-8").strip())
+    mtxt = marker.read_text(encoding="utf-8")
+    src = Path(mtxt.splitlines()[0].strip())
+    if "kind: git-worktree" in mtxt:
+        sh(["git", "-C", str(src), "worktree", "remove", "--force", str(wt)]); return 0
     name = wt.name.split("--", 1)[-1]
     unique = False
     if (wt / ".git").exists() and (src / ".git").exists():
-        f = sh(["git", "-C", str(src), "fetch", "--quiet", str(wt), f"HEAD:refs/gedaechtnis/{name}"])
+        # every branch the clone made, plus HEAD, comes back — a side branch is not lost because only HEAD was fetched
+        f = sh(["git", "-C", str(src), "fetch", "--quiet", str(wt), f"+HEAD:refs/gedaechtnis/{name}/HEAD",
+                f"+refs/heads/*:refs/gedaechtnis/{name}/branches/*"])
         if f.returncode != 0:
             print(f"fetch back failed: {f.stderr.strip()}", file=sys.stderr); unique = True
-        st = sh(["git", "-C", str(wt), "status", "--porcelain"])
-        if st.returncode != 0 or st.stdout.strip():
-            # the source's own dirt is cloned too; only NEW dirt is unique — compare against the source's dirt set
-            src_dirt = set(sh(["git", "-C", str(src), "status", "--porcelain"]).stdout.splitlines())
-            new_dirt = [l for l in st.stdout.splitlines() if l not in src_dirt and not l.endswith(".gedaechtnis-clone-of")]
+        st = sh(["git", "-C", str(wt), "status", "--porcelain", "-uall"])     # -uall: one line PER FILE, never `?? dir/`
+        if st.returncode != 0:
+            unique = True
+        else:
+            src_lines = set(sh(["git", "-C", str(src), "status", "--porcelain", "-uall"]).stdout.splitlines())
+            new_dirt = [l for l in st.stdout.splitlines() if l not in src_lines and not l.endswith(".gedaechtnis-clone-of")]
+            for l in st.stdout.splitlines():                 # same status line on both sides can still differ in CONTENT
+                if l in src_lines and len(l) > 3:
+                    rel = l[3:].strip().strip('"'); a, b = wt / rel, src / rel
+                    try:
+                        if a.is_file() and b.is_file() and a.read_bytes() != b.read_bytes():
+                            new_dirt.append(l)
+                    except OSError:
+                        new_dirt.append(l)
             if new_dirt:
                 unique = True
                 print(f"{len(new_dirt)} uncommitted path(s) unique to the clone — moving it to the Trash, not deleting", file=sys.stderr)
+        if sh(["git", "-C", str(wt), "stash", "list"]).stdout.strip():
+            unique = True; print("the clone has stashes — keeping it", file=sys.stderr)
     if unique:
         if config.no_trash():
             print(f"left in place (GEDAECHTNIS_NO_TRASH): {wt}", file=sys.stderr); return 0
         sh(["osascript", "-e", f'tell application "Finder" to delete POSIX file "{wt}"'], timeout=300)
         return 0
     shutil.rmtree(wt, ignore_errors=True)
-    print(f"removed clone {wt} (commits fetched to refs/gedaechtnis/{name}; nothing unique)", file=sys.stderr)
+    print(f"removed clone {wt} (commits fetched to refs/gedaechtnis/{name}/…; nothing unique)", file=sys.stderr)
     return 0
 
 
