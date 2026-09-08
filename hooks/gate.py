@@ -335,8 +335,14 @@ def rule_bash_partition(cmd: str, inp: dict) -> str | None:
             log("partition", f"ok\t{lane}\t{rel}\tbash={how}\tsession={sid}")     # the WARN week's denominator, Bash half
             continue
         if kind and how == "redirect-append":
-            log("partition", f"{mode}\t{lane}\t{rel}\tshared={kind}\tbash-append\tsession={sid}")
-            continue                                   # `>>` to a shared surface: the append exception (row grammar checked by the chore)
+            # a Bash `>>` cannot be checked for the row grammar and no chore runs on Bash, so it would land unchecked
+            # and uncommitted (Caspar, closure round): shared-surface appends go through Edit/Write or ledger.py
+            log("partition", f"{mode}\t{lane}\t{rel}\tshared={kind}\tbash-append-refused\tsession={sid}")
+            if mode == "deny":
+                return (f"`{rel}` is a SHARED surface ({kind}); a Bash `>>` append is not checked against its row grammar and "
+                        "is never committed. Append with the Edit/Write tool (the door checks the row and the chore commits it), "
+                        "or `gedaechtnis/ledger.py append` for the ledger.")
+            continue
         log("partition", f"{mode}\t{lane or 'UNKNOWN-LANE'}\t{rel}\tbash={how}\tsession={sid}")
         if mode == "deny":
             return (f"Bash write ({how}) to `{rel}`, outside lane {lane or 'UNKNOWN'}'s partition. The partition door binds Bash "

@@ -431,7 +431,7 @@ def test_bash_writes_go_through_the_partition_door(world):
     assert decision(bash(world, f"sed -i '' 's/a/b/' {v}/Speculum/Position.md")) == "deny"
     assert decision(bash(world, f"cp /tmp/x.md {v}/Speculum/Position.md")) == "deny"
     assert bash(world, f"echo hi >> {v}/Mnemosyne/UkrainianCard/Position.md") is None                     # own lane
-    assert bash(world, f"echo '- 2026-09-08 CARD x' >> {v}/Speculum/Inbox.md") is None                     # append to a shared surface
+    assert decision(bash(world, f"echo '- 2026-09-08 CARD x' >> {v}/Speculum/Inbox.md")) == "deny"      # a Bash append is unchecked: refused
     assert decision(bash(world, f"echo x > {v}/Speculum/Inbox.md")) == "deny"                              # overwrite of a shared surface
     assert decision(bash(world, f"touch {v}/Concilium/Position.md")) == "deny"                             # stem rule via Bash
 
@@ -509,7 +509,7 @@ def test_every_redirect_spelling_is_seen_by_the_partition_door(world):
         assert decision(bash(world, cmd)) == "deny", form
     assert decision(bash(world, f"echo x >|{v}/Speculum/Position.md")) == "deny"
     assert bash(world, f"echo x 2>&1 | grep y") is None                                   # fd dup is not a file write
-    assert bash(world, f"echo '- 2026-09-09 CARD x' 1>> {v}/Speculum/Inbox.md") is None    # append to a shared surface, any spelling
+    assert decision(bash(world, f"echo '- 2026-09-09 CARD x' 1>> {v}/Speculum/Inbox.md")) == "deny"   # any spelling: refused
 
 
 # ------------------------------------------------ council iteration-2 findings (Melchior, Caspar), fixed ----
@@ -519,10 +519,15 @@ def test_mv_out_of_the_vault_asks(world):
     assert bash(world, f"mv /tmp/x.md {v}/Mnemosyne/UkrainianCard/notes.md") is None      # into own lane: fine
 
 def test_fleet_roster_is_append_only_for_everyone(world):
-    v = world["vault"]; r = v / "Global" / "fleet-roster.md"; r.write_text("```fleet-roster\nlane: CURSUS\nrepo: Projects/x\n```\n")
+    v = world["vault"]; r = v / "Global" / "fleet-roster.md"; r.write_text("# roster\n\n```fleet-roster\nlane: CURSUS\nrepo: Projects/x\n```\n\ntrailing prose\n")
     world["state"].mkdir(parents=True, exist_ok=True); (world["state"] / "partition.mode").write_text("deny")
-    ok = run("gate.py", "write", {"cwd": str(world["repo"]), "tool_name": "Write", "session_id": "t", "tool_input": {"file_path": str(r), "content": r.read_text() + "path: Pharos/new\n"}}, world["env"])
-    assert ok is None
+    cur = r.read_text(); inside = cur.replace("repo: Projects/x\n```", "repo: Projects/x\npath: Pharos/new\n```")
+    ok = run("gate.py", "write", {"cwd": str(world["repo"]), "tool_name": "Write", "session_id": "t", "tool_input": {"file_path": str(r), "content": inside}}, world["env"])
+    assert ok is None                                                                         # a row INSIDE the fence
+    past = run("gate.py", "write", {"cwd": str(world["repo"]), "tool_name": "Write", "session_id": "t", "tool_input": {"file_path": str(r), "content": cur + "path: Pharos/new\n"}}, world["env"])
+    assert decision(past) == "deny"                                                           # a row after the fence: invisible to marker_check
+    edit_ok = run("gate.py", "write", {"cwd": str(world["repo"]), "tool_name": "Edit", "session_id": "t", "tool_input": {"file_path": str(r), "old_string": "```\n\ntrailing prose\n", "new_string": "path: Pharos/other\n```\n\ntrailing prose\n"}}, world["env"])
+    assert edit_ok is None
     bad = run("gate.py", "write", {"cwd": str(world["repo"]), "tool_name": "Write", "session_id": "t", "tool_input": {"file_path": str(r), "content": "lane: CARD\nrepo: mine\n"}}, world["env"])
     assert decision(bad) == "deny"                                                            # a rewrite, even though Global/ is declared
 
@@ -596,4 +601,4 @@ def test_roster_rewrite_via_sed_is_denied(world):
     v = world["vault"]; (v / "Global" / "fleet-roster.md").write_text("lane: CURSUS\n")
     world["state"].mkdir(parents=True, exist_ok=True); (world["state"] / "partition.mode").write_text("deny")
     assert decision(bash(world, f"sed -i '' 's/CURSUS/CARD/' {v}/Global/fleet-roster.md")) == "deny"
-    assert bash(world, f"echo 'path: Pharos/new' >> {v}/Global/fleet-roster.md") is None
+    assert decision(bash(world, f"echo 'path: Pharos/new' >> {v}/Global/fleet-roster.md")) == "deny"

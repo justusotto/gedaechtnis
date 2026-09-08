@@ -204,6 +204,29 @@ def pure_append(kind: str, path: Path, tool: str, ti: dict) -> tuple[bool, str]:
         cur = path.read_text(encoding="utf-8") if path.is_file() else ""
     except OSError:
         return False, "cannot read the current file"
+    if kind == "roster":
+        # the roster's consumer (marker_check) reads ONLY the ```fleet-roster fence: an append lands INSIDE it, i.e. just
+        # before the closing fence — a row after the fence is admitted-and-invisible (Caspar, closure round)
+        fence_end = cur.rfind("\n```")
+        if fence_end == -1 or "```fleet-roster" not in cur:
+            return False, "roster has no fleet-roster fence to append inside"
+        head, tail = cur[:fence_end + 1], cur[fence_end + 1:]
+        new = ti.get("content") if tool == "Write" else None
+        if tool != "Write":
+            old, rep = ti.get("old_string") or "", ti.get("new_string") or ""
+            if not old or not cur.endswith(old) or not rep.endswith(old):
+                return False, "roster Edit must replace the closing fence (file tail) with rows + the same closing fence"
+            new = cur[: len(cur) - len(old)] + rep
+        if not new.startswith(head) or not new.endswith(tail):
+            return False, "roster append must sit inside the fleet-roster fence (before the closing ```)"
+        added = new[len(head): len(new) - len(tail)]
+        rows = [l for l in added.splitlines() if l.strip()]
+        bad = [l for l in rows if not row_ok(kind, l)]
+        if not rows:
+            return False, "nothing appended"
+        if bad:
+            return False, f"appended line is not a well-formed roster row: {bad[0][:80]!r}"
+        return True, f"pure append of {len(rows)} roster row(s) inside the fence"
     if tool == "Write":
         new = ti.get("content") or ""
         if not new.startswith(cur):
