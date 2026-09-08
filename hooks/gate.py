@@ -346,7 +346,7 @@ def rule_bash_partition(cmd: str, inp: dict) -> str | None:
         log("partition", f"{mode}\t{lane or 'UNKNOWN-LANE'}\t{rel}\tbash={how}\tsession={sid}")
         if mode == "deny":
             return (f"Bash write ({how}) to `{rel}`, outside lane {lane or 'UNKNOWN'}'s partition. The partition door binds Bash "
-                    "writes too: use `>>` for a keyed-row append to a shared surface, or relay. (Speculum/Kernel 'Never write another lane's partition')")
+                    "writes too: append a keyed row to a shared surface with the Edit/Write tool or `ledger.py`, or relay. (Speculum/Kernel 'Never write another lane's partition')")
     return None
 
 
