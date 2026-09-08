@@ -431,7 +431,7 @@ def test_bash_writes_go_through_the_partition_door(world):
     assert decision(bash(world, f"sed -i '' 's/a/b/' {v}/Speculum/Position.md")) == "deny"
     assert decision(bash(world, f"cp /tmp/x.md {v}/Speculum/Position.md")) == "deny"
     assert bash(world, f"echo hi >> {v}/Mnemosyne/UkrainianCard/Position.md") is None                     # own lane
-    assert bash(world, f"echo '- 2026-09-08 CARD x' >> {v}/Speculum/Inbox.md") is None                     # append to a shared surface
+    assert decision(bash(world, f"echo '- 2026-09-08 CARD x' >> {v}/Speculum/Inbox.md")) == "deny"      # a Bash append is unchecked: refused
     assert decision(bash(world, f"echo x > {v}/Speculum/Inbox.md")) == "deny"                              # overwrite of a shared surface
     assert decision(bash(world, f"touch {v}/Concilium/Position.md")) == "deny"                             # stem rule via Bash
 
@@ -500,3 +500,128 @@ def test_clone_remove_keeps_side_branches_and_files_in_untracked_dirs(tmp_path):
     clone2 = Path(p.stdout.strip().splitlines()[-1]); (clone2 / "scratch" / "new.txt").write_text("unique\n")
     p = subprocess.run([sys.executable, str(wt), "remove"], input=json.dumps({"cwd": str(src), "worktree_path": str(clone2)}), capture_output=True, text=True, env=env)
     assert clone2.exists() and "unique to the clone" in p.stderr
+
+
+def test_every_redirect_spelling_is_seen_by_the_partition_door(world):
+    v = world["vault"]; world["state"].mkdir(parents=True, exist_ok=True); (world["state"] / "partition.mode").write_text("deny")
+    for form in ("1>", "&>", ">|", "2>", "1>>", "&>>"):
+        cmd = f"echo x {form} {v}/Speculum/Position.md"
+        assert decision(bash(world, cmd)) == "deny", form
+    assert decision(bash(world, f"echo x >|{v}/Speculum/Position.md")) == "deny"
+    assert bash(world, f"echo x 2>&1 | grep y") is None                                   # fd dup is not a file write
+    assert decision(bash(world, f"echo '- 2026-09-09 CARD x' 1>> {v}/Speculum/Inbox.md")) == "deny"   # any spelling: refused
+
+
+# ------------------------------------------------ council iteration-2 findings (Melchior, Caspar), fixed ----
+def test_mv_out_of_the_vault_asks(world):
+    v = world["vault"]
+    assert decision(bash(world, f"mv {v}/Speculum/Canon.md /tmp/")) == "ask"
+    assert bash(world, f"mv /tmp/x.md {v}/Mnemosyne/UkrainianCard/notes.md") is None      # into own lane: fine
+
+def test_fleet_roster_is_append_only_for_everyone(world):
+    v = world["vault"]; r = v / "Global" / "fleet-roster.md"; r.write_text("# roster\n\n```fleet-roster\nlane: CURSUS\nrepo: Projects/x\n```\n\ntrailing prose\n")
+    world["state"].mkdir(parents=True, exist_ok=True); (world["state"] / "partition.mode").write_text("deny")
+    cur = r.read_text(); inside = cur.replace("repo: Projects/x\n```", "repo: Projects/x\npath: Pharos/new\n```")
+    under_other = run("gate.py", "write", {"cwd": str(world["repo"]), "tool_name": "Write", "session_id": "t", "tool_input": {"file_path": str(r), "content": inside}}, world["env"])
+    assert decision(under_other) == "deny"                                                    # CARD appending under CURSUS's block: refused
+    own_block = cur.replace("repo: Projects/x\n```", "repo: Projects/x\nlane: CARD\nrepo: Projects/card\n```")
+    ok = run("gate.py", "write", {"cwd": str(world["repo"]), "tool_name": "Write", "session_id": "t", "tool_input": {"file_path": str(r), "content": own_block}}, world["env"])
+    assert ok is None                                                                         # a NEW block for the appender's own lane
+    r.write_text(own_block); cur = own_block
+    inside_own = cur.replace("repo: Projects/card\n```", "repo: Projects/card\npath: Mnemosyne/UkrainianCard\n```")
+    assert run("gate.py", "write", {"cwd": str(world["repo"]), "tool_name": "Write", "session_id": "t", "tool_input": {"file_path": str(r), "content": inside_own}}, world["env"]) is None
+    foreign_head = cur.replace("repo: Projects/card\n```", "repo: Projects/card\nlane: VOCAB\nrepo: Projects/v\n```")
+    assert decision(run("gate.py", "write", {"cwd": str(world["repo"]), "tool_name": "Write", "session_id": "t", "tool_input": {"file_path": str(r), "content": foreign_head}}, world["env"])) == "deny"
+    past = run("gate.py", "write", {"cwd": str(world["repo"]), "tool_name": "Write", "session_id": "t", "tool_input": {"file_path": str(r), "content": cur + "path: Pharos/new\n"}}, world["env"])
+    assert decision(past) == "deny"                                                           # a row after the fence: invisible to marker_check
+    edit_ok = run("gate.py", "write", {"cwd": str(world["repo"]), "tool_name": "Edit", "session_id": "t", "tool_input": {"file_path": str(r), "old_string": "repo: Projects/card\n", "new_string": "repo: Projects/card\npath: Pharos/other\n"}}, world["env"])
+    assert edit_ok is None
+    bad = run("gate.py", "write", {"cwd": str(world["repo"]), "tool_name": "Write", "session_id": "t", "tool_input": {"file_path": str(r), "content": "lane: CARD\nrepo: mine\n"}}, world["env"])
+    assert decision(bad) == "deny"                                                            # a rewrite, even though Global/ is declared
+
+def test_git_rm_cached_does_not_ask(world):
+    v = world["vault"]
+    assert bash(world, f"git -C {v} rm --cached -- x.md; S=$(git -C {v} diff --cached --name-only); [ \"$S\" = x.md ] || exit 9; git -C {v} commit -F /tmp/m") is None
+
+def test_foreign_shared_append_is_committed_by_the_chore(world):
+    v = world["vault"]; q = v / "Pharos" / "queues" / "regions" / "mining-ops.md"
+    q.write_text("- [ ] `q:MN-2026-09-01-X-1` r | q:MN-2026-09-01-X-1\n")
+    subprocess.run(["git", "-C", str(v), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(v), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "seed"], check=True)
+    q.write_text(q.read_text() + "- [ ] `q:MN-2026-09-09-NEW-1` from CARD | q:MN-2026-09-09-NEW-1\n")
+    res = run("chore.py", "write", {"cwd": str(world["repo"]), "tool_name": "Write", "session_id": "t", "tool_input": {"file_path": str(q), "content": q.read_text()}}, world["env"])
+    assert "committed as atlas@local" in res["hookSpecificOutput"]["additionalContext"]
+    log = subprocess.run(["git", "-C", str(v), "log", "-1", "--format=%an %s"], capture_output=True, text=True).stdout
+    assert log.startswith("atlas queue: append by CARD")
+
+def test_in_partition_bash_write_is_logged_as_ok(world):
+    v = world["vault"]; bash(world, f"echo x >> {v}/Mnemosyne/UkrainianCard/Position.md")
+    assert "ok\tCARD\tMnemosyne/UkrainianCard/Position.md\tbash=redirect-append" in (world["state"] / "partition.log").read_text()
+
+
+# ------------------------------------------------ council iteration-2 findings (Balthasar), fixed ----
+def test_flags_inside_the_message_are_not_flags(world):
+    v = world["vault"]
+    assert bash(world, f"git -C {v} commit -m 'never use -a or --amend here' -- Global/Errata.md") is None
+    assert bash(world, f'git -C {v} commit -m "the -am trap" -- Global/Errata.md') is None
+
+def test_vault_cwd_bash_write_is_the_owners_hand(world):
+    world["state"].mkdir(parents=True, exist_ok=True); (world["state"] / "partition.mode").write_text("deny")
+    v = world["vault"]
+    assert bash(world, f"echo x >> {v}/Speculum/Position.md", cwd=str(v)) is None
+
+def test_compact_does_not_restamp_vault_head(world):
+    import hashlib
+    run("session_start.py", "", {"cwd": str(world["repo"]), "session_id": "s1", "source": "startup"}, world["env"])
+    key = hashlib.sha1(str(world["repo"]).encode()).hexdigest()[:10]
+    f = world["state"] / f"session-start-{key}.json"; j = json.loads(f.read_text()); j["vault_head"] = "0" * 40; f.write_text(json.dumps(j))
+    run("session_start.py", "", {"cwd": str(world["repo"]), "session_id": "s1", "source": "compact"}, world["env"])
+    assert json.loads(f.read_text())["vault_head"] == "0" * 40
+    run("session_start.py", "", {"cwd": str(world["repo"]), "session_id": "s2", "source": "startup"}, world["env"])
+    assert json.loads(f.read_text())["vault_head"] != "0" * 40
+
+def test_clone_is_not_unique_when_only_the_source_moved_on(tmp_path):
+    src = tmp_path / "src"; src.mkdir(); subprocess.run(["git", "init", "-q", str(src)], check=True)
+    (src / "a.txt").write_text("a\n"); (src / "log.txt").write_text("1\n")
+    subprocess.run(["git", "-C", str(src), "add", "a.txt", "log.txt"], check=True)
+    subprocess.run(["git", "-C", str(src), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "one"], check=True)
+    (src / "log.txt").write_text("1\n2\n")                                        # dirty in the source at clone time
+    env = dict(os.environ, GEDAECHTNIS_WORKTREES=str(tmp_path / "wts"), GEDAECHTNIS_NO_TRASH="1")
+    wt = Path(__file__).resolve().parents[1] / "hooks" / "worktree.py"
+    p = subprocess.run([sys.executable, str(wt), "create"], input=json.dumps({"cwd": str(src), "name": "x"}), capture_output=True, text=True, env=env)
+    clone = Path(p.stdout.strip().splitlines()[-1])
+    (src / "log.txt").write_text("1\n2\n3\n")                                     # the SOURCE moves on after cloning
+    p = subprocess.run([sys.executable, str(wt), "remove"], input=json.dumps({"cwd": str(src), "worktree_path": str(clone)}), capture_output=True, text=True, env=env)
+    assert not clone.exists(), p.stderr                                            # nothing unique to the clone: removed
+
+
+# ------------------------------------------------ council closure round (Melchior), fixed ----
+def test_git_rm_without_cached_in_the_vault_asks(world):
+    v = world["vault"]
+    assert decision(bash(world, f"git -C {v} rm -r -- Mnemosyne/UkrainianCard")) == "ask"
+    assert bash(world, f"git -C {v} rm --cached -- x.md; S=$(git -C {v} diff --cached --name-only); [ \"$S\" = x.md ] || exit 9; git -C {v} commit -F /tmp/m") is None
+
+def test_mv_out_asks_from_the_vault_cwd_too(world):
+    v = world["vault"]
+    assert decision(bash(world, f"mv {v}/Speculum/Canon.md /tmp/", cwd=str(v))) == "ask"
+
+def test_roster_rewrite_via_sed_is_denied(world):
+    v = world["vault"]; (v / "Global" / "fleet-roster.md").write_text("lane: CURSUS\n")
+    world["state"].mkdir(parents=True, exist_ok=True); (world["state"] / "partition.mode").write_text("deny")
+    assert decision(bash(world, f"sed -i '' 's/CURSUS/CARD/' {v}/Global/fleet-roster.md")) == "deny"
+    (v / "Global" / "fleet-roster.md").write_text("```fleet-roster\nlane: CURSUS\n```\n")
+    assert decision(bash(world, f"echo 'path: Pharos/new' >> {v}/Global/fleet-roster.md")) == "deny"
+
+
+def test_session_start_is_keyed_by_session_id(world):
+    import hashlib
+    run("session_start.py", "", {"cwd": str(world["repo"]), "session_id": "guardian", "source": "startup"}, world["env"])
+    g = world["state"] / "session-start-guardian.json"; j = json.loads(g.read_text()); j["vault_head"] = "1" * 40; g.write_text(json.dumps(j))
+    run("session_start.py", "", {"cwd": str(world["repo"]), "session_id": "worker", "source": "startup"}, world["env"])
+    assert json.loads(g.read_text())["vault_head"] == "1" * 40                                   # the worker did not overwrite the guardian's record
+    assert (world["state"] / "session-start-worker.json").is_file()
+
+def test_heredoc_message_with_inner_quote_is_not_refused(world):
+    v = world["vault"]
+    cmd = "\n".join([f'git -C {v} commit -m "$(cat <<' + "'EOF'", 'he said "no -a here"; fine', "EOF", ')" -- Global/Map.md'])
+    assert bash(world, cmd) is None

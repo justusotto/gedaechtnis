@@ -66,6 +66,8 @@ def _split_shell(cmd: str) -> list[str]:
             heredoc = m.group(2); cur.append(m.group(0)); i += len(m.group(0)); continue
         if cmd.startswith("&&", i) or cmd.startswith("||", i):
             out.append("".join(cur)); cur = []; i += 2; continue
+        if c == "|" and "".join(cur).rstrip().endswith(">"):
+            cur.append(c); i += 1; continue           # `>|` / `>>|` clobber-redirects are not pipes
         if c in ";|\n":
             out.append("".join(cur)); cur = []; i += 1; continue
         cur.append(c); i += 1
@@ -129,31 +131,37 @@ def rule_vault_git(cmd: str, cwd: str | None) -> str | None:
                     "automated committer runs…')")
         if sub == "commit":
             body = seg[seg.index("commit")+6:]
-            if re.search(r"(?:\s|^)(?:-[a-zA-Z]*a[a-zA-Z]*|--all)(?:\s|$)", body):
+            body = re.sub(r"<<-?\s*(['\"]?)(\w+)\1.*?\n\2\s*$", "HEREDOC", body, flags=re.S | re.M)   # a heredoc body is text, whatever it contains
+            flags = re.sub(r"'[^']*'|\"(?:[^\"\\\\]|\\\\.)*\"", " Q ", body)   # quoted text cannot carry a flag
+            if re.search(r"(?:\s|^)(?:-[a-zA-Z]*a[a-zA-Z]*|--all)(?:\s|$)", flags):
                 return "Vault law: never `git commit -a` in ~/Atlas. Commit path-limited: `git -C ~/Atlas commit -m '<msg>' -- <file>`."
-            if "--amend" in body:
+            if "--amend" in flags:
                 return ("Vault law: NO-AMEND — never `git commit --amend` on an Atlas commit; forward-fix with a new commit. "
                         "(Speculum/Kernel 'Standing constraints')")
             m = re.search(r'-m\s+"([^"]*)"', body)
-            if m and ("`" in m.group(1) or "$(" in m.group(1)) and not re.match(r"^\$\(cat\s*<<", m.group(1).strip()):
+            if m and ("`" in m.group(1) or "$(" in m.group(1)) and not re.match(r"^\$\(cat\s*(?:<<|HEREDOC)", m.group(1).strip()):
                 # `-m "$(cat <<'EOF' … EOF)"` is the DELIBERATE quoted-heredoc idiom, not an accident
                 return ("A backtick or `$(` inside a DOUBLE-quoted `git commit -m` is command-substituted: the word vanishes "
                         "and the commit still succeeds, permanently (NO-AMEND). Use single quotes, or `git commit -F <msgfile>`. "
                         "(Global/Errata 'Backticks inside a DOUBLE-quoted git commit -m…')")
-            has_pathspec = re.search(r"\s--(?:\s|$)", body) is not None
+            has_pathspec = re.search(r"\s--(?:\s|$)", flags) is not None
             assert_form = "diff --cached --name-only" in cmd
             if has_pathspec and re.search(r"\brm\s+(?:-r\s+)?--cached\b", cmd):
                 return ("`git rm --cached` followed by a pathspec commit (`commit … -- <paths>`) commits the WORKING TREE and silently "
                         "DISCARDS the staged deletion — the commit lies about its contents. Use the stage → ASSERT "
                         "(`diff --cached --name-only`) → commit-with-NO-pathspec form in one invocation. (Global/Errata "
                         "'`git commit -- <paths>` commits the WORKING TREE and DISCARDS what you staged…')")
-            if not has_pathspec and not assert_form and "-F" not in body and "--file" not in body:
+            if not has_pathspec and not assert_form and "-F" not in flags and "--file" not in flags:
                 return ("Vault law: never a bare `git commit` in ~/Atlas — the pathspec is the guarantee. Use "
                         "`git -C ~/Atlas commit -m '<msg>' -- <file>`; or, ONLY for a `git rm --cached`, the stage→ASSERT "
                         "(`diff --cached --name-only`)→commit form in one invocation. (Speculum/Kernel 'Standing constraints')")
-            if not has_pathspec and not assert_form and ("-F" in body or "--file" in body):
+            if not has_pathspec and not assert_form and ("-F" in flags or "--file" in flags):
                 return ("Vault law: `git commit -F <msg>` in ~/Atlas still needs the pathspec: append `-- <file>` "
                         "(everything after `--` is a pathspec), or use the stage→ASSERT→commit form.")
+        if sub == "rm" and "--cached" not in seg:
+            return ("Defaults never delete: `git rm` removes tracked vault files from the working tree without the Trash. "
+                    "Use `git rm --cached` to untrack (the file stays), or move the file to the Trash by hand and commit the "
+                    "deletion path-limited. (Global/Nomos §Data integrity)")
         if sub == "push":
             if not re.search(r"\bpush\s+(?:\S*\s+)*backup\b", seg):
                 return ("Vault law: never push the vault to a cross-machine SYNC remote; only the bare `backup` remote "
@@ -212,6 +220,9 @@ def rule_data_integrity(cmd: str) -> str | None:
     for seg in segments(cmd):
         if not _DESTROY.search(seg):
             continue
+        w0 = seg.split()
+        if w0 and w0[0] == "git" and not re.search(r"\bgit\s+(?:-C\s+\S+\s+)?clean\b", seg):
+            continue                                  # `git rm --cached` etc. are index operations; the vault-git rule owns them
         for rx, why in _PROTECTED:
             if rx.search(seg):
                 # allow rm inside the vault's gitignored scratch (.atlas-locks, .pre-* backups) explicitly
@@ -260,12 +271,16 @@ def bash_write_targets(cmd: str, cwd: str | None) -> list[tuple[Path, str]]:
         except ValueError:
             w = seg.split()
         for i, tok in enumerate(w):
-            if tok in (">", ">>") and i + 1 < len(w):
-                out.append((expand(w[i + 1], cwd), "redirect-append" if tok == ">>" else "redirect"))
-            elif tok.startswith(">>"):
-                out.append((expand(tok[2:], cwd), "redirect-append"))
-            elif tok.startswith(">") and len(tok) > 1 and not tok.startswith(">&"):
-                out.append((expand(tok[1:], cwd), "redirect"))
+            # every output-redirect spelling: > >> 1> 2> &> >| >>| 1>> &>> — with the target attached or as the next token
+            m = re.match(r"^(?:\d+|&)?(>>|>)\|?(.*)$", tok)
+            if not m or tok.startswith(">&") or re.match(r"^\d+>&", tok):
+                continue
+            how = "redirect-append" if m.group(1) == ">>" else "redirect"
+            target = m.group(2)
+            if not target and i + 1 < len(w):
+                target = w[i + 1]
+            if target and target != "|" and not target.startswith("&"):
+                out.append((expand(target, cwd), how))
         if not w:
             continue
         j = 0
@@ -282,6 +297,9 @@ def bash_write_targets(cmd: str, cwd: str | None) -> list[tuple[Path, str]]:
             args = [x for x in w[j + 1:] if not x.startswith("-")]
             if verb in ("cp", "mv", "install") and args:
                 out.append((expand(args[-1], cwd), verb))
+                if verb == "mv":
+                    for src in args[:-1]:
+                        out.append((expand(src, cwd), "mv-out"))      # the SOURCE leaves its place: a deletion in disguise
             elif verb in ("tee", "rm", "touch", "truncate"):
                 for x in args:
                     out.append((expand(x, cwd), verb))
@@ -297,19 +315,39 @@ def rule_bash_partition(cmd: str, inp: dict) -> str | None:
     mode = partition_mode()
     sid = inp.get("session_id", "-")
     for p, how in targets:
+        if how == "mv-out":
+            rel = vault_rel(p) or ""
+            return (f"Defaults never delete: `mv` moves `{rel}` OUT of its place in the vault — for every reader that is a deletion "
+                    "(a wikilink, an @-import or a lane's partition now points at nothing). Move within the vault with `git mv` and a "
+                    "path-limited commit, or ask. (Global/Nomos §Data integrity)")
+    if lane is None and cwd and under(expand(cwd), VAULT):
+        log("partition", f"ok\tVAULT-CWD\tbash\tsession={sid}")
+        return None                                    # a session opened in the vault itself is the owner's own hand
+    for p, how in targets:
         rel = vault_rel(p) or ""
+        if how == "mv-out":
+            return (f"Defaults never delete: `mv` moves `{rel}` OUT of its place in the vault — for every reader that is a deletion "
+                    "(a wikilink, an @-import or a lane's partition now points at nothing). Move within the vault with `git mv` and a "
+                    "path-limited commit, or ask. (Global/Nomos §Data integrity)")
         if rel.startswith("Concilium/") and p.stem in ROLE_STEMS:
             return f"Concilium STEM RULE: `{rel}` carries a vault role stem; refused (Bash write via {how})."
         kind = shared_surface(rel)
-        if lane and path_in_partition(rel, prefixes) and kind != "umbrella-shared":
+        if lane and path_in_partition(rel, prefixes) and kind not in ("umbrella-shared", "roster"):
+            log("partition", f"ok\t{lane}\t{rel}\tbash={how}\tsession={sid}")     # the WARN week's denominator, Bash half
             continue
         if kind and how == "redirect-append":
-            log("partition", f"{mode}\t{lane}\t{rel}\tshared={kind}\tbash-append\tsession={sid}")
-            continue                                   # `>>` to a shared surface: the append exception (row grammar checked by the chore)
+            # a Bash `>>` cannot be checked for the row grammar and no chore runs on Bash, so it would land unchecked
+            # and uncommitted (Caspar, closure round): shared-surface appends go through Edit/Write or ledger.py
+            log("partition", f"{mode}\t{lane}\t{rel}\tshared={kind}\tbash-append-refused\tsession={sid}")
+            if mode == "deny":
+                return (f"`{rel}` is a SHARED surface ({kind}); a Bash `>>` append is not checked against its row grammar and "
+                        "is never committed. Append with the Edit/Write tool (the door checks the row and the chore commits it), "
+                        "or `gedaechtnis/ledger.py append` for the ledger.")
+            continue
         log("partition", f"{mode}\t{lane or 'UNKNOWN-LANE'}\t{rel}\tbash={how}\tsession={sid}")
         if mode == "deny":
             return (f"Bash write ({how}) to `{rel}`, outside lane {lane or 'UNKNOWN'}'s partition. The partition door binds Bash "
-                    "writes too: use `>>` for a keyed-row append to a shared surface, or relay. (Speculum/Kernel 'Never write another lane's partition')")
+                    "writes too: append a keyed row to a shared surface with the Edit/Write tool or `ledger.py`, or relay. (Speculum/Kernel 'Never write another lane's partition')")
     return None
 
 
@@ -324,7 +362,7 @@ def do_bash(inp: dict) -> None:
         r = fn()
         if r:
             log("deny", f"bash\t{r.split('.')[0][:80]}\t{cmd[:200].replace(chr(10),' ')}")
-            if r.startswith("Defaults never delete") or r.startswith("The Trash is never emptied") or r.startswith("Destructive SQL"):
+            if r.startswith(("Defaults never delete", "The Trash is never emptied", "Destructive SQL")):
                 ask(EV, r)                            # data-destroying acts REFUSE AND ASK: the owner may still say yes
             else:
                 deny(EV, r)
@@ -371,11 +409,11 @@ def do_write(inp: dict) -> None:
                       "region, or relay through your outbox. (Speculum/Kernel 'Never write another lane's partition')"))
         return
     kind = shared_surface(rel)
-    if path_in_partition(rel, prefixes) and kind != "umbrella-shared":
+    if path_in_partition(rel, prefixes) and kind not in ("umbrella-shared", "roster"):
         log("partition", f"ok\t{lane}\t{rel}\tsession={sid}")
         return
     if kind:
-        ok, why = pure_append(kind, p, inp.get("tool_name") or "Edit", ti)
+        ok, why = pure_append(kind, p, inp.get("tool_name") or "Edit", ti, lane)
         log("partition", f"{mode}\t{lane}\t{rel}\tshared={kind}\tappend={'ok' if ok else 'NO'}\t{why}\tsession={sid}")
         if ok:
             return                                   # the narrow audited exception: a keyed row, appended

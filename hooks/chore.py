@@ -8,7 +8,7 @@ A chore never denies (the act already happened). It repairs what is mechanically
 reports the rest as `additionalContext` — factual statements, never orders.
 """
 from __future__ import annotations
-import json, os, re, subprocess, sys, time
+import fcntl, json, os, re, subprocess, sys, time
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import (read_input, context, log, expand, under, vault_rel, fleet_repos, VAULT, STATE, guarded,
@@ -63,6 +63,9 @@ def do_artifact(inp: dict) -> None:
         except OSError:
             pass
     title = title or ti.get("title") or Path(fp or "").stem or "untitled"
+    STATE.mkdir(parents=True, exist_ok=True)
+    lk = open(STATE / "artifacts-index.lock", "w")
+    fcntl.flock(lk, fcntl.LOCK_EX)                          # read-modify-write under a lock: two publishes never lose a row
     try:
         txt = INDEX.read_text(encoding="utf-8")
     except OSError:
@@ -82,6 +85,7 @@ def do_artifact(inp: dict) -> None:
     tmp.write_text(txt, encoding="utf-8")
     os.replace(tmp, INDEX)                                  # atomic: no reader ever sees a half-written index
     sha = commit_path_limited(VAULT, "Pharos/artifacts-index.md", f"artifacts-index: {title} ({uid[:8]})")
+    fcntl.flock(lk, fcntl.LOCK_UN); lk.close()
     log("chore", f"artifact-index\t{uid}\t{title}\tcommit={sha}")
     context(EV, f"Artifact {uid} (“{title}”) is now a row in ~/Atlas/Pharos/artifacts-index.md"
                 + (f", committed {sha}." if sha else ", written but NOT committed (git refused; see ~/.claude/gedaechtnis/chore.log)."))
@@ -142,6 +146,14 @@ def do_write(inp: dict) -> None:
                     lines.append(f"  `{term}` → " + "; ".join(locs[:8]) + (f"; +{len(locs)-8} more" if len(locs) > 8 else ""))
                 lines.append("A renamed heading or id leaves every wikilink/citation to the old name dangling with no error (Global/Patterns 'A correction that does not locate the ORIGIN does not stop the propagation').")
                 notes.append("\n".join(lines))
+    kind = shared_surface(rel)
+    if kind:
+        # a permitted append to a SHARED surface by a lane that does not declare it would sit uncommitted forever
+        # (the Stop hook stages only declared paths; the pre-commit guard refuses a foreign committer): commit it now
+        lane, prefixes, _ = lane_for(inp.get("cwd"))
+        if not (lane and path_in_partition(rel, prefixes)) or kind in ("umbrella-shared", "roster"):
+            sha = commit_path_limited(VAULT, rel, f"{kind}: append by {lane or 'UNKNOWN-LANE'}")
+            notes.append(f"Shared surface {rel}: your append is committed as atlas@local ({sha or 'commit refused, see chore.log'}).")
     if notes:
         log("chore", f"write\t{rel}\t{' | '.join(n[:80] for n in notes)}")
         context(EV, "\n".join(notes))
