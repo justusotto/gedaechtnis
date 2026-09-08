@@ -21,7 +21,7 @@ old id. The append-only hook (gate.py) refuses any write to a ledger file that i
 of well-formed rows.
 """
 from __future__ import annotations
-import argparse, fcntl, json, os, re, sys, time
+import argparse, fcntl, json, os, re, subprocess, sys, time
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
 import config
@@ -95,7 +95,23 @@ def append(frm: str, to: str, kind: str, ref: str, body: str) -> str:
             if new:
                 fh.write("# Channels ledger — append-only; id\tts\tfrom\tto\tkind\tref\tbody (see gedaechtnis/ledger.py)\n")
             fh.write(line + "\n")
+    _commit(f, f"ledger: {rid} {frm}→{to} {kind}")
     return rid
+
+
+def _commit(f: Path, msg: str) -> None:
+    """A ledger row is committed the moment it is appended, path-limited, as the vault's own identity — the
+    Stop hook stages only a lane's declared paths, and the ledger is EVERY lane's surface and no lane's path."""
+    if not (VAULT / ".git").exists():
+        return
+    rel = str(f.relative_to(VAULT))
+    for attempt in range(4):
+        a = subprocess.run(["git", "-C", str(VAULT), "add", "--", rel], capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        c = subprocess.run(["git", "-C", str(VAULT), "-c", "user.name=atlas", "-c", "user.email=atlas@local", "commit", "-q", "-m", msg, "--", rel],
+                           capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        if c.returncode == 0 or "index.lock" not in (a.stderr + c.stderr):
+            return
+        time.sleep(0.2 * (attempt + 1))
 
 
 def cursor_path(lane: str) -> Path:
