@@ -33,6 +33,15 @@ def main() -> None:
     lane, prefixes, marker = lane_for(cwd)
     rc, head, _ = sh(["git", "-C", str(VAULT), "rev-parse", "HEAD"])
     vault_head = head if rc == 0 else None
+    import hashlib as _h
+    _key = _h.sha1(cwd.encode()).hexdigest()[:10]
+    if inp.get("source") in ("compact", "resume"):
+        try:                                            # the session began earlier: keep ITS start head, do not re-stamp
+            prev = json.loads((STATE / f"session-start-{_key}.json").read_text(encoding="utf-8"))
+            if prev.get("vault_head"):
+                vault_head = prev["vault_head"]
+        except (OSError, json.JSONDecodeError):
+            pass
     rc, dirt, _ = sh(["git", "-C", str(VAULT), "status", "--porcelain"])
     n_dirty = len([l for l in dirt.splitlines() if l.strip()]) if rc == 0 else None
     mode = "warn"

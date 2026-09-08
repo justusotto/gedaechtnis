@@ -131,9 +131,10 @@ def rule_vault_git(cmd: str, cwd: str | None) -> str | None:
                     "automated committer runs…')")
         if sub == "commit":
             body = seg[seg.index("commit")+6:]
-            if re.search(r"(?:\s|^)(?:-[a-zA-Z]*a[a-zA-Z]*|--all)(?:\s|$)", body):
+            flags = re.sub(r"'[^']*'|\"(?:[^\"\\\\]|\\\\.)*\"", " Q ", body)   # quoted text cannot carry a flag
+            if re.search(r"(?:\s|^)(?:-[a-zA-Z]*a[a-zA-Z]*|--all)(?:\s|$)", flags):
                 return "Vault law: never `git commit -a` in ~/Atlas. Commit path-limited: `git -C ~/Atlas commit -m '<msg>' -- <file>`."
-            if "--amend" in body:
+            if "--amend" in flags:
                 return ("Vault law: NO-AMEND — never `git commit --amend` on an Atlas commit; forward-fix with a new commit. "
                         "(Speculum/Kernel 'Standing constraints')")
             m = re.search(r'-m\s+"([^"]*)"', body)
@@ -142,18 +143,18 @@ def rule_vault_git(cmd: str, cwd: str | None) -> str | None:
                 return ("A backtick or `$(` inside a DOUBLE-quoted `git commit -m` is command-substituted: the word vanishes "
                         "and the commit still succeeds, permanently (NO-AMEND). Use single quotes, or `git commit -F <msgfile>`. "
                         "(Global/Errata 'Backticks inside a DOUBLE-quoted git commit -m…')")
-            has_pathspec = re.search(r"\s--(?:\s|$)", body) is not None
+            has_pathspec = re.search(r"\s--(?:\s|$)", flags) is not None
             assert_form = "diff --cached --name-only" in cmd
             if has_pathspec and re.search(r"\brm\s+(?:-r\s+)?--cached\b", cmd):
                 return ("`git rm --cached` followed by a pathspec commit (`commit … -- <paths>`) commits the WORKING TREE and silently "
                         "DISCARDS the staged deletion — the commit lies about its contents. Use the stage → ASSERT "
                         "(`diff --cached --name-only`) → commit-with-NO-pathspec form in one invocation. (Global/Errata "
                         "'`git commit -- <paths>` commits the WORKING TREE and DISCARDS what you staged…')")
-            if not has_pathspec and not assert_form and "-F" not in body and "--file" not in body:
+            if not has_pathspec and not assert_form and "-F" not in flags and "--file" not in flags:
                 return ("Vault law: never a bare `git commit` in ~/Atlas — the pathspec is the guarantee. Use "
                         "`git -C ~/Atlas commit -m '<msg>' -- <file>`; or, ONLY for a `git rm --cached`, the stage→ASSERT "
                         "(`diff --cached --name-only`)→commit form in one invocation. (Speculum/Kernel 'Standing constraints')")
-            if not has_pathspec and not assert_form and ("-F" in body or "--file" in body):
+            if not has_pathspec and not assert_form and ("-F" in flags or "--file" in flags):
                 return ("Vault law: `git commit -F <msg>` in ~/Atlas still needs the pathspec: append `-- <file>` "
                         "(everything after `--` is a pathspec), or use the stage→ASSERT→commit form.")
         if sub == "push":
@@ -308,6 +309,9 @@ def rule_bash_partition(cmd: str, inp: dict) -> str | None:
     lane, prefixes, marker = lane_for(cwd)
     mode = partition_mode()
     sid = inp.get("session_id", "-")
+    if lane is None and cwd and under(expand(cwd), VAULT):
+        log("partition", f"ok\tVAULT-CWD\tbash\tsession={sid}")
+        return None                                    # a session opened in the vault itself is the owner's own hand
     for p, how in targets:
         rel = vault_rel(p) or ""
         if how == "mv-out":

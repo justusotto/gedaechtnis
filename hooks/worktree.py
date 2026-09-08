@@ -12,7 +12,7 @@ clone holds nothing unique (clean status, all commits fetched), it is deleted; i
 uncommitted work it is moved to the Trash by Finder, never rm'd. Defaults never delete.
 """
 from __future__ import annotations
-import json, os, shutil, subprocess, sys, time
+import hashlib, json, os, shutil, subprocess, sys, time
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config
@@ -28,6 +28,24 @@ def sh(args, cwd=None, timeout=600):
 def repo_root(cwd: str) -> Path | None:
     p = sh(["git", "-C", cwd, "rev-parse", "--show-toplevel"])
     return Path(p.stdout.strip()) if p.returncode == 0 else None
+
+
+def dirt_manifest(repo: Path) -> dict:
+    """sha256 of every dirty or untracked file (-uall) at this moment — the clone's own baseline."""
+    out = {}
+    st = sh(["git", "-C", str(repo), "status", "--porcelain", "-uall"])
+    for l in st.stdout.splitlines():
+        if len(l) <= 3:
+            continue
+        rel = l[3:].strip().strip('"')
+        if rel.startswith(".gedaechtnis-clone-"):
+            continue
+        p = repo / rel
+        try:
+            out[rel] = hashlib.sha256(p.read_bytes()).hexdigest() if p.is_file() else "gone"
+        except OSError:
+            out[rel] = "unreadable"
+    return out
 
 
 def create(inp: dict) -> int:
@@ -47,6 +65,7 @@ def create(inp: dict) -> int:
         (dst / ".gedaechtnis-clone-of").write_text(str(src) + "\nkind: git-worktree\n", encoding="utf-8")
         print(str(dst)); return 0
     (dst / ".gedaechtnis-clone-of").write_text(str(src) + "\n", encoding="utf-8")
+    (dst / ".gedaechtnis-clone-manifest.json").write_text(json.dumps(dirt_manifest(dst)), encoding="utf-8")
     print(f"clonefile copy of {src} → {dst}", file=sys.stderr)
     print(str(dst))
     return 0
@@ -71,20 +90,17 @@ def remove(inp: dict) -> int:
                 f"+refs/heads/*:refs/gedaechtnis/{name}/branches/*"])
         if f.returncode != 0:
             print(f"fetch back failed: {f.stderr.strip()}", file=sys.stderr); unique = True
-        st = sh(["git", "-C", str(wt), "status", "--porcelain", "-uall"])     # -uall: one line PER FILE, never `?? dir/`
-        if st.returncode != 0:
-            unique = True
+        # unique = a dirty/untracked file whose content differs from what the clone was BORN with — never from the
+        # source as it is now (the source's own logs move on; that is not the clone's work)
+        try:
+            base = json.loads((wt / ".gedaechtnis-clone-manifest.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            base = None
+        now = dirt_manifest(wt)
+        if base is None:
+            unique = unique or bool(now)
         else:
-            src_lines = set(sh(["git", "-C", str(src), "status", "--porcelain", "-uall"]).stdout.splitlines())
-            new_dirt = [l for l in st.stdout.splitlines() if l not in src_lines and not l.endswith(".gedaechtnis-clone-of")]
-            for l in st.stdout.splitlines():                 # same status line on both sides can still differ in CONTENT
-                if l in src_lines and len(l) > 3:
-                    rel = l[3:].strip().strip('"'); a, b = wt / rel, src / rel
-                    try:
-                        if a.is_file() and b.is_file() and a.read_bytes() != b.read_bytes():
-                            new_dirt.append(l)
-                    except OSError:
-                        new_dirt.append(l)
+            new_dirt = [r for r, h in now.items() if base.get(r) != h]
             if new_dirt:
                 unique = True
                 print(f"{len(new_dirt)} uncommitted path(s) unique to the clone — moving it to the Trash, not deleting", file=sys.stderr)

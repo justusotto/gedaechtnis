@@ -519,7 +519,7 @@ def test_mv_out_of_the_vault_asks(world):
     assert bash(world, f"mv /tmp/x.md {v}/Mnemosyne/UkrainianCard/notes.md") is None      # into own lane: fine
 
 def test_fleet_roster_is_append_only_for_everyone(world):
-    v = world["vault"]; r = v / "Global" / "fleet-roster.md"; r.write_text("```fleet-roster\nlane: CURSUS\nrepo: PycharmProjects/x\n```\n")
+    v = world["vault"]; r = v / "Global" / "fleet-roster.md"; r.write_text("```fleet-roster\nlane: CURSUS\nrepo: Projects/x\n```\n")
     world["state"].mkdir(parents=True, exist_ok=True); (world["state"] / "partition.mode").write_text("deny")
     ok = run("gate.py", "write", {"cwd": str(world["repo"]), "tool_name": "Write", "session_id": "t", "tool_input": {"file_path": str(r), "content": r.read_text() + "path: Pharos/new\n"}}, world["env"])
     assert ok is None
@@ -544,3 +544,39 @@ def test_foreign_shared_append_is_committed_by_the_chore(world):
 def test_in_partition_bash_write_is_logged_as_ok(world):
     v = world["vault"]; bash(world, f"echo x >> {v}/Mnemosyne/UkrainianCard/Position.md")
     assert "ok\tCARD\tMnemosyne/UkrainianCard/Position.md\tbash=redirect-append" in (world["state"] / "partition.log").read_text()
+
+
+# ------------------------------------------------ council iteration-2 findings (Balthasar), fixed ----
+def test_flags_inside_the_message_are_not_flags(world):
+    v = world["vault"]
+    assert bash(world, f"git -C {v} commit -m 'never use -a or --amend here' -- Global/Errata.md") is None
+    assert bash(world, f'git -C {v} commit -m "the -am trap" -- Global/Errata.md') is None
+
+def test_vault_cwd_bash_write_is_the_owners_hand(world):
+    world["state"].mkdir(parents=True, exist_ok=True); (world["state"] / "partition.mode").write_text("deny")
+    v = world["vault"]
+    assert bash(world, f"echo x >> {v}/Speculum/Position.md", cwd=str(v)) is None
+
+def test_compact_does_not_restamp_vault_head(world):
+    import hashlib
+    run("session_start.py", "", {"cwd": str(world["repo"]), "session_id": "s1", "source": "startup"}, world["env"])
+    key = hashlib.sha1(str(world["repo"]).encode()).hexdigest()[:10]
+    f = world["state"] / f"session-start-{key}.json"; j = json.loads(f.read_text()); j["vault_head"] = "0" * 40; f.write_text(json.dumps(j))
+    run("session_start.py", "", {"cwd": str(world["repo"]), "session_id": "s1", "source": "compact"}, world["env"])
+    assert json.loads(f.read_text())["vault_head"] == "0" * 40
+    run("session_start.py", "", {"cwd": str(world["repo"]), "session_id": "s2", "source": "startup"}, world["env"])
+    assert json.loads(f.read_text())["vault_head"] != "0" * 40
+
+def test_clone_is_not_unique_when_only_the_source_moved_on(tmp_path):
+    src = tmp_path / "src"; src.mkdir(); subprocess.run(["git", "init", "-q", str(src)], check=True)
+    (src / "a.txt").write_text("a\n"); (src / "log.txt").write_text("1\n")
+    subprocess.run(["git", "-C", str(src), "add", "a.txt", "log.txt"], check=True)
+    subprocess.run(["git", "-C", str(src), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "one"], check=True)
+    (src / "log.txt").write_text("1\n2\n")                                        # dirty in the source at clone time
+    env = dict(os.environ, GEDAECHTNIS_WORKTREES=str(tmp_path / "wts"), GEDAECHTNIS_NO_TRASH="1")
+    wt = Path(__file__).resolve().parents[1] / "hooks" / "worktree.py"
+    p = subprocess.run([sys.executable, str(wt), "create"], input=json.dumps({"cwd": str(src), "name": "x"}), capture_output=True, text=True, env=env)
+    clone = Path(p.stdout.strip().splitlines()[-1])
+    (src / "log.txt").write_text("1\n2\n3\n")                                     # the SOURCE moves on after cloning
+    p = subprocess.run([sys.executable, str(wt), "remove"], input=json.dumps({"cwd": str(src), "worktree_path": str(clone)}), capture_output=True, text=True, env=env)
+    assert not clone.exists(), p.stderr                                            # nothing unique to the clone: removed
