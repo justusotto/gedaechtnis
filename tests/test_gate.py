@@ -726,3 +726,14 @@ def test_no_chain_at_all_says_nothing_rather_than_zero(world):
     assert "boot:" not in res["hookSpecificOutput"]["additionalContext"]
     j = json.loads((world["state"] / "session-start-b5.json").read_text())
     assert j["boot_files"] == 0 and j["boot_bytes"] == 0
+
+
+def test_trailing_pathspec_without_double_dash_is_path_limited(world):
+    """Council 2 dad test (Balthasar iter 1): `git commit -m x <path>` is a path-limited commit in
+    git's own grammar and must not be refused as bare; a truly bare commit still is."""
+    v = world["vault"]
+    assert bash(world, f"git -C {v} commit -m 'x' Global/Map.md") is None
+    assert bash(world, f"git -C {v} commit -m 'x' -- Global/Map.md") is None
+    assert decision(bash(world, f"git -C {v} commit -m 'x'")) == "deny"
+    assert decision(bash(world, f"git -C {v} commit -F /tmp/msg")) == "deny"          # -F consumed its value; still bare
+    assert bash(world, f"git -C {v} commit -F /tmp/msg Speculum/Position.md") is None

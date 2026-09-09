@@ -24,6 +24,26 @@ import config as _cfg
 
 EV = "PreToolUse"
 
+def _trailing_pathspec(flags: str) -> bool:
+    """`git commit -m x Global/Map.md` IS path-limited: git reads a bare trailing token as a pathspec
+    with or without `--`. Council 2's dad test (Balthasar, 2026-09-09) found the door refusing that
+    form as "bare" for a stranger who never read the vault law. `flags` has quoted text blanked to
+    ` Q ` and heredocs to `HEREDOC`; options that take a value consume the next token."""
+    takes = {"-m", "-F", "--file", "--author", "--date", "-c", "-C", "--trailer", "--cleanup",
+             "--fixup", "--squash", "--reuse-message", "--reedit-message"}
+    toks = flags.split(); i = 0
+    while i < len(toks):
+        t = toks[i]
+        if t == "--":
+            return True
+        if t in takes:
+            i += 2; continue
+        if t.startswith("-") or t in ("Q", "HEREDOC"):
+            i += 1; continue
+        return True
+    return False
+
+
 # ---------------------------------------------------------------- bash: segment the command ----
 
 _SPLIT = re.compile(r"\s*(?:&&|\|\||;|\n|\|)\s*")
@@ -144,7 +164,7 @@ def rule_vault_git(cmd: str, cwd: str | None) -> str | None:
                 return ("A backtick or `$(` inside a DOUBLE-quoted `git commit -m` is command-substituted: the word vanishes "
                         "and the commit still succeeds, permanently (NO-AMEND). Use single quotes, or `git commit -F <msgfile>`. "
                         "(Global/Errata 'Backticks inside a DOUBLE-quoted git commit -m…')")
-            has_pathspec = re.search(r"\s--(?:\s|$)", flags) is not None
+            has_pathspec = re.search(r"\s--(?:\s|$)", flags) is not None or _trailing_pathspec(flags)
             assert_form = "diff --cached --name-only" in cmd
             if has_pathspec and re.search(r"\brm\s+(?:-r\s+)?--cached\b", cmd):
                 return ("`git rm --cached` followed by a pathspec commit (`commit … -- <paths>`) commits the WORKING TREE and silently "
@@ -190,9 +210,8 @@ def rule_launch_model(cmd: str) -> str | None:
             continue
         if "--model" not in w and not any(x.startswith("--model=") for x in w):
             return ("Every `claude` launch pins `--model` (and `--effort`) explicitly; the settings-file default is "
-                    "silent routing authority — a bare launch once routed a seven-worker wave to Fable at 2× cost. "
-                    "Add `--model <id> --effort <level>` from the queue row. (Global/Errata 'A settings-file model "
-                    "default is silent routing authority…'; Global/Map §Models)")
+                    "silent routing authority: a bare launch runs on whatever model the settings file happens to name, "
+                    "at whatever price. Add `--model <id> --effort <level>`.")
         if _cfg.flag("require_launch_effort") and "--effort" not in w and not any(x.startswith("--effort=") for x in w):
             return ("This `claude` launch pins `--model` but not `--effort`; the platform default is `high`, and the "
                     "ruled defaults hold ONLY if the launch pins them. Add `--effort <low|medium|high>`. (Global/Map §Models)")
