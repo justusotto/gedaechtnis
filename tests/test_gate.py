@@ -839,3 +839,216 @@ def test_the_vault_is_protected_whatever_it_is_called(world):
     assert decision(bash(world, f"rm -rf {v}/Recipes/media/")) == "ask"
     assert decision(bash(world, f"rm -rf {v}")) == "ask"
     assert decision(bash(world, f"rm -rf ~/{v.name}/Recipes")) == "ask"
+
+
+# ------------------------------------------- the display-name-as-filename door (DESIGN §6.3) ----
+# The display layer shows `Canon.md` as "Decisions". A model told to "write it to Decisions" may
+# create `Decisions.md`; then the region has two files for one role and every ROLE_STEMS consumer
+# sees only one of them. POSITIVE controls: every display name, in every language column, under
+# every separator spelling. NEGATIVE controls: the real stems, a stranger's own files, an existing
+# file, a non-markdown file.
+
+def wwrite(w, path, content="x", cwd=None, env=None):
+    """A `Write` creating `path` — the shape the door actually meets."""
+    return run("gate.py", "write", {"cwd": cwd or str(w["repo"]), "tool_name": "Write", "session_id": "t",
+                                    "tool_input": {"file_path": str(path), "content": content}}, env or w["env"])
+
+
+def reason(res):
+    return (res or {}).get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
+
+
+def test_display_name_as_filename_is_denied_naming_the_stem_and_the_path(world):
+    """PROVES: creating `Decisions.md` is refused, and the deny carries both halves a model needs
+    to recover — which stem the display name means, and the exact path to write instead."""
+    region = world["vault"] / "Mnemosyne" / "UkrainianCard"
+    res = wwrite(world, region / "Decisions.md")
+    assert decision(res) == "deny"
+    r = reason(res)
+    assert "`Canon.md`" in r and '"Decisions"' in r
+    assert "`Mnemosyne/UkrainianCard/Canon.md`" in r
+
+
+def test_the_door_reads_every_language_column_whatever_language_is_set(world):
+    """PROVES [R4]: `Entscheidungen.md` and `Fehler.md` are denied under `en` exactly as their
+    English twins are — the door is a fact about the TABLE, not about the configured language."""
+    region = world["vault"] / "Mnemosyne" / "UkrainianCard"
+    env = dict(world["env"], GEDAECHTNIS_LANGUAGE="en")
+    assert decision(wwrite(world, region / "Entscheidungen.md", env=env)) == "deny"
+    assert "`Canon.md`" in reason(wwrite(world, region / "Entscheidungen.md", env=env))
+    assert decision(wwrite(world, region / "Fehler.md", env=env)) == "deny"
+    assert "`Errata.md`" in reason(wwrite(world, region / "Fehler.md", env=env))
+
+
+@pytest.mark.parametrize("name,stem", [("Mistakes.md", "Errata"), ("open-questions.md", "Aporia"),
+                                       ("Open Questions.md", "Aporia"), ("open_questions.md", "Aporia"),
+                                       ("STATUS.md", "Position"), ("Index.md", "Map")])
+def test_the_door_folds_case_and_separators(world, name, stem):
+    """PROVES the folding: `-`/`_` become a space and case is ignored, so the spellings a model
+    actually produces are all caught, and each deny names its own stem."""
+    res = wwrite(world, world["vault"] / "Mnemosyne" / "UkrainianCard" / name)
+    assert decision(res) == "deny", name
+    assert "`%s.md`" % stem in reason(res), name
+
+
+@pytest.mark.parametrize("name", ["Canon.md", "Patterns.md", "Inbox.md", "notes.md",
+                                  "meeting-notes.md", "Decisions.json"])
+def test_the_door_leaves_real_stems_and_a_strangers_own_files_alone(world, name):
+    """NEGATIVE controls. `Canon.md`/`Patterns.md` are stems; `Inbox` is BOTH a stem and its own
+    display name, so the door must not eat the file its own chores create; `notes.md` is the
+    stranger's file and none of the door's business; `.json` is not a role file at all."""
+    assert wwrite(world, world["vault"] / "Mnemosyne" / "UkrainianCard" / name) is None, name
+
+
+def test_an_existing_display_named_file_is_someones_data_and_is_left_alone(world):
+    """NEGATIVE control on the NEW-file half: the door refuses a creation, never an edit. A
+    `Decisions.md` already on disk is data, and a door that denied writes to it would strand it."""
+    f = world["vault"] / "Mnemosyne" / "UkrainianCard" / "Decisions.md"
+    f.write_text("someone's real notes\n")
+    assert write(world, f) is None
+    assert wwrite(world, f, content="more") is None
+
+
+def test_a_bash_redirect_to_a_display_name_is_denied_too(world):
+    """PROVES the Bash half: the door is on the redirect/verb write path, not only Edit/Write."""
+    region = world["vault"] / "Mnemosyne" / "UkrainianCard"
+    res = bash(world, "echo hi > %s/Decisions.md" % region)
+    assert decision(res) == "deny"
+    assert "`Canon.md`" in reason(res) and "Bash write via redirect" in reason(res)
+    assert bash(world, "echo hi > %s/Canon.md" % region) is None
+
+
+# ------------------------------------ born on first write: the Map row chore (DESIGN §3.1) ----
+# NEW-FILE DETECTION: the PreToolUse gate stamps `<state>/pre-exists-<sha1(path)>` with 0/1 — the
+# last moment anything can still tell a creation from an edit — and the chore reads it back and
+# consumes it. No marker means "not proven new", so the row is never added on a guess.
+
+MAP = """# UkrainianCard — Map
+
+## Purpose
+
+What this project is for.
+
+## Files in this folder
+
+- [[Position|Status]] — where it stands now
+- [[Canon|Decisions]] — settled, with reasons
+
+Other files appear here as they are needed; nothing has to be created in advance.
+"""
+
+
+def new_file(w, path, content="x", tool="Write", env=None):
+    """The real three-step sequence: gate sees the path absent, the tool creates it, the chore runs."""
+    payload = {"cwd": str(w["repo"]), "tool_name": tool, "session_id": "t",
+               "tool_input": {"file_path": str(path), "content": content}}
+    env = env or w["env"]
+    run("gate.py", "write", payload, env)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content)
+    return run("chore.py", "write", payload, env), payload
+
+
+def ctx(res):
+    return (res or {}).get("hookSpecificOutput", {}).get("additionalContext", "")
+
+
+def test_a_new_role_file_gets_exactly_one_map_row_after_the_last_existing_row(world):
+    """PROVES the birth rule: writing `Eidos.md` puts one row in the region's Map, in display-name
+    form, after the last existing row and before the trailing paragraph — and says so once."""
+    region = world["vault"] / "Mnemosyne" / "UkrainianCard"
+    (region / "Map.md").write_text(MAP)
+    res, _ = new_file(world, region / "Eidos.md", "# Architecture\n")
+    text = (region / "Map.md").read_text()
+    lines = text.splitlines()
+    rows = [l for l in lines if l.startswith("- [[")]
+    assert rows == ["- [[Position|Status]] — where it stands now",
+                    "- [[Canon|Decisions]] — settled, with reasons",
+                    "- [[Eidos|Architecture]] — how it is built"]
+    assert lines[lines.index(rows[-1]) + 1].strip() == ""          # the trailing paragraph is untouched
+    assert "Other files appear here" in text
+    assert "- [[Eidos|Architecture]] — how it is built" in ctx(res)
+
+
+def test_the_map_row_is_added_once_however_often_the_write_is_repeated(world):
+    """PROVES idempotence on BOTH arms: the second chore call has no creation marker to read, and
+    a third call whose gate saw the file PRESENT is refused by the marker too. Byte-identical."""
+    region = world["vault"] / "Mnemosyne" / "UkrainianCard"
+    (region / "Map.md").write_text(MAP)
+    _, payload = new_file(world, region / "Eidos.md", "# Architecture\n")
+    once = (region / "Map.md").read_bytes()
+    again = run("chore.py", "write", payload, world["env"])        # same input, no gate in between
+    assert (region / "Map.md").read_bytes() == once
+    assert "Map.md" not in ctx(again)
+    run("gate.py", "write", payload, world["env"])                 # a gate call too: the file now EXISTS
+    assert run("chore.py", "write", payload, world["env"]) is None
+    assert (region / "Map.md").read_bytes() == once
+
+
+def test_no_map_is_written_where_the_region_has_none(world):
+    """NEGATIVE control: a region with no Map.md is left exactly as it is — the chore never
+    CREATES an index, because a file nobody asked for is a file nobody maintains."""
+    region = world["vault"] / "Mnemosyne" / "UkrainianCard"
+    res, _ = new_file(world, region / "Eidos.md", "# Architecture\n")
+    assert not (region / "Map.md").exists()
+    assert res is None
+
+
+def test_a_file_that_is_not_a_role_file_gets_no_row(world):
+    """NEGATIVE control: `notes.md` is the stranger's own file; the Map indexes role files."""
+    region = world["vault"] / "Mnemosyne" / "UkrainianCard"
+    (region / "Map.md").write_text(MAP)
+    res, _ = new_file(world, region / "notes.md", "free text\n")
+    assert (region / "Map.md").read_text() == MAP
+    assert res is None
+
+
+def test_a_stem_the_map_already_links_is_not_linked_twice(world):
+    """NEGATIVE control on the already-indexed arm, independent of the creation marker: a Map that
+    already points at Eidos under ANY display name is left byte-identical."""
+    region = world["vault"] / "Mnemosyne" / "UkrainianCard"
+    (region / "Map.md").write_text(MAP.replace(
+        "- [[Canon|Decisions]] — settled, with reasons",
+        "- [[Canon|Decisions]] — settled, with reasons\n- [[Eidos|Aufbau]] — wie es gebaut ist"))
+    before = (region / "Map.md").read_bytes()
+    res, _ = new_file(world, region / "Eidos.md", "# Architecture\n")
+    assert (region / "Map.md").read_bytes() == before
+    assert res is None
+
+
+def test_the_row_lands_only_when_the_file_is_new(world):
+    """PROVES the detection mechanism itself: the SAME Edit against an EXISTING `Eidos.md` — same
+    region, same stem, same Map — adds nothing, because the gate saw the path present."""
+    region = world["vault"] / "Mnemosyne" / "UkrainianCard"
+    (region / "Map.md").write_text(MAP)
+    eidos = region / "Eidos.md"
+    eidos.write_text("# Architecture\n")
+    payload = {"cwd": str(world["repo"]), "tool_name": "Edit", "session_id": "t",
+               "tool_input": {"file_path": str(eidos), "old_string": "", "new_string": "more"}}
+    run("gate.py", "write", payload, world["env"])
+    assert run("chore.py", "write", payload, world["env"]) is None
+    assert (region / "Map.md").read_text() == MAP
+
+
+def test_the_map_row_is_committed_iff_the_vault_already_has_a_commit(world, tmp_path):
+    """PROVES both arms of the commit rule init uses. With history: a path-limited commit lands and
+    the report names its sha. Without history: the row is still written, nothing is committed, and
+    the report does not claim a commit it did not make."""
+    region = world["vault"] / "Mnemosyne" / "UkrainianCard"
+    (region / "Map.md").write_text(MAP)
+    res, _ = new_file(world, region / "Eidos.md", "# Architecture\n")
+    assert "committed" in ctx(res)
+    log = subprocess.run(["git", "-C", str(world["vault"]), "log", "-1", "--format=%h %an", "--",
+                          "Mnemosyne/UkrainianCard/Map.md"], capture_output=True, text=True).stdout
+    assert "atlas" in log
+
+    v2 = tmp_path / "Vault2"
+    (v2 / "Mnemosyne" / "UkrainianCard").mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(v2)], check=True)     # a repo with NO commit yet
+    (v2 / "Mnemosyne" / "UkrainianCard" / "Map.md").write_text(MAP)
+    env = dict(world["env"], GEDAECHTNIS_VAULT=str(v2), GEDAECHTNIS_STATE_DIR=str(tmp_path / "state2"))
+    res2, _ = new_file(world, v2 / "Mnemosyne" / "UkrainianCard" / "Eidos.md", "# Architecture\n", env=env)
+    assert "- [[Eidos|Architecture]]" in (v2 / "Mnemosyne" / "UkrainianCard" / "Map.md").read_text()
+    assert "committed" not in ctx(res2)
+    assert subprocess.run(["git", "-C", str(v2), "rev-parse", "--verify", "-q", "HEAD"],
+                          capture_output=True).returncode != 0
