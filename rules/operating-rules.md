@@ -18,7 +18,8 @@ index. Other files are created only when there is something to put in them.
 - A question surfaces that nobody has answered → **Open questions** (`Aporia.md`), with an
   urgency and today's date.
 - The state of the work changes (shipped, in flight, deferred, next) → **Status** (`Position.md`).
-- A file is added to the region → one row in **Index** (`Map.md`) pointing at it.
+- A role file is added to the region → the hook adds its row to **Index** (`Map.md`) for you, the
+  first time you write it. Just write the file; nothing has to be created or indexed in advance.
 
 Knowledge that applies to every project goes in `Global/`, with a pointer from the region — never
 a second copy: a duplicated fact diverges, and the stale half is the one that gets read.
