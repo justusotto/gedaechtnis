@@ -344,37 +344,79 @@ def read_filelock(p: Path) -> dict | None:
         return None
 
 
+def _filelock_mutex(p: Path):
+    """An flock-held fd guarding the check-and-set on `p`'s lock record.
+
+    A SEPARATE file from the record, and one that is never unlinked, because flock is held on an
+    INODE: if the guard were the record itself, a process could be granted the lock on an inode a
+    releasing process had already unlinked, and two sessions would each believe they held it.
+
+    This guard is why the take is atomic at all. Read-then-write without it is a TOCTOU race —
+    two gate processes both read "no lock", both write their own, both proceed, and one write
+    clobbers the other. Measured: with the naive version, sim_two_writers lost 1 of 240 entries
+    WITH the doors on (2026-09-09), which is the whole class D2 exists to stop."""
+    import fcntl
+    d = filelock_path(p)
+    d.parent.mkdir(parents=True, exist_ok=True)
+    fh = open(str(d) + ".mx", "a+")
+    fcntl.flock(fh, fcntl.LOCK_EX)
+    return fh
+
+
+def _filelock_unmutex(fh) -> None:
+    import fcntl
+    try:
+        fcntl.flock(fh, fcntl.LOCK_UN)
+    finally:
+        fh.close()
+
+
 def take_filelock(p: Path, sid: str) -> tuple[bool, float, str]:
     """Try to hold `p` for this session. Returns (ok, age_of_blocking_lock, blocking_session).
 
     Refuses only for a lock that is BOTH foreign and younger than LOCK_TTL. Our own lock is
     re-stamped (a retry of the same edit must not deadlock against itself), and a stale one is
-    taken over — see the staleness note above."""
-    cur = read_filelock(p)
-    if cur:
-        age = max(0.0, time.time() - float(cur.get("ts") or 0))
-        if cur.get("session_id") != sid and age < LOCK_TTL:
-            return False, age, str(cur.get("session_id") or "?")
+    taken over — see the staleness note above. The whole check-and-set runs under the mutex."""
     try:
-        d = filelock_path(p)
-        d.parent.mkdir(parents=True, exist_ok=True)
-        d.write_text(json.dumps({"session_id": sid, "ts": time.time(), "path": str(p)}), encoding="utf-8")
+        fh = _filelock_mutex(p)
     except OSError as e:
-        log("hook-errors", f"filelock-take\t{p}\t{e}")
-    return True, 0.0, sid
+        log("hook-errors", f"filelock-mutex\t{p}\t{e}")
+        return True, 0.0, sid                 # a guard that cannot open must not block the session
+    try:
+        cur = read_filelock(p)
+        if cur:
+            age = max(0.0, time.time() - float(cur.get("ts") or 0))
+            if cur.get("session_id") != sid and age < LOCK_TTL:
+                return False, age, str(cur.get("session_id") or "?")
+        try:
+            filelock_path(p).write_text(json.dumps({"session_id": sid, "ts": time.time(), "path": str(p)}),
+                                        encoding="utf-8")
+        except OSError as e:
+            log("hook-errors", f"filelock-take\t{p}\t{e}")
+        return True, 0.0, sid
+    finally:
+        _filelock_unmutex(fh)
 
 
 def release_filelock(p: Path, sid: str) -> bool:
     """Drop the lock on `p` if it is OURS. A foreign session's lock is never removed: releasing
-    somebody else's mutex is the same defect as taking it."""
-    cur = read_filelock(p)
-    if not cur or cur.get("session_id") != sid:
-        return False
+    somebody else's mutex is the same defect as taking it. Under the same guard as the take, so a
+    release can never interleave with a concurrent check-and-set."""
     try:
-        filelock_path(p).unlink()
-        return True
+        fh = _filelock_mutex(p)
     except OSError:
         return False
+    try:
+        cur = read_filelock(p)
+        if not cur or cur.get("session_id") != sid:
+            return False
+        try:
+            filelock_path(p).unlink()
+            return True
+        except OSError:
+            return False
+    finally:
+        _filelock_unmutex(fh)
 
 
 def guarded(fn):

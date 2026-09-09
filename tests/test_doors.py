@@ -311,6 +311,50 @@ def test_concilium_Index_is_allowed_but_a_role_stem_there_is_still_refused(world
     assert decision(other) == "deny" and "`Map.md`" in reason(other)
 
 
+# ===================================== the two-writer simulator and its control (DESIGN §5.4) ===
+# N is 120 per worker here so the pytest run stays in seconds; `SIM_N=500 pytest …` runs the
+# design's number. Measured 2026-09-09 at N=500: doors 1000/1000 kept, control 7/1000.
+
+SIM_N = int(os.environ.get("SIM_N", "120"))
+
+
+def test_two_concurrent_writers_lose_nothing(world, tmp_path):
+    """THE PACKET'S CENTRAL CLAIM. Two real processes, the real gate.py and chore.py, one file:
+    every entry survives, none is duplicated, and each worker's own entries stay in the order it
+    wrote them (a valid interleaving). Then D3's commit carries the whole file.
+
+    This test found the defect it exists to find: the first version of `take_filelock` did a
+    read-then-write with no guard, two gates both saw the file free, and 1 of 240 entries was lost
+    WITH the doors on. The check-and-set is now under an flock."""
+    import sim_two_writers as sim
+    res = sim.run_sim(tmp_path / "sim", n=SIM_N, doors=True)
+    assert res["errors"] == [], res["errors"]
+    assert res["lost"] == 0, f"entries lost WITH the doors on: {res}"
+    assert res["kept"] == res["expected"] == 2 * SIM_N
+    assert res["duplicated"] == 0 and res["unexpected"] == 0
+    assert res["out_of_order"] == 0, "a worker's own entries came out of the order it wrote them"
+    # D2 really was contended — a green from an uncontended run would say nothing about the mutex.
+    assert sum(w["gate_denied"] for w in res["workers"]) > 0, "no D2 refusal fired: the run never overlapped"
+    # D1 really was exercised: the whole-file shape the control uses is refused here.
+    assert sum(w["d1_denied"] for w in res["workers"]) == 2
+    # D3: both sessions recorded the file, and the commit carries what is on disk.
+    assert all(c["has_file"] for c in res["commits"].values()), res["commits"]
+    assert res["committed_matches_disk"] and res["committed_lines"] == res["text_lines"]
+
+
+def test_the_simulator_without_the_doors_DOES_lose_entries(world, tmp_path):
+    """THE DISCRIMINATING CONTROL, and it is not optional. Same timing, same jitter, same number of
+    appends — only the doors removed and the CAS replaced by the whole-file overwrite from a stale
+    read that D1 refuses. If this run ever finishes with nothing lost then the interleaving never
+    overlapped, the harness is VACUOUS, and every green above is a fact about the scheduler rather
+    than about D1/D2 — so a zero here FAILS the suite instead of passing it."""
+    import sim_two_writers as sim
+    res = sim.run_sim(tmp_path / "ctl", n=SIM_N, doors=False)
+    assert res["errors"] == [], res["errors"]
+    assert res["lost"] > 0, ("the no-doors control lost NOTHING — this harness cannot tell the doors "
+                             f"from their absence and proves nothing: {res}")
+
+
 # ================================================================= hooks.json wiring ============
 
 def test_hooks_json_is_valid_and_every_command_file_it_names_exists(world):
