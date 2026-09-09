@@ -9,6 +9,14 @@ partition-hook mode, vault dirt, what this session's @-import chain cost to boot
 such script configured the hook says nothing about it at all, rather than guessing where one
 might live.
 
+★ THE OPERATING RULES. A stranger's install has an empty CLAUDE.md and no prose anywhere telling
+a session what the six vault files are for. Rather than asking them to write that prose, the hook
+injects `rules/operating-rules.md` as additionalContext — the memory-writing discipline itself,
+generic, under 2,500 B. It is injected at `startup` ONLY: a `resume` or a `compact` continues a
+session that already has it, and re-sending it there would buy nothing and cost tokens every time.
+`inject_rules: false` in the config file (or GEDAECHTNIS_INJECT_RULES=0) turns it off for an
+install whose own CLAUDE.md already says all of this.
+
 ★ THE BOOT-COST FACT. A session cannot see its own boot: the @-imported files arrive as context
 with no size attached, so the one number that would tell a session whether its memory files have
 quietly become a document is the one number it never has. This hook measures it — the user-level
@@ -192,7 +200,24 @@ def main() -> None:
         except OSError:
             pass
     log("session", f"{sid}\tlane={lane}\tcwd={cwd}\thead={vault_head}")
-    context(EV, "\n".join(lines))
+    context(EV, "\n".join(lines + rules_block(inp.get("source"))))
+
+
+def rules_block(source) -> list[str]:
+    """The operating rules, at `startup` only, or [] — see the module docstring.
+
+    A source Claude Code did not send (an absent key, a direct invocation) is treated as a
+    startup: the failure that matters is a session running with no rules at all, and repeating
+    them on a resume costs only tokens."""
+    if (source or "startup") != "startup" or not config.flag("inject_rules", True):
+        return []
+    rules = Path(__file__).resolve().parent.parent / "rules" / "operating-rules.md"
+    try:
+        text = rules.read_text(encoding="utf-8").strip()
+    except OSError:                                  # a trimmed install without the rules file
+        return []
+    return ["", "The operating rules for this vault (from the Gedächtnis plugin; they are how "
+                "you write to it):", "", text]
 
 
 if __name__ == "__main__":

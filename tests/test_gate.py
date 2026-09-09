@@ -726,3 +726,46 @@ def test_no_chain_at_all_says_nothing_rather_than_zero(world):
     assert "boot:" not in res["hookSpecificOutput"]["additionalContext"]
     j = json.loads((world["state"] / "session-start-b5.json").read_text())
     assert j["boot_files"] == 0 and j["boot_bytes"] == 0
+
+
+# ------------------------------------------------------------ the injected operating rules ----
+RULES_MARKER = "A decision becomes settled"          # a line of rules/operating-rules.md itself
+
+
+def test_operating_rules_are_injected_at_startup(world):
+    """POSITIVE control: a starting session is handed the memory-writing discipline, so a
+    stranger's CLAUDE.md can stay empty."""
+    res = run("session_start.py", "", {"cwd": str(world["repo"]), "session_id": "r1",
+                                       "source": "startup"}, world["env"])
+    ctx = res["hookSpecificOutput"]["additionalContext"]
+    assert RULES_MARKER in ctx and "Cleanup YYYY-MM-DD/" in ctx and "Needs a decision:" in ctx
+    assert "Lane CARD" in ctx                        # the facts block is still there
+
+
+def test_operating_rules_are_not_repeated_on_resume_or_compact(world):
+    """NEGATIVE control: a session that already has them pays no tokens to be told twice."""
+    for source in ("resume", "compact"):
+        res = run("session_start.py", "", {"cwd": str(world["repo"]), "session_id": "r2",
+                                           "source": source}, world["env"])
+        ctx = res["hookSpecificOutput"]["additionalContext"]
+        assert RULES_MARKER not in ctx, source
+        assert "Lane CARD" in ctx, source            # everything else is unchanged
+
+
+def test_operating_rules_can_be_switched_off(world):
+    """NEGATIVE control: an install whose own CLAUDE.md already says all this turns it off."""
+    env = dict(world["env"], GEDAECHTNIS_INJECT_RULES="0")
+    res = run("session_start.py", "", {"cwd": str(world["repo"]), "session_id": "r3",
+                                       "source": "startup"}, env)
+    ctx = res["hookSpecificOutput"]["additionalContext"]
+    assert RULES_MARKER not in ctx and "Lane CARD" in ctx
+
+
+def test_operating_rules_file_is_generic_and_small():
+    """The file is loaded into every session that starts, so its size is a contract; and it
+    speaks the six-file vocabulary rather than any one vault's private names."""
+    rules = Path(__file__).resolve().parents[1] / "rules" / "operating-rules.md"
+    text = rules.read_text(encoding="utf-8")
+    assert len(text.encode("utf-8")) <= 2500
+    for stem in ("Map", "Position", "Canon", "Patterns", "Errata", "Aporia"):
+        assert f"**{stem}**" in text
