@@ -778,12 +778,18 @@ def test_operating_rules_file_is_generic_and_small():
 
     The ceiling was 2,500 B and is 4,500 B since the three-questions bullet landed: the rules text
     is where "nothing else asks the user anything" has to be stated, and a budget that pushes that
-    sentence out buys a few hundred bytes at the price of the discipline it exists to carry."""
+    sentence out buys a few hundred bytes at the price of the discipline it exists to carry.
+
+    ★ Since WP3 (DESIGN §6) each of the six core files is named as its DISPLAY name, bolded, with
+    the stem once alongside — "**Decisions** (`Canon.md`)" — not the bare stem bolded; the display
+    name is what a session should call the file, the stem is what it is on disk."""
     rules = Path(__file__).resolve().parents[1] / "rules" / "operating-rules.md"
     text = rules.read_text(encoding="utf-8")
     assert len(text.encode("utf-8")) <= 4500
-    for stem in ("Map", "Position", "Canon", "Patterns", "Errata", "Aporia"):
-        assert f"**{stem}**" in text
+    for stem, disp in (("Map", "Index"), ("Position", "Status"), ("Canon", "Decisions"),
+                       ("Patterns", "Patterns"), ("Errata", "Mistakes"), ("Aporia", "Open questions")):
+        assert f"**{disp}**" in text, disp
+        assert f"`{stem}.md`" in text, stem
 
 
 def test_the_operating_rules_name_the_three_questions_and_claim_no_others():
