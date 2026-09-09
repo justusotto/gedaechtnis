@@ -49,6 +49,12 @@ Recognised JSON keys, all optional:
   inject_rules        inject rules/operating-rules.md into every session that STARTS, so a
                       stranger's CLAUDE.md can stay empty (default: true; startup only, never
                       on a resume or a compact — see session_start.py)
+  language            which display name a role-file stem is shown under (see names.py):
+                      `en` (default) — Decisions, Status, Mistakes, …; `de` — Entscheidungen,
+                      Stand, Fehler, … (built into names.json, off by default); `latin` — the
+                      stem itself, unchanged. The disk keeps the stem either way (`Canon.md`
+                      never becomes `Decisions.md`) — this only changes what a session CALLS
+                      the file. env GEDAECHTNIS_LANGUAGE wins.
 
 Example ~/.claude/gedaechtnis/config.json:
 
@@ -218,3 +224,15 @@ def flag(key: str, default: bool = False) -> bool:
         return env.strip() not in ("", "0", "false", "no")
     v = _load().get(key)
     return bool(v) if v is not None else default
+
+
+def language() -> str:
+    """`en` (default), `de`, or `latin` — which display name names.py shows a stem under.
+    Re-read from disk on every call, same reasoning as `declined()`: a config edit must be seen
+    by the next hook that asks, not only the next process restart. GEDAECHTNIS_LANGUAGE wins."""
+    env = os.environ.get("GEDAECHTNIS_LANGUAGE")
+    if env and env.strip():
+        return env.strip().lower()
+    v = _load().get("language")
+    s = str(v).strip().lower() if v else ""
+    return s or "en"

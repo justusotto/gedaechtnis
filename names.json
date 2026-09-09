@@ -1,0 +1,20 @@
+{
+  "Map": {"en": "Index", "de": "Index", "gloss": "what is here and where"},
+  "Vision": {"en": "Purpose", "de": "Zweck", "gloss": "what this is for, what done looks like"},
+  "Position": {"en": "Status", "de": "Stand", "gloss": "where it stands now"},
+  "Course": {"en": "Roadmap", "de": "Fahrplan", "gloss": "what comes next, in order"},
+  "Canon": {"en": "Decisions", "de": "Entscheidungen", "gloss": "settled, with reasons"},
+  "Patterns": {"en": "Patterns", "de": "Muster", "gloss": "what worked more than once"},
+  "Aporia": {"en": "Open questions", "de": "Offene Fragen", "gloss": "not yet answered"},
+  "Eidos": {"en": "Architecture", "de": "Aufbau", "gloss": "how it is built"},
+  "Errata": {"en": "Mistakes", "de": "Fehler", "gloss": "what went wrong and what to do instead"},
+  "Apparatus": {"en": "References", "de": "Quellen", "gloss": "pointers out"},
+  "Annales": {"en": "Log", "de": "Chronik", "gloss": "what happened when"},
+  "Nomos": {"en": "Rules", "de": "Regeln", "gloss": "what is safe, coordinated, forbidden"},
+  "Lexicon": {"en": "Glossary", "de": "Glossar", "gloss": "the words"},
+  "Ethos": {"en": "Style", "de": "Umgang", "gloss": "how to speak to the user"},
+  "Praxis": {"en": "Procedures", "de": "Verfahren", "gloss": "how things are done"},
+  "Exempla": {"en": "Examples", "de": "Beispiele", "gloss": "worked cases"},
+  "Kernel": {"en": "Boot", "de": "Kern", "gloss": "what every session loads"},
+  "Inbox": {"en": "Inbox", "de": "Eingang", "gloss": "what others did here"}
+}
