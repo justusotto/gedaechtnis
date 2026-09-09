@@ -19,7 +19,7 @@ surface for the one question. Shown at most once per repo per day (a stamp in th
 ★ THE OPERATING RULES. A stranger's install has an empty CLAUDE.md and no prose anywhere telling
 a session what the six vault files are for. Rather than asking them to write that prose, the hook
 injects `rules/operating-rules.md` as additionalContext — the memory-writing discipline itself,
-generic, under 2,500 B. It is injected at `startup` ONLY: a `resume` or a `compact` continues a
+generic, under 3,000 B. It is injected at `startup` ONLY: a `resume` or a `compact` continues a
 session that already has it, and re-sending it there would buy nothing and cost tokens every time.
 `inject_rules: false` in the config file (or GEDAECHTNIS_INJECT_RULES=0) turns it off for an
 install whose own CLAUDE.md already says all of this.
