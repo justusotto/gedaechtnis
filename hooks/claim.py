@@ -224,6 +224,17 @@ def cmd_start(inp: dict) -> None:
         rc, err = _run_tool(tool, "claim-interactive", region, pid)
         log("claim", f"start\tsid={sid}\tself={os.getpid()}\tclaude={pid}\tregion={region}\trc={rc}"
                      + (f"\t{err}" if err else ""))
+        if rc == 1:
+            # Held by another writer — possibly a DEAD one: `claim-interactive` does not reap, and
+            # on its first live run (2026-09-09) this hook was refused by a lock whose pid had been
+            # dead for twelve days. Ask the helper's own reaper (it applies its thresholds; a live
+            # holder is never touched), then try ONCE more. Never loop.
+            rrc, rerr = _run_tool(tool, "reap", region, pid)
+            log("claim", f"reap\tsid={sid}\tregion={region}\trc={rrc}" + (f"\t{rerr}" if rerr else ""))
+            if rrc == 0:
+                rc, err = _run_tool(tool, "claim-interactive", region, pid)
+                log("claim", f"retry\tsid={sid}\tclaude={pid}\tregion={region}\trc={rc}"
+                             + (f"\t{err}" if err else ""))
         if rc == 0:                                    # 0 is the ONLY code that means "held by me"
             got.append(region)
             if (region, pid) not in held:

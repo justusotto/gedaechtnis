@@ -204,7 +204,8 @@ def test_held_by_another_writer_is_not_recorded(world):
     assert claims(w) == []
     assert "NOT held" in p.stdout
     hook(w, "stop")
-    assert len(calls(w)) == 1                       # stop released nothing it does not own
+    subs = [str(c).split()[0] for c in calls(w)]
+    assert subs == ["claim-interactive", "reap"], subs   # rc 1 → one reap attempt (refused here, rc 1); stop released nothing it does not own
 
 
 def test_raced_lost_is_not_recorded(world):
@@ -271,3 +272,33 @@ def test_user_prompt_submit_reclaims_with_a_promptless_payload(world):
     assert "claim.py start" in hj["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
     hook(world, "start", source=None)
     assert any(str(c).startswith("claim-interactive") for c in calls(world)), calls(world)
+
+
+def _counting_tool(world, first_claim_rc, reap_rc):
+    """A fake helper: the first claim-interactive returns `first_claim_rc`, reap returns `reap_rc`,
+    every later call returns 0. Records argv like the fixture's tool."""
+    count = world["tool"].parent / "count.txt"
+    world["tool"].write_text(
+        "#!/bin/sh\n"
+        f'echo "$*" >> "{world["argv_log"]}"\n'
+        f'n=$(cat "{count}" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "{count}"\n'
+        f'case "$1" in claim-interactive) [ "$n" -eq 1 ] && exit {first_claim_rc}; exit 0;; '
+        f'reap) exit {reap_rc};; esac\nexit 0\n')
+
+
+def test_held_by_a_dead_writer_is_reaped_once_and_reclaimed(world):
+    """First live run (2026-09-09): a 12-day-dead interactive lock returned rc 1 and nothing
+    reaped it. On rc 1 the hook asks the helper's reaper once and retries once."""
+    _counting_tool(world, first_claim_rc=1, reap_rc=0)
+    hook(world, "start")
+    subs = [str(c).split()[0] for c in calls(world)]
+    assert subs == ["claim-interactive", "reap", "claim-interactive"], subs
+    assert claims(world), "the retried claim is recorded"
+
+
+def test_reap_refused_means_no_retry(world):
+    _counting_tool(world, first_claim_rc=1, reap_rc=1)
+    hook(world, "start")
+    subs = [str(c).split()[0] for c in calls(world)]
+    assert subs == ["claim-interactive", "reap"], subs
+    assert not claims(world)
