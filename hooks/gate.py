@@ -245,8 +245,10 @@ _PROTECTED = [
     (re.compile(r"(?:^|[\s/'\"])media/"), "a `media/` directory holds mined clips — user data"),
     (re.compile(r"(?:~|/Users/[^/\s]+)/Pictures"), "~/Pictures holds his photographs"),
     (re.compile(r"\.Trash"), "the Trash is NEVER emptied — it is his permanent restore net"),
-    (re.compile(r"(?:~|/Users/[^/\s]+|\$HOME|\$\{HOME\})/Atlas(?:/|\s|$)"), "the vault and its history"),
-]
+    (re.compile(r"(?:~|/Users/[^/\s]+|\$HOME|\$\{HOME\})/" + re.escape(VAULT.name) + r"(?:/|\s|$)"
+                + r"|" + re.escape(str(VAULT)) + r"(?:/|\s|$)"), "the vault and its history"),
+]   # the vault is whatever config names — council 2 (Balthasar, closure) found the literal `/Atlas` here,
+    # which left a stranger's ~/Gedaechtnis unprotected by the one rule that must hold everywhere
 _VAULT_RX = re.escape(str(VAULT)) + r"(?:/|\s|$)"   # scope for the owner-class protections when protect_everywhere is off
 _DESTROY = re.compile(r"(?<!git )(?:^|\s)(?:rm|unlink|shred|rmdir)\s|\bfind\b.*\s-delete\b|\bgit\s+clean\b|>\s*\S*_cache\.json")
 
