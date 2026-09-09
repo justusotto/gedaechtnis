@@ -275,7 +275,10 @@ def rule_data_integrity(cmd: str) -> str | None:
                 continue                              # a stranger's own `media/` or `*_cache.json` outside the vault is his to delete
             if rx.search(seg):
                 # allow rm inside the vault's gitignored scratch (.atlas-locks, .pre-* backups) explicitly
-                if "vault" in why and re.search(r"Atlas/(?:\.atlas-locks|\.atlas-writer\.lock|[^\s]*\.pre-)", seg):
+                # the vault's name, not the literal `Atlas` — the same correction council 2 made to
+                # _PROTECTED above: a stranger whose vault is `~/Gedaechtnis` gets its own scratch
+                # carve-out, instead of being asked about every lock file it cleans up
+                if "vault" in why and re.search(re.escape(VAULT.name) + r"/(?:\.atlas-locks|\.atlas-writer\.lock|[^\s]*\.pre-)", seg):
                     continue
                 return (f"Defaults never delete: {why}. Deletions go to the Trash via Finder in one `Cleanup YYYY-MM-DD/` "
                         "bundle with a README, never `rm`; and this class asks the owner first. (Global/Nomos §Data integrity)")

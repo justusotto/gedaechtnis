@@ -355,6 +355,48 @@ def test_the_simulator_without_the_doors_DOES_lose_entries(world, tmp_path):
                              f"from their absence and proves nothing: {res}")
 
 
+# ================================== the vault protection is DERIVED, not the literal `/Atlas` ===
+# Council 2 (Balthasar, closure) found `_PROTECTED` matching the literal `/Atlas`, which left a
+# stranger's own vault unprotected by the one rule that must hold everywhere. It derives from
+# config.VAULT now; these are the regression tests, because nothing else re-measures a fix.
+
+
+def strangers_world(tmp_path):
+    """A world whose vault is `Gedaechtnis`, with a decoy `Atlas` directory beside it."""
+    vault = tmp_path / "Gedaechtnis"
+    (vault / "Notes").mkdir(parents=True)
+    (tmp_path / "Atlas").mkdir()                       # a stranger's own unrelated folder
+    (vault / "Global").mkdir()
+    (vault / "Global" / "fleet-roster.md").write_text("```fleet-roster\nlane: X\nrepo: repo\n```\n")
+    repo = tmp_path / "repo"; repo.mkdir()
+    (repo / ".atlas-lane").write_text("lane: X\npath: Notes/\n")
+    env = dict(os.environ, GEDAECHTNIS_VAULT=str(vault), GEDAECHTNIS_STATE_DIR=str(tmp_path / "state"),
+               GEDAECHTNIS_FLEET_ROSTER=str(vault / "Global" / "fleet-roster.md"),
+               GEDAECHTNIS_USER_MEMORY=str(tmp_path / "no-such-user-memory.md"),
+               GEDAECHTNIS_CONFIG=str(tmp_path / "no-such-config.json"))
+    return dict(vault=vault, repo=repo, env=env, tmp=tmp_path)
+
+
+def test_a_strangers_vault_is_protected_exactly_like_the_owners(tmp_path):
+    """POSITIVE control. `rm -rf <tmp>/Gedaechtnis` must be refused when that IS the vault — the
+    rule is about the vault, not about a directory called Atlas."""
+    w = strangers_world(tmp_path)
+    res = run("gate.py", "bash", {"cwd": str(w["repo"]), "tool_name": "Bash", "session_id": "A",
+                                  "tool_input": {"command": f"rm -rf {w['vault']}"}}, w["env"])
+    assert decision(res) == "ask"                      # this class refuses AND asks: the owner may say yes
+    assert "the vault and its history" in reason(res)
+
+
+def test_a_directory_called_Atlas_that_is_NOT_the_vault_is_not_flagged(tmp_path):
+    """NEGATIVE control, and the half that proves the rule DERIVES rather than merely matching one
+    more name: with `protect_everywhere` off, a stranger's own `Atlas` folder is theirs to delete.
+    A door still carrying the literal would refuse this and be unable to say why."""
+    w = strangers_world(tmp_path)
+    res = run("gate.py", "bash", {"cwd": str(w["repo"]), "tool_name": "Bash", "session_id": "A",
+                                  "tool_input": {"command": f"rm -rf {w['tmp']}/Atlas"}}, w["env"])
+    assert res is None, reason(res)
+
+
 # ================================================================= hooks.json wiring ============
 
 def test_hooks_json_is_valid_and_every_command_file_it_names_exists(world):
