@@ -808,3 +808,11 @@ def test_launch_model_door_is_off_for_strangers(world, monkeypatch):
     assert bash(world, "claude -p 'hello'") is None
     world["env"]["GEDAECHTNIS_REQUIRE_LAUNCH_MODEL"] = "1"
     assert decision(bash(world, "claude -p 'hello'")) == "deny"
+
+
+def test_the_vault_is_protected_whatever_it_is_called(world):
+    """Council 2 closure (Balthasar): the never-delete-the-vault rule matched the literal `/Atlas`."""
+    v = world["vault"]                                  # the world's vault is NOT called Atlas
+    assert decision(bash(world, f"rm -rf {v}/Recipes/media/")) == "ask"
+    assert decision(bash(world, f"rm -rf {v}")) == "ask"
+    assert decision(bash(world, f"rm -rf ~/{v.name}/Recipes")) == "ask"
