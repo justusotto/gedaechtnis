@@ -68,7 +68,11 @@ def main() -> None:
         lines.append("- No .atlas-lane marker resolves from this cwd: this session has NO declared vault write partition (the Stop hook will commit nothing).")
     lines.append(f"- Partition hook mode: {mode.upper()} (" + ("logs would-be refusals to ~/.claude/gedaechtnis/partition.log, blocks nothing" if mode == "warn" else "writes outside the partition are refused") + ").")
     if vault_head:
-        lines.append(f"- Vault HEAD at session start: {vault_head[:8]}; dirty paths in the vault right now: {n_dirty}.")
+        lines.append(f"- Vault {VAULT}: HEAD at session start {vault_head[:8]}; dirty paths in the vault right now: {n_dirty}.")
+    elif VAULT.is_dir():
+        lines.append(f"- Vault {VAULT}: no commit yet" + ("" if (VAULT / ".git").exists() else " (not a git repository)") + ".")
+    else:
+        lines.append(f"- Vault {VAULT} does not exist: run `python3 {Path(__file__).resolve().parent.parent / 'init.py'}` in this repo to create it.")
     ops = config.owner_pages_status()                  # None unless config.json names a script
     if ops:
         rc, out, err = sh([config.python(), str(ops), "--json"], timeout=8)
