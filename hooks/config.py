@@ -21,6 +21,13 @@ Recognised JSON keys, all optional:
   owner_pages_status  path to a script reporting whether review pages have been answered;
                       when it is absent the session-start hook simply says nothing about them
   python              interpreter used to run that script (default: the one running the hook)
+  tool_root           the checkout the plugin lives in, used to find sibling tools it calls
+                      (default: the directory two levels above this file)
+  claim_tool          the region-claim helper the session-claim hook calls
+                      (default: <tool_root>/skills/atlas-region/helpers/region_claim.sh; when
+                      no such file exists the hook does nothing at all)
+  auto_claim          claim this session's region at SessionStart and release it at Stop
+                      (default: true — see claim.py for why it is opt-out, not opt-in)
 
 Example ~/.claude/gedaechtnis/config.json:
 
@@ -79,6 +86,22 @@ VAULT = _path("GEDAECHTNIS_VAULT", "vault", _default_vault)
 STATE = _path("GEDAECHTNIS_STATE_DIR", "state_dir", HOME / ".claude" / "gedaechtnis")
 ROSTER = _path("GEDAECHTNIS_FLEET_ROSTER", "fleet_roster", VAULT / "Global" / "fleet-roster.md")
 WORKTREES = _path("GEDAECHTNIS_WORKTREES", "worktrees_dir", HOME / ".claude" / "worktrees")
+
+
+TOOL_ROOT = _path("GEDAECHTNIS_TOOL_ROOT", "tool_root", lambda: Path(__file__).resolve().parents[2])
+
+
+def claim_tool() -> Path | None:
+    """The §2.8 region-claim helper, or None when this install has no such tool.
+
+    Derived, never hard-coded: a checkout that carries the helper is found through TOOL_ROOT
+    (this file's own grandparent by default), and an install that does not carry one — the
+    plugin symlinked on its own into a skills directory — simply has no claim hook. None is
+    the ordinary answer, not an error: the caller no-ops silently."""
+    raw = os.environ.get("GEDAECHTNIS_CLAIM_TOOL") or FILE.get("claim_tool")
+    p = (Path(os.path.expanduser(str(raw))) if raw
+         else TOOL_ROOT / "skills" / "atlas-region" / "helpers" / "region_claim.sh")
+    return p if p.is_file() else None
 
 
 def owner_pages_status() -> Path | None:

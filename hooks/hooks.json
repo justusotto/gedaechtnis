@@ -67,6 +67,22 @@
             "type": "command",
             "command": "python3 -B \"${CLAUDE_PLUGIN_ROOT}\"/hooks/session_start.py",
             "timeout": 15
+          },
+          {
+            "type": "command",
+            "command": "python3 -B \"${CLAUDE_PLUGIN_ROOT}\"/hooks/claim.py start",
+            "timeout": 20
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -B \"${CLAUDE_PLUGIN_ROOT}\"/hooks/claim.py stop",
+            "timeout": 20
           }
         ]
       }

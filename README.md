@@ -38,6 +38,8 @@ directory already exists.
 | PostToolUse Edit/Write | `chore.py write` | Repairs a queue file's missing trailing newline (without it the next appended row glues onto the previous line and no parser sees it); reports commit SHAs in the text that resolve in no known repo; and, when an edit removes a heading or an id, lists every other file still citing it. |
 | PostToolUse Edit/Write | `chore.py inbox` | When a session writes in a region that is not its own, appends one row to that region's `Inbox.md`, so the record lands where the work happened rather than where the writer had permission. |
 | SessionStart | `session_start.py` | States the facts a session should not have to ask for: which lane it is, what it may write, the partition mode, the vault's HEAD and uncommitted count, unread inbox and ledger rows. |
+| SessionStart | `claim.py start` | Takes this session's per-region writer claim, so the vault's one-writer-per-region rule is kept by machinery instead of by a ritual performed from memory. Does nothing at all when no claim helper is configured, when the session has no lane, or when its partition names no region. |
+| Stop | `claim.py stop` | Gives back exactly the claims this session took, and nothing else. A claim that is never released is worse than none: the next session defers to a holder that no longer exists. |
 
 Two more tools ship alongside the hooks:
 
@@ -65,6 +67,9 @@ Precedence, per setting: environment variable → `~/.claude/gedaechtnis/config.
 | `worktrees_dir` | `GEDAECHTNIS_WORKTREES` | `~/.claude/worktrees` |
 | `owner_pages_status` | — | none; the session-start hook then says nothing about review pages |
 | `python` | — | the interpreter running the hook |
+| `tool_root` | `GEDAECHTNIS_TOOL_ROOT` | the checkout this plugin lives in |
+| `claim_tool` | `GEDAECHTNIS_CLAIM_TOOL` | `<tool_root>/skills/atlas-region/helpers/region_claim.sh`; absent = the claim hooks do nothing |
+| `auto_claim` | `GEDAECHTNIS_AUTO_CLAIM` | `true` — coordination that must be switched on is coordination that is off |
 
 ```json
 {
