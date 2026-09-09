@@ -1,0 +1,14 @@
+{
+  "task_id": "003-exception-rule",
+  "title": "Exception-handling rule after a bug fix",
+  "positive_control": false,
+  "description": "Modelled on DESIGN.md §7.2.1's second example — 'a bug fixed on day 2 that day 4 must not re-introduce'. Day 1 fixes a bug and records the rule that prevents it recurring; day 4 must state the rule before writing new code, without the bug or the rule being restated anywhere in the day-4 prompt.",
+  "day1_prompt": "Day 1: we found and fixed a bug — a retry loop used a bare `except:` and silently swallowed a KeyboardInterrupt. Decide and record the rule: always catch a specific exception class, never a bare except.",
+  "memory_sentence": "This project's rule: never use a bare except, always catch a specific exception class.",
+  "canon_heading": "Never use a bare except",
+  "fact": "bare except",
+  "day_n": 4,
+  "day_n_prompt": "Day 4: before writing new error-handling code, state the exception-handling rule this project follows, in one sentence.",
+  "checker_file": "exception-rule-answer.txt",
+  "checker_must_contain": "bare except"
+}
