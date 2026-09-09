@@ -64,10 +64,12 @@ non-terminal stdin, takes the default without asking.
 
 For each chosen project it creates: a vault at `~/Gedaechtnis` (or uses `~/Atlas` if that directory
 already exists), `git init`-ed; a folder for the project in the vault, named after the repo folder
-**verbatim**, with six starter files (Map, Position, Canon, Patterns, Errata, Aporia — every other
-file is born on its first write); a *lane* — the writer identity its sessions use — declared in the
-vault's `Global/fleet-roster.md` and in a `.atlas-lane` marker in the repo; an @-import line in the
-repo's `CLAUDE.md`; `~/.claude/gedaechtnis/config.json` naming the vault; and the symlink
+**verbatim**, with six starter files — `Map.md`, `Position.md`, `Canon.md`, `Patterns.md`,
+`Errata.md`, `Aporia.md`, shown to you and to the model as Index, Status, Decisions, Patterns,
+Mistakes, Open questions (every other file is born on its first write); a *lane* — the writer
+identity its sessions use — declared in the vault's `Global/fleet-roster.md` and in a
+`.atlas-lane` marker in the repo; an @-import line in the repo's `CLAUDE.md`;
+`~/.claude/gedaechtnis/config.json` naming the vault; and the symlink
 `~/.claude/skills/gedaechtnis` that makes Claude Code load the plugin. It creates only what is
 absent and never overwrites a file: run it again and every line reports `kept`.
 
@@ -109,6 +111,39 @@ Two agents ship alongside: **memory-debriefer** (writes the end-of-session debri
 since *this session's* start, and names the entry you should have made) and **memory-reviewer**
 (ratifies an entry before it lands — placement, supersession, evidence). Both are read-mostly and
 pin a small model.
+
+## What the files are called
+
+The file on disk keeps a short Greek/Latin name (`Canon.md`, never renamed to `Decisions.md`);
+every surface a person or the model reads — the session facts block, `init`'s templates, the
+commands, these docs — shows a plain-English name instead ([`hooks/names.py`](hooks/names.py),
+[`names.json`](names.json)):
+
+| file (on disk) | shown as | what it holds |
+|---|---|---|
+| `Map.md` | Index | what is here and where |
+| `Vision.md` | Purpose | what this is for, what done looks like |
+| `Position.md` | Status | where it stands now |
+| `Course.md` | Roadmap | what comes next, in order |
+| `Canon.md` | Decisions | settled, with reasons |
+| `Patterns.md` | Patterns | what worked more than once |
+| `Aporia.md` | Open questions | not yet answered |
+| `Eidos.md` | Architecture | how it is built |
+| `Errata.md` | Mistakes | what went wrong and what to do instead |
+| `Apparatus.md` | References | pointers out |
+| `Annales.md` | Log | what happened when |
+| `Nomos.md` | Rules | what is safe, coordinated, forbidden |
+| `Lexicon.md` | Glossary | the words |
+| `Ethos.md` | Style | how to speak to the user |
+| `Praxis.md` | Procedures | how things are done |
+| `Exempla.md` | Examples | worked cases |
+| `Kernel.md` | Boot | what every session loads |
+| `Inbox.md` | Inbox | what others did here |
+
+The `language` switch (`config.json`, or `GEDAECHTNIS_LANGUAGE`) picks the column: `en` (default,
+the table above), `de` (built into `names.json`, off by default — `Canon.md` shows as
+*Entscheidungen*, `Errata.md` as *Fehler*), or `latin`, which shows the stem itself. Changing it
+never renames a file — it only changes what a session calls the file it already has.
 
 ## What each hook does
 
@@ -164,6 +199,7 @@ Precedence, per setting: environment variable → `~/.claude/gedaechtnis/config.
 | `auto_claim` | `GEDAECHTNIS_AUTO_CLAIM` | `true` — coordination that must be switched on is coordination that is off |
 | `auto_commit` | `GEDAECHTNIS_AUTO_COMMIT` | `true` — the Stop hook commits this session's vault writes |
 | `inject_rules` | `GEDAECHTNIS_INJECT_RULES` | `true` — the operating rules are injected at session start |
+| `language` | `GEDAECHTNIS_LANGUAGE` | `en` — `de` and `latin` are the switch; see "What the files are called" above |
 
 ```json
 {
