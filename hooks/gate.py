@@ -144,13 +144,18 @@ def rule_vault_git(cmd: str, cwd: str | None) -> str | None:
             if toks[i].startswith("-"):
                 i += 1; continue
             sub = toks[i]; break
-        if sub == "add" and re.search(r"(?:\s|^)(?:-A|--all|-a|-u|--update|\.)(?:\s|$)", seg[seg.index("add")+3:]):
+        # The subcommand is located as a WHOLE WORD after the git options — `seg.index("commit")`
+        # matched inside a PATH containing "commit" (a pytest tmp dir), so the body started mid-path
+        # and a path fragment read as a pathspec (found 2026-09-09 by the trailing-pathspec test).
+        sub_m = re.search(r"(?:^|\s)" + re.escape(sub or "\x00") + r"(?=\s|$)", seg[len(w[0]):]) if sub else None
+        after_sub = seg[len(w[0]) + sub_m.end():] if sub_m else ""
+        if sub == "add" and re.search(r"(?:\s|^)(?:-A|--all|-a|-u|--update|\.)(?:\s|$)", after_sub):
             return ("Vault law: never `git add -A`/`-a`/`-u`/`.` in ~/Atlas — a broad add sweeps another lane's "
                     "in-flight work into your commit. Add the exact paths: `git -C ~/Atlas add -- <file>`. "
                     "(Speculum/Kernel 'Standing constraints'; Global/Errata 'A file written before a concurrent "
                     "automated committer runs…')")
         if sub == "commit":
-            body = seg[seg.index("commit")+6:]
+            body = after_sub
             body = re.sub(r"<<-?\s*(['\"]?)(\w+)\1.*?\n\2\s*$", "HEREDOC", body, flags=re.S | re.M)   # a heredoc body is text, whatever it contains
             flags = re.sub(r"'[^']*'|\"(?:[^\"\\\\]|\\\\.)*\"", " Q ", body)   # quoted text cannot carry a flag
             if re.search(r"(?:\s|^)(?:-[a-zA-Z]*a[a-zA-Z]*|--all)(?:\s|$)", flags):
