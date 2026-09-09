@@ -108,6 +108,17 @@
           }
         ]
       }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -B \"${CLAUDE_PLUGIN_ROOT}\"/hooks/claim.py start",
+            "timeout": 20
+          }
+        ]
+      }
     ]
   }
 }

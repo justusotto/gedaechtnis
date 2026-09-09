@@ -28,8 +28,12 @@ def world(tmp_path):
     # GEDAECHTNIS_CONFIG points at a file that does not exist, so a real ~/.claude/gedaechtnis/
     # config.json on the host cannot reach the hooks under test (it would otherwise supply
     # `owner_pages_status` and make this suite's verdict depend on the machine).
+    # GEDAECHTNIS_USER_MEMORY points at a file that does not exist for the same reason as
+    # GEDAECHTNIS_CONFIG below: otherwise the host's real ~/.claude/CLAUDE.md would be walked
+    # by the boot-cost measurement and every assertion about it would move with the machine.
     env = dict(os.environ, GEDAECHTNIS_VAULT=str(vault), GEDAECHTNIS_STATE_DIR=str(state),
                GEDAECHTNIS_FLEET_ROSTER=str(vault / "Global" / "fleet-roster.md"),
+               GEDAECHTNIS_USER_MEMORY=str(tmp_path / "no-such-user-memory.md"),
                GEDAECHTNIS_CONFIG=str(tmp_path / "no-such-config.json"))
     return dict(vault=vault, repo=repo, state=state, env=env)
 
@@ -625,3 +629,100 @@ def test_heredoc_message_with_inner_quote_is_not_refused(world):
     v = world["vault"]
     cmd = "\n".join([f'git -C {v} commit -m "$(cat <<' + "'EOF'", 'he said "no -a here"; fine', "EOF", ')" -- Global/Map.md'])
     assert bash(world, cmd) is None
+
+
+# ---------------------------------------------------------------- the boot-cost fact ----
+# A session cannot see its own boot: the @-imported files arrive as context with no size
+# attached. The hook measures the chain and states it. These controls hold the measurement
+# honest — the SET of files walked, the SUM over them, and the two ways a real chain goes
+# wrong (a dangling import, and one file reachable from both entrypoints).
+
+def _chain_world(world, tmp_path, home):
+    """A synthetic two-entrypoint chain of known sizes -> (env, expected_files).
+
+    `expected_files` is written out explicitly rather than derived from the walker, so the
+    assertion is an INDEPENDENT construction of the answer: if the closure walk visits a
+    different set, the count and the sum both move and the test says so.
+    """
+    home.mkdir(parents=True, exist_ok=True)
+    leaf_a = home / "leaf-a.md"; leaf_a.write_bytes(b"a" * 1_000)
+    deep = home / "deep.md"; deep.write_bytes(b"d" * 700)            # reached via leaf_b, 2 hops
+    leaf_b = home / "leaf-b.md"
+    leaf_b.write_bytes(b"@%s\n" % str(deep).encode() + b"b" * 2_500)
+    user_md = home / "CLAUDE.md"
+    user_md.write_text("prose that mentions @-imports but is not one\n@%s\n@%s\n" % (leaf_a, leaf_b),
+                       encoding="utf-8")
+    repo_md = world["repo"] / "CLAUDE.md"
+    repo_leaf = home / "repo-leaf.md"; repo_leaf.write_bytes(b"r" * 4_242)
+    repo_md.write_text("@%s\n" % repo_leaf, encoding="utf-8")
+    env = dict(world["env"], GEDAECHTNIS_USER_MEMORY=str(user_md))
+    return env, [user_md, leaf_a, leaf_b, deep, repo_md, repo_leaf]
+
+
+def test_session_start_reports_the_boot_chain_cost(world, tmp_path):
+    env, expected = _chain_world(world, tmp_path, tmp_path / "home")
+    total = sum(p.stat().st_size for p in expected)
+    res = run("session_start.py", "", {"cwd": str(world["repo"]), "session_id": "b1",
+                                       "source": "startup"}, env)
+    ctx = res["hookSpecificOutput"]["additionalContext"]
+    assert f"boot: {total:,} B across {len(expected)} files (@-import chain)" in ctx, ctx
+    j = json.loads((world["state"] / "session-start-b1.json").read_text())
+    assert j["boot_bytes"] == total and j["boot_files"] == len(expected)
+    # and the walk really did follow BOTH entrypoints and a second hop, not just the entry files
+    assert total > 1_000 + 2_500 + 700 + 4_242
+
+
+def test_a_missing_import_is_skipped_not_fatal(world, tmp_path):
+    """Claude Code does not fail a session over a dangling @-import, so neither may this. The
+    line still appears, the total simply does not include what is not there."""
+    home = tmp_path / "home"
+    env, expected = _chain_world(world, tmp_path, home)
+    user_md = home / "CLAUDE.md"
+    with open(user_md, "a", encoding="utf-8") as fh:
+        fh.write("@%s\n" % (home / "vanished.md"))
+    res = run("session_start.py", "", {"cwd": str(world["repo"]), "session_id": "b2",
+                                       "source": "startup"}, env)
+    ctx = res["hookSpecificOutput"]["additionalContext"]
+    j = json.loads((world["state"] / "session-start-b2.json").read_text())
+    assert j["boot_files"] == len(expected), "the missing file is skipped, not counted"
+    assert f"across {len(expected)} files" in ctx
+    assert j["boot_bytes"] == user_md.stat().st_size + sum(
+        p.stat().st_size for p in expected if p != user_md)
+
+
+def test_a_file_in_both_chains_is_counted_once(world, tmp_path):
+    """The common real case: the repo's CLAUDE.md and the user's both reach the same vault
+    file. Counting it twice would overstate every boot on every fleet repo."""
+    home = tmp_path / "home"; home.mkdir(parents=True)
+    shared = home / "shared.md"; shared.write_bytes(b"s" * 3_000)
+    user_md = home / "CLAUDE.md"; user_md.write_text("@%s\n" % shared, encoding="utf-8")
+    repo_md = world["repo"] / "CLAUDE.md"; repo_md.write_text("@%s\n" % shared, encoding="utf-8")
+    env = dict(world["env"], GEDAECHTNIS_USER_MEMORY=str(user_md))
+    run("session_start.py", "", {"cwd": str(world["repo"]), "session_id": "b3",
+                                 "source": "startup"}, env)
+    j = json.loads((world["state"] / "session-start-b3.json").read_text())
+    assert j["boot_files"] == 3, "user CLAUDE.md + repo CLAUDE.md + ONE shared file"
+    assert j["boot_bytes"] == 3_000 + user_md.stat().st_size + repo_md.stat().st_size
+
+
+def test_an_import_cycle_terminates(world, tmp_path):
+    home = tmp_path / "home"; home.mkdir(parents=True)
+    a = home / "a.md"; b = home / "b.md"
+    a.write_text("@%s\n" % b, encoding="utf-8")
+    b.write_text("@%s\n" % a, encoding="utf-8")
+    user_md = home / "CLAUDE.md"; user_md.write_text("@%s\n" % a, encoding="utf-8")
+    env = dict(world["env"], GEDAECHTNIS_USER_MEMORY=str(user_md))
+    run("session_start.py", "", {"cwd": str(world["repo"]), "session_id": "b4",
+                                 "source": "startup"}, env)
+    j = json.loads((world["state"] / "session-start-b4.json").read_text())
+    assert j["boot_files"] == 3                       # CLAUDE.md + a + b, each once
+
+
+def test_no_chain_at_all_says_nothing_rather_than_zero(world):
+    """The `world` fixture has neither a user CLAUDE.md nor a repo one. A '0 B across 0 files'
+    line would read as a measured empty chain; nothing was measured, so nothing is said."""
+    res = run("session_start.py", "", {"cwd": str(world["repo"]), "session_id": "b5",
+                                       "source": "startup"}, world["env"])
+    assert "boot:" not in res["hookSpecificOutput"]["additionalContext"]
+    j = json.loads((world["state"] / "session-start-b5.json").read_text())
+    assert j["boot_files"] == 0 and j["boot_bytes"] == 0

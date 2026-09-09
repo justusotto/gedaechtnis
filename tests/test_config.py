@@ -106,3 +106,28 @@ def test_python_defaults_to_the_running_interpreter_and_is_overridable(tmp_path)
     fake = tmp_path / "py"; fake.write_text("#!/bin/sh\n", encoding="utf-8")
     write_config(tmp_path, {"python": str(fake)})
     assert resolve(tmp_path)["python"] == str(fake)
+
+
+def test_region_of_repo_accepts_a_flat_vault_region(tmp_path, monkeypatch):
+    """A stranger's vault is flat: <vault>/<Region>/Position.md with no umbrella above it.
+    An Atlas umbrella (children carrying Position.md) must still NOT read as a region."""
+    import importlib, os, sys
+    vault = tmp_path / "vault"; (vault / "Flat").mkdir(parents=True); (vault / "Flat" / "Position.md").write_text("x")
+    (vault / "Umb" / "Child").mkdir(parents=True); (vault / "Umb" / "Position.md").write_text("x"); (vault / "Umb" / "Child" / "Position.md").write_text("x")
+    monkeypatch.setenv("GEDAECHTNIS_VAULT", str(vault)); monkeypatch.setenv("GEDAECHTNIS_CONFIG", str(tmp_path / "none.json"))
+    saved = {m: sys.modules.pop(m, None) for m in ("config", "common")}   # module-level VAULT is read at import
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "hooks"))
+    try:
+        common = importlib.import_module("common")
+        repo = tmp_path / "repo"; repo.mkdir()
+        (repo / "CLAUDE.md").write_text(f"@{vault}/Flat/Position.md\n")
+        assert common.region_of_repo(repo) == "Flat"
+        (repo / "CLAUDE.md").write_text(f"@{vault}/Umb/Position.md\n")
+        assert common.region_of_repo(repo) is None
+        (repo / "CLAUDE.md").write_text(f"@{vault}/Umb/Child/Position.md\n")
+        assert common.region_of_repo(repo) == "Umb/Child"
+    finally:   # never leave a tmp-vault config cached for the next test (found the hard way)
+        for m in ("config", "common"):
+            sys.modules.pop(m, None)
+            if saved[m] is not None:
+                sys.modules[m] = saved[m]
