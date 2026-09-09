@@ -797,10 +797,13 @@ def main(argv=None) -> int:
         if not cands:
             print("Gedächtnis found no projects to offer a memory to.")
             return 0
+        # The screen is printed whether or not anything is asked: on a terminal it is the question,
+        # and without one it is the report of what was decided on the user's behalf and why. A run
+        # that acts on a list nobody was shown is a run nobody can check.
+        print(screen(cands, home, config.roots(), now))
         interactive = sys.stdin.isatty() and not a.yes
         chosen = [c for c in cands if c.ticked(now)]
         if interactive:
-            print(screen(cands, home, config.roots(), now))
             answer = None
             for _ in range(3):
                 try:

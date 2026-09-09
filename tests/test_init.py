@@ -164,7 +164,7 @@ def test_an_existing_marker_is_kept_and_its_lane_adopted(home):
     (home / "my_project" / ".atlas-lane").write_text("lane: MINE\npath: my_project/\npath: Global/\n", encoding="utf-8")
     rc, out, _ = init(home)
     assert rc == 0
-    assert "lane MINE" in out.splitlines()[0]
+    assert any("lane MINE" in l for l in out.splitlines()), out
     lanes = parse_roster((home / "Gedaechtnis" / "Global" / "fleet-roster.md").read_text(encoding="utf-8"))
     assert list(lanes) == ["MINE"]
 
