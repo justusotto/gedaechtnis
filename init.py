@@ -727,17 +727,22 @@ def refuse(sentence: str) -> int:
     return 2
 
 
-def _decline(paths, cfg_path: Path) -> int:
-    """Record a refusal and write nothing else. The only key touched is `declined`; every other
-    key in the config file survives the atomic replace."""
+def _decline(paths, cfg_path: Path, standalone: bool = True) -> int:
+    """Record a refusal. The only key touched is `declined`; every other key in the config file
+    survives the atomic replace.
+
+    `standalone` is what `--decline` does on its own — it may then truthfully say that nothing else
+    was written. Called for the rows a user did not name on the screen it may not, because the rows
+    they DID name are about to be created."""
     have = [str(p) for p in config.declined()]
     add = [str(p) for p in paths if str(p) not in have]
     if add:
         config.write_keys({"declined": have + add}, cfg_path)
     for p in paths:
         print(f"  declined      {p}" + ("" if str(p) in add else "  (already declined)"))
-    print(f"Recorded in {cfg_path}. Nothing else was written. "
-          "`init.py --offer-declined` lists these again; `init.py --all` ignores the list once.")
+    print((f"Recorded in {cfg_path}. Nothing else was written. " if standalone else
+           "Recorded as declined; these are not offered again. ") +
+          "`init.py --offer-declined` lists them again; `init.py --all` ignores the list once.")
     return 0
 
 
@@ -822,7 +827,7 @@ def main(argv=None) -> int:
                       "  (`init.py` offers these again next time; `--decline` in a repo records a refusal.)"))
                 return 0
             if verb == "numbers" and unchosen and not a.dry_run:
-                _decline([c.path for c in unchosen], cfg_path)
+                _decline([c.path for c in unchosen], cfg_path, standalone=False)
         targets = [c.path for c in chosen]
         if not targets:
             print("nothing written.")
