@@ -18,9 +18,11 @@ import re, sys, os
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import (read_input, deny, ask, log, expand, under, vault_rel, lane_for, path_in_partition,
-                    VAULT, HOME, STATE, ROLE_STEMS, guarded, shared_surface, pure_append)
+                    VAULT, HOME, STATE, ROLE_STEMS, guarded, shared_surface, pure_append,
+                    note_pre_exists)
 import shlex
 import config as _cfg
+import names
 
 EV = "PreToolUse"
 
@@ -366,6 +368,10 @@ def rule_bash_partition(cmd: str, inp: dict) -> str | None:
             return (f"Defaults never delete: `mv` moves `{rel}` OUT of its place in the vault — for every reader that is a deletion "
                     "(a wikilink, an @-import or a lane's partition now points at nothing). Move within the vault with `git mv` and a "
                     "path-limited commit, or ask. (Global/Nomos §Data integrity)")
+        if how not in ("mv-out", "rm"):
+            r = rule_display_name_filename(p)      # deterministic, like the stem rule: every mode, every lane
+            if r:
+                return r + f" (Bash write via {how}.)"
     if lane is None and cwd and under(expand(cwd), VAULT):
         log("partition", f"ok\tVAULT-CWD\tbash\tsession={sid}")
         return None                                    # a session opened in the vault itself is the owner's own hand
@@ -415,6 +421,58 @@ def do_bash(inp: dict) -> None:
             return
 
 
+# ------------------------------------------------- the display-name-as-filename door (§6.3) ----
+# The display layer shows `Canon.md` as "Decisions". A model that reads "write it to Decisions"
+# may create `Decisions.md`, and then the region has two files for one role, neither of which any
+# consumer of ROLE_STEMS can see. The door is deterministic, so it refuses in every partition mode
+# — like the Concilium stem rule — and only for a file that does not exist yet: an existing
+# `Decisions.md` is somebody's data, and this door never touches data.
+
+
+def _fold(s: str) -> str:
+    """`open-questions` · `Open_Questions` · `OPEN QUESTIONS` all fold to `open questions`."""
+    return re.sub(r"\s+", " ", s.replace("_", " ").replace("-", " ")).strip().casefold()
+
+
+_DISPLAY_TO_STEM: dict | None = None
+
+
+def display_to_stem() -> dict:
+    """{folded display name (every language column) → the stem it names}."""
+    global _DISPLAY_TO_STEM
+    if _DISPLAY_TO_STEM is None:
+        m = {}
+        for stem in names.stems():
+            for lang in ("en", "de"):
+                d = names.display(stem, lang)
+                if d:
+                    m.setdefault(_fold(d), stem)
+        _DISPLAY_TO_STEM = m
+    return _DISPLAY_TO_STEM
+
+
+def rule_display_name_filename(p: Path) -> str | None:
+    """Deny reason for creating a vault `.md` file named after a display name, else None."""
+    if p.suffix != ".md" or p.exists():
+        return None
+    stem = p.stem
+    # a real role stem is never denied, whatever the display table says: `Patterns` is both a stem
+    # and its own display name, and `Inbox` is a stem the chores create.
+    if stem.casefold() in {s.casefold() for s in (set(ROLE_STEMS) | set(names.stems()))}:
+        return None
+    folded = _fold(stem)
+    if folded not in {_fold(d) for d in names.all_display_names()}:
+        return None
+    target = display_to_stem().get(folded)
+    if not target:
+        return None                              # a display name we cannot resolve names no file to point at
+    rel_dir = vault_rel(p.parent)
+    where = f"{rel_dir}/{target}.md" if rel_dir and rel_dir != "." else f"{target}.md"
+    return (f'The file is `{target}.md` (shown as "{names.display(target)}"); display names are never file names — '
+            f"every consumer of the vault's role stems looks for `{target}.md` and would never see `{p.name}`. "
+            f"Write to `{where}`.")
+
+
 # --------------------------------------------------------------------------- write hooks ----
 
 def partition_mode() -> str:
@@ -435,11 +493,17 @@ def do_write(inp: dict) -> None:
     if not under(p, VAULT):
         return
     rel = vault_rel(p) or ""
+    note_pre_exists(p)      # the only moment anything can still tell a CREATION from an edit (chore.py reads this back)
     # Concilium stem rule — a real refusal regardless of mode (Kernel: TRIP-WIRE kind ii)
     if rel.startswith("Concilium/") and p.stem in ROLE_STEMS:
         deny(EV, (f"Concilium STEM RULE: no file under ~/Atlas/Concilium/ may carry a vault role stem (`{p.stem}`) — it would "
                   "leak into kernel_freshness, the Lustrum arm and umbrella discovery. Use the Concilium-native names "
                   "(Fundamentum · Positio · Quaestiones · Vitia · Verba · Lex · Index). (Speculum/Kernel 'Standing constraints')"))
+        return
+    r = rule_display_name_filename(p)
+    if r:
+        log("deny", f"write\tdisplay-name-filename\t{rel}")
+        deny(EV, r)
         return
     lane, prefixes, marker = lane_for(cwd)
     mode = partition_mode()

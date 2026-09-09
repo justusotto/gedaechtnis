@@ -227,6 +227,46 @@ def touched_paths(sid: str) -> list[str]:
     return [p for p in t if isinstance(p, str)] if isinstance(t, list) else []
 
 
+# ---- was this write a CREATION? the PreToolUse gate is the only place that can still see ----
+# A PostToolUse chore runs after the file exists, so it cannot tell a new file from an edited one.
+# The gate, which runs immediately before the same tool call, can: it stamps one tiny marker per
+# path saying whether the path existed at that moment, and the chore reads it back and consumes it.
+# Chosen over an mtime/ctime heuristic because it is a RECORDED OBSERVATION rather than an
+# inference — it does not move with the filesystem's timestamp granularity, a `Write` that
+# rewrites an existing file byte-for-byte, or a file copied into place by something else.
+
+def pre_exists_marker(p: Path) -> Path:
+    import hashlib
+    return STATE / ("pre-exists-" + hashlib.sha1(str(p).encode("utf-8")).hexdigest()[:16])
+
+
+def note_pre_exists(p: Path) -> None:
+    """Record, at PreToolUse time, whether `p` is already on disk. Rewritten on every gate call
+    for that path, so a marker left behind by a DENIED write is corrected before it is ever read."""
+    try:
+        STATE.mkdir(parents=True, exist_ok=True)
+        pre_exists_marker(p).write_text("1" if p.exists() else "0", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def was_created(p: Path) -> bool:
+    """True when the gate saw `p` ABSENT immediately before this write; consumes the marker.
+
+    No marker (the gate is not wired, or it never saw this path) → False. A chore that cannot
+    PROVE the file is new treats it as old: the Map row is added on evidence, never on a guess."""
+    m = pre_exists_marker(p)
+    try:
+        v = m.read_text(encoding="utf-8").strip()
+    except OSError:
+        return False
+    try:
+        m.unlink()
+    except OSError:
+        pass
+    return v == "0"
+
+
 def guarded(fn):
     """Run a hook body; never let a hook bug crash the session."""
     try:
