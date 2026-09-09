@@ -34,6 +34,35 @@ Then restart Claude Code (or `/reload-plugins`) and open it in the repo: the fir
 facts block naming your vault and lane. There is nothing to build and no dependency beyond Python
 3.9+ from the standard library.
 
+## What your sessions do with it
+
+Once installed, a session in that project gets four things without being asked, and you can leave
+your `CLAUDE.md` empty:
+
+- **The rules arrive at boot.** Every session that starts is handed
+  [`rules/operating-rules.md`](rules/operating-rules.md) — under 2,500 B saying which of the six
+  files a decision, a bug, a working approach, an open question or a state change goes in, to
+  write it while the work happens rather than in a summary at the end, never to delete a vault
+  file, and how to end the session. Injected at `startup` only, because a resumed session already
+  has it. `inject_rules: false` turns it off.
+- **The notes commit themselves.** At Stop, the vault files *this session wrote* — recorded as it
+  writes them, and intersected with the paths its `.atlas-lane` marker declares — are staged one
+  by one and committed as `Gedächtnis <gedaechtnis@local>`. Never `git add -A`, never `--amend`,
+  and never another session's half-written file: two sessions in the same lane each commit their
+  own work. A session with no marker commits nothing at all and says so in the log.
+- **Three commands**, when you want them: `/gedaechtnis-status` (lane, vault, dirty paths, boot
+  cost, and exactly what the Stop hook is about to commit), `/gedaechtnis-recall <question>`, and
+  `/gedaechtnis-debrief` (the four-line wrap-up plus that commit list).
+- **Recall, as a habit.** [`recall.py`](recall.py) greps the whole vault, archives included, and
+  returns whole entries verbatim with their paths — ranked so that an entry covering three of your
+  terms beats one repeating a single term thirty times. Use it before deciding something the vault
+  may already have settled; it is the cheapest way not to contradict yourself six weeks later.
+
+Two agents ship alongside: **memory-debriefer** (writes the end-of-session debrief from the diff
+since *this session's* start, and names the entry you should have made) and **memory-reviewer**
+(ratifies an entry before it lands — placement, supersession, evidence). Both are read-mostly and
+pin a small model.
+
 ## What each hook does
 
 | event | hook | rule |
@@ -44,12 +73,18 @@ facts block naming your vault and lane. There is nothing to build and no depende
 | PostToolUse Artifact | `chore.py artifact` | Records a published artifact's title and id in the vault's artifact index and commits that one file, so a page you published is findable later instead of living in a chat scrollback. |
 | PostToolUse Edit/Write | `chore.py write` | Repairs a queue file's missing trailing newline (without it the next appended row glues onto the previous line and no parser sees it); reports commit SHAs in the text that resolve in no known repo; and, when an edit removes a heading or an id, lists every other file still citing it. |
 | PostToolUse Edit/Write | `chore.py inbox` | When a session writes in a region that is not its own, appends one row to that region's `Inbox.md`, so the record lands where the work happened rather than where the writer had permission. |
-| SessionStart | `session_start.py` | States the facts a session should not have to ask for: which lane it is, what it may write, the partition mode, the vault's HEAD and uncommitted count, unread inbox and ledger rows. |
+| PostToolUse Edit/Write | `chore.py write` | Also records the vault path just written against this session's id — the touched set the Stop commit is built from. |
+| SessionStart | `session_start.py` | States the facts a session should not have to ask for: which lane it is, what it may write, the partition mode, the vault's HEAD and uncommitted count, unread inbox and ledger rows. On a `startup` (not a resume or a compact) it also injects the operating rules. |
 | SessionStart | `claim.py start` | Takes this session's per-region writer claim, so the vault's one-writer-per-region rule is kept by machinery instead of by a ritual performed from memory. Does nothing at all when no claim helper is configured, when the session has no lane, or when its partition names no region. |
 | Stop | `claim.py stop` | Gives back exactly the claims this session took, and nothing else. A claim that is never released is worse than none: the next session defers to a holder that no longer exists. |
+| Stop | `commit.py` | Commits this session's own vault writes, inside the lane's declared paths, path-limited and as a fixed machine identity. Not "everything dirty in the partition": the collision that actually happens is one session sweeping another's half-written file, and only the touched set can tell two sessions in one lane apart. No marker ⇒ nothing is staged, one line in the log, exit clean. |
 
-Two more tools ship alongside the hooks:
+Three more tools ship alongside the hooks:
 
+- **`recall.py`** — the vault, grepped. `recall.py "<question>"` returns the best-matching entries
+  verbatim with their paths, archives included, ranked by how many of the question's terms an
+  entry covers rather than how often it repeats one, and capped so the answer costs less than the
+  re-derivation it prevents. Read-only. `python3 recall.py --help`.
 - **`ledger.py`** — an append-only, tab-separated message ledger for sessions that need to tell each
   other something. Rows, not files; each reader keeps a cursor so a new session reads only what
   arrived since it last looked. `python3 ledger.py --help`.
@@ -78,6 +113,8 @@ Precedence, per setting: environment variable → `~/.claude/gedaechtnis/config.
 | `tool_root` | `GEDAECHTNIS_TOOL_ROOT` | the checkout this plugin lives in |
 | `claim_tool` | `GEDAECHTNIS_CLAIM_TOOL` | `<tool_root>/skills/atlas-region/helpers/region_claim.sh`; absent = the claim hooks do nothing |
 | `auto_claim` | `GEDAECHTNIS_AUTO_CLAIM` | `true` — coordination that must be switched on is coordination that is off |
+| `auto_commit` | `GEDAECHTNIS_AUTO_COMMIT` | `true` — the Stop hook commits this session's vault writes |
+| `inject_rules` | `GEDAECHTNIS_INJECT_RULES` | `true` — the operating rules are injected at session start |
 
 ```json
 {

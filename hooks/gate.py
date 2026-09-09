@@ -35,13 +35,26 @@ def _trailing_pathspec(flags: str) -> bool:
     while i < len(toks):
         t = toks[i]
         if t == "--":
-            return True
+            return "--" not in toks[i + 1:] and _breadth(toks[i + 1:]) or True
         if t in takes:
             i += 2; continue
-        if t.startswith("-") or t in ("Q", "HEREDOC"):
+        if t.startswith("-") or t == "HEREDOC":
             i += 1; continue
-        return True
+        return _breadth(toks[i:])          # a bare token — or a QUOTED path (`Q`) — is a pathspec
     return False
+
+
+BREADTH = "BREADTH"
+
+
+def _breadth(pathspecs):
+    """`commit -m x .` (or `*`, `:/`) is path-limited only in name: `.` is every tracked modification,
+    the exact breadth `add .` is refused for (council 2, Balthasar iteration 2). Returns BREADTH for
+    that, True for a real pathspec."""
+    for t in pathspecs:
+        if t in (".", "*", ":/", "./"):
+            return BREADTH
+    return True
 
 
 # ---------------------------------------------------------------- bash: segment the command ----
@@ -169,7 +182,10 @@ def rule_vault_git(cmd: str, cwd: str | None) -> str | None:
                 return ("A backtick or `$(` inside a DOUBLE-quoted `git commit -m` is command-substituted: the word vanishes "
                         "and the commit still succeeds, permanently (NO-AMEND). Use single quotes, or `git commit -F <msgfile>`. "
                         "(Global/Errata 'Backticks inside a DOUBLE-quoted git commit -m…')")
-            has_pathspec = re.search(r"\s--(?:\s|$)", flags) is not None or _trailing_pathspec(flags)
+            has_pathspec = _trailing_pathspec(flags)
+            if has_pathspec == BREADTH:
+                return ("Vault law: `git commit … .` is every tracked change, the breadth `add .` is refused for. "
+                        "Name the files: `git -C ~/Atlas commit -m '<msg>' -- <file>`.")
             assert_form = "diff --cached --name-only" in cmd
             if has_pathspec and re.search(r"\brm\s+(?:-r\s+)?--cached\b", cmd):
                 return ("`git rm --cached` followed by a pathspec commit (`commit … -- <paths>`) commits the WORKING TREE and silently "
@@ -213,7 +229,7 @@ def rule_launch_model(cmd: str) -> str | None:
             continue
         if len(w) > 1 and w[1] in _CLAUDE_SUBCMDS:
             continue
-        if "--model" not in w and not any(x.startswith("--model=") for x in w):
+        if _cfg.flag("require_launch_model") and "--model" not in w and not any(x.startswith("--model=") for x in w):
             return ("Every `claude` launch pins `--model` (and `--effort`) explicitly; the settings-file default is "
                     "silent routing authority: a bare launch runs on whatever model the settings file happens to name, "
                     "at whatever price. Add `--model <id> --effort <level>`.")
@@ -231,6 +247,7 @@ _PROTECTED = [
     (re.compile(r"\.Trash"), "the Trash is NEVER emptied — it is his permanent restore net"),
     (re.compile(r"(?:~|/Users/[^/\s]+|\$HOME|\$\{HOME\})/Atlas(?:/|\s|$)"), "the vault and its history"),
 ]
+_VAULT_RX = re.escape(str(VAULT)) + r"(?:/|\s|$)"   # scope for the owner-class protections when protect_everywhere is off
 _DESTROY = re.compile(r"(?<!git )(?:^|\s)(?:rm|unlink|shred|rmdir)\s|\bfind\b.*\s-delete\b|\bgit\s+clean\b|>\s*\S*_cache\.json")
 
 
@@ -247,7 +264,10 @@ def rule_data_integrity(cmd: str) -> str | None:
         w0 = seg.split()
         if w0 and w0[0] == "git" and not re.search(r"\bgit\s+(?:-C\s+\S+\s+)?clean\b", seg):
             continue                                  # `git rm --cached` etc. are index operations; the vault-git rule owns them
+        everywhere = _cfg.flag("protect_everywhere")
         for rx, why in _PROTECTED:
+            if not everywhere and "vault" not in why and "Trash" not in why and not re.search(_VAULT_RX, seg):
+                continue                              # a stranger's own `media/` or `*_cache.json` outside the vault is his to delete
             if rx.search(seg):
                 # allow rm inside the vault's gitignored scratch (.atlas-locks, .pre-* backups) explicitly
                 if "vault" in why and re.search(r"Atlas/(?:\.atlas-locks|\.atlas-writer\.lock|[^\s]*\.pre-)", seg):
