@@ -15,6 +15,19 @@ Precedence, per key, highest first:
 Recognised JSON keys, all optional:
 
   vault               the memory vault's root directory
+  roots               directories init.py looks under, two levels deep, for git repos to offer
+                      a memory to (env GEDAECHTNIS_ROOTS, colon-separated, wins). `~` is
+                      expanded. Default: the list in DEFAULT_ROOTS below — the common places
+                      people keep checkouts. It is deliberately NOT exhaustive: a JetBrains
+                      install, for one, keeps projects in a directory this plugin may not name
+                      (`tools/publish_check.py` refuses that literal anywhere in the tree), so a
+                      user whose repos live somewhere unusual adds one line here rather than
+                      waiting for the list to grow. Nothing outside these roots and Claude
+                      Code's own project list is ever looked at.
+  declined            absolute repo paths the user said no to. init.py never offers them again
+                      (`--offer-declined` lists them unticked, `--all` ignores the list for one
+                      run) and the session-start hook stays quiet in them. Appended by
+                      `init.py --decline`; nothing else writes it.
   state_dir           where the hooks keep their logs, cursors and mode file
   fleet_roster        a markdown file whose `repo:` lines name the repos a SHA may live in
   worktrees_dir       where worktree.py puts its copy-on-write clones
@@ -141,6 +154,59 @@ def no_trash() -> bool:
     """GEDAECHTNIS_NO_TRASH=1 leaves a bundle/clone in place instead of sending it to the Trash.
     Nothing here ever deletes either way; this only removes the Finder round trip."""
     return bool(os.environ.get("GEDAECHTNIS_NO_TRASH"))
+
+
+# The directories init.py looks under for repos to offer a memory to. Two levels deep, `.git`
+# present, nothing else. HOME itself is never searched — see the `roots` note in the docstring
+# for why this list is short and how a user extends it.
+DEFAULT_ROOTS = ["~/Projects", "~/projects", "~/src", "~/code", "~/dev", "~/repos",
+                 "~/Developer", "~/IdeaProjects", "~/AndroidStudioProjects",
+                 "~/Documents/GitHub", "~/go/src"]
+
+
+def roots() -> list:
+    """-> [Path] the search roots, environment first, then the config file, then DEFAULT_ROOTS.
+
+    GEDAECHTNIS_ROOTS is colon-separated, like PATH. Every entry is `~`-expanded; a path that
+    does not exist is kept in the list and simply matches nothing, so the screen can still name
+    where it looked."""
+    env = os.environ.get("GEDAECHTNIS_ROOTS")
+    if env is not None and env.strip():
+        raw = [s for s in env.split(":") if s.strip()]
+    else:
+        v = _load().get("roots")
+        raw = [str(x) for x in v if str(x).strip()] if isinstance(v, list) else list(DEFAULT_ROOTS)
+    return [Path(os.path.expanduser(s.strip())) for s in raw]
+
+
+def declined() -> list:
+    """-> [str] the absolute repo paths the user has said no to. Re-read from disk on every call:
+    `init.py --decline` appends to the file, and a hook running afterwards must see it."""
+    v = _load().get("declined")
+    return [str(x) for x in v if str(x).strip()] if isinstance(v, list) else []
+
+
+def write_keys(updates: dict, path=None) -> None:
+    """Merge `updates` into the config file and replace it atomically, preserving every other key.
+
+    Temp file plus os.replace, because a config file half-written by a crash is a machine with no
+    vault: the reader falls through to its defaults and quietly starts a second, empty one. And a
+    MERGE rather than a write, because two commands write this file for different reasons — the
+    installer names the vault, `--decline` records a refusal — and either one replacing it wholesale
+    would silently drop the other's key."""
+    p = Path(os.path.expanduser(str(path))) if path else CONFIG_PATH
+    data = {}
+    try:
+        loaded = json.loads(p.read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            data = loaded
+    except (OSError, ValueError):
+        pass
+    data.update(updates)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_name(p.name + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    os.replace(str(tmp), str(p))
 
 
 def flag(key: str, default: bool = False) -> bool:
