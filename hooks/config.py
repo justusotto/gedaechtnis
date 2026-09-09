@@ -6,7 +6,7 @@ machine and is a lie everywhere else, so the rule is: read it here or do not rea
 Precedence, per key, highest first:
 
   1. an environment variable — GEDAECHTNIS_VAULT · GEDAECHTNIS_STATE_DIR ·
-     GEDAECHTNIS_FLEET_ROSTER · GEDAECHTNIS_WORKTREES
+     GEDAECHTNIS_FLEET_ROSTER · GEDAECHTNIS_WORKTREES · GEDAECHTNIS_USER_MEMORY
   2. a JSON object at ~/.claude/gedaechtnis/config.json (point GEDAECHTNIS_CONFIG somewhere
      else to move it; the test suite does exactly that, so no test ever reads or writes the
      real state directory)
@@ -18,6 +18,9 @@ Recognised JSON keys, all optional:
   state_dir           where the hooks keep their logs, cursors and mode file
   fleet_roster        a markdown file whose `repo:` lines name the repos a SHA may live in
   worktrees_dir       where worktree.py puts its copy-on-write clones
+  user_memory         the user-level CLAUDE.md loaded into every session (default
+                      ~/.claude/CLAUDE.md); the session-start hook prices its @-import
+                      chain so a session knows what its own boot cost
   owner_pages_status  path to a script reporting whether review pages have been answered;
                       when it is absent the session-start hook simply says nothing about them
   python              interpreter used to run that script (default: the one running the hook)
@@ -77,6 +80,11 @@ def _default_vault() -> Path:
 
 VAULT = _path("GEDAECHTNIS_VAULT", "vault", _default_vault)
 STATE = _path("GEDAECHTNIS_STATE_DIR", "state_dir", HOME / ".claude" / "gedaechtnis")
+# The user-level memory file Claude Code loads into EVERY session, whatever the project.
+# ~/.claude/CLAUDE.md is the tool's own convention, not one machine's layout, so the default
+# is portable — but it is still resolved here rather than named at a call site, because the
+# rule this module exists for has no exceptions: read it here or do not read it.
+USER_MEMORY = _path("GEDAECHTNIS_USER_MEMORY", "user_memory", HOME / ".claude" / "CLAUDE.md")
 ROSTER = _path("GEDAECHTNIS_FLEET_ROSTER", "fleet_roster", VAULT / "Global" / "fleet-roster.md")
 WORKTREES = _path("GEDAECHTNIS_WORKTREES", "worktrees_dir", HOME / ".claude" / "worktrees")
 
