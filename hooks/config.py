@@ -31,6 +31,11 @@ Recognised JSON keys, all optional:
                       no such file exists the hook does nothing at all)
   auto_claim          claim this session's region at SessionStart and release it at Stop
                       (default: true — see claim.py for why it is opt-out, not opt-in)
+  auto_commit         at Stop, stage and commit this lane's declared vault paths (default: true;
+                      an unknown lane commits nothing, ever — see commit.py)
+  inject_rules        inject rules/operating-rules.md into every session that STARTS, so a
+                      stranger's CLAUDE.md can stay empty (default: true; startup only, never
+                      on a resume or a compact — see session_start.py)
 
 Example ~/.claude/gedaechtnis/config.json:
 

@@ -98,6 +98,7 @@ def test_reset_hard_in_vault_denied(world):
 
 # --------------------------------------------------------------- launch pins model ----
 def test_claude_launch_without_model_denied(world):
+    world["env"]["GEDAECHTNIS_REQUIRE_LAUNCH_MODEL"] = "1"       # the owner's policy; off for a stranger
     assert decision(bash(world, "claude -p 'hello' --setting-sources project")) == "deny"
 
 def test_claude_launch_pinned_allowed(world):
@@ -132,6 +133,7 @@ HOMEDIR = "/" + "Users/someone"
     "find media/ -name '*.mp3' -delete",
 ])
 def test_destructive_on_protected_refuses_and_asks(world, cmd):
+    world["env"]["GEDAECHTNIS_PROTECT_EVERYWHERE"] = "1"         # the owner's data classes everywhere; off for a stranger
     assert decision(bash(world, cmd)) == "ask"          # refuse AND ask: the owner may still say yes
 
 @pytest.mark.parametrize("cmd", [
@@ -726,3 +728,83 @@ def test_no_chain_at_all_says_nothing_rather_than_zero(world):
     assert "boot:" not in res["hookSpecificOutput"]["additionalContext"]
     j = json.loads((world["state"] / "session-start-b5.json").read_text())
     assert j["boot_files"] == 0 and j["boot_bytes"] == 0
+
+
+def test_trailing_pathspec_without_double_dash_is_path_limited(world):
+    """Council 2 dad test (Balthasar iter 1): `git commit -m x <path>` is a path-limited commit in
+    git's own grammar and must not be refused as bare; a truly bare commit still is."""
+    v = world["vault"]
+    assert bash(world, f"git -C {v} commit -m 'x' Global/Map.md") is None
+    assert bash(world, f"git -C {v} commit -m 'x' -- Global/Map.md") is None
+    assert decision(bash(world, f"git -C {v} commit -m 'x'")) == "deny"
+    assert decision(bash(world, f"git -C {v} commit -F /tmp/msg")) == "deny"          # -F consumed its value; still bare
+    assert bash(world, f"git -C {v} commit -F /tmp/msg Speculum/Position.md") is None
+# ------------------------------------------------------------ the injected operating rules ----
+RULES_MARKER = "A decision becomes settled"          # a line of rules/operating-rules.md itself
+
+
+def test_operating_rules_are_injected_at_startup(world):
+    """POSITIVE control: a starting session is handed the memory-writing discipline, so a
+    stranger's CLAUDE.md can stay empty."""
+    res = run("session_start.py", "", {"cwd": str(world["repo"]), "session_id": "r1",
+                                       "source": "startup"}, world["env"])
+    ctx = res["hookSpecificOutput"]["additionalContext"]
+    assert RULES_MARKER in ctx and "Cleanup YYYY-MM-DD/" in ctx and "Needs a decision:" in ctx
+    assert "Lane CARD" in ctx                        # the facts block is still there
+
+
+def test_operating_rules_are_not_repeated_on_resume_or_compact(world):
+    """NEGATIVE control: a session that already has them pays no tokens to be told twice."""
+    for source in ("resume", "compact"):
+        res = run("session_start.py", "", {"cwd": str(world["repo"]), "session_id": "r2",
+                                           "source": source}, world["env"])
+        ctx = res["hookSpecificOutput"]["additionalContext"]
+        assert RULES_MARKER not in ctx, source
+        assert "Lane CARD" in ctx, source            # everything else is unchanged
+
+
+def test_operating_rules_can_be_switched_off(world):
+    """NEGATIVE control: an install whose own CLAUDE.md already says all this turns it off."""
+    env = dict(world["env"], GEDAECHTNIS_INJECT_RULES="0")
+    res = run("session_start.py", "", {"cwd": str(world["repo"]), "session_id": "r3",
+                                       "source": "startup"}, env)
+    ctx = res["hookSpecificOutput"]["additionalContext"]
+    assert RULES_MARKER not in ctx and "Lane CARD" in ctx
+
+
+def test_operating_rules_file_is_generic_and_small():
+    """The file is loaded into every session that starts, so its size is a contract; and it
+    speaks the six-file vocabulary rather than any one vault's private names."""
+    rules = Path(__file__).resolve().parents[1] / "rules" / "operating-rules.md"
+    text = rules.read_text(encoding="utf-8")
+    assert len(text.encode("utf-8")) <= 2500
+    for stem in ("Map", "Position", "Canon", "Patterns", "Errata", "Aporia"):
+        assert f"**{stem}**" in text
+
+
+def test_commit_dot_is_breadth_and_a_quoted_path_is_a_pathspec(world):
+    """Council 2, Balthasar iteration 2: `commit -m x .` must not pass as path-limited; a quoted path must."""
+    v = world["vault"]
+    assert decision(bash(world, f"git -C {v} commit -m 'x' .")) == "deny"
+    assert bash(world, f"git -C {v} commit -m 'x' 'Global/Map.md'") is None
+    assert bash(world, f'git -C {v} commit -m "x" -- "Speculum/Position.md"') is None
+
+
+def test_owner_data_classes_are_scoped_unless_protect_everywhere(world, monkeypatch):
+    """A stranger deleting his own build/media/ or a cache outside the vault is not asked; the vault
+    and the Trash are always protected; the owner turns protect_everywhere on in config."""
+    v = world["vault"]
+    world["env"].pop("GEDAECHTNIS_PROTECT_EVERYWHERE", None)
+    assert bash(world, "rm -rf /tmp/somewhere/build/media/") is None
+    assert bash(world, "rm /tmp/x/whisper_cache.json") is None
+    assert decision(bash(world, f"rm -rf {v}/Mnemosyne/AnkiAutoMiner/media/")) == "ask"
+    assert decision(bash(world, "rm -rf ~/.Trash/*")) == "ask"
+    world["env"]["GEDAECHTNIS_PROTECT_EVERYWHERE"] = "1"
+    assert decision(bash(world, "rm -rf /tmp/somewhere/build/media/")) == "ask"
+
+
+def test_launch_model_door_is_off_for_strangers(world, monkeypatch):
+    world["env"].pop("GEDAECHTNIS_REQUIRE_LAUNCH_MODEL", None)
+    assert bash(world, "claude -p 'hello'") is None
+    world["env"]["GEDAECHTNIS_REQUIRE_LAUNCH_MODEL"] = "1"
+    assert decision(bash(world, "claude -p 'hello'")) == "deny"

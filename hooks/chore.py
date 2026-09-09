@@ -2,7 +2,8 @@
 """chore.py — PostToolUse doors that DO the chore the rule was asking for.
 
     python3 chore.py artifact   # after an Artifact publish: index row in Pharos/artifacts-index.md, committed
-    python3 chore.py write      # after Edit/Write in the vault: queue trailing newline · SHA tokens resolve?
+    python3 chore.py write      # after Edit/Write in the vault: RECORD THE TOUCH · queue trailing
+                                #   newline · SHA tokens resolve? · change-everywhere lookup
 
 A chore never denies (the act already happened). It repairs what is mechanically repairable and
 reports the rest as `additionalContext` — factual statements, never orders.
@@ -12,7 +13,8 @@ import fcntl, json, os, re, subprocess, sys, time
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import (read_input, context, log, expand, under, vault_rel, fleet_repos, VAULT, STATE, guarded,
-                    lane_for, path_in_partition, region_of_repo, repo_root_of, shared_surface)
+                    lane_for, path_in_partition, region_of_repo, repo_root_of, shared_surface,
+                    record_touched)
 
 EV = "PostToolUse"
 UUID = re.compile(r"https://claude\.ai/code/artifact/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})")
@@ -116,6 +118,11 @@ def do_write(inp: dict) -> None:
     if not under(p, VAULT) or not p.is_file():
         return
     rel = vault_rel(p) or ""
+    # The TOUCHED SET. Every vault file this session writes is recorded against its session id,
+    # because that record is the whole authority for what the Stop hook commits: a hook that
+    # instead committed "everything dirty in the partition" would sweep a sibling session's
+    # half-written file, which is the one collision class actually measured in this vault.
+    record_touched(inp.get("session_id", "-"), rel)
     notes = []
     if rel.startswith("Pharos/queues/") and p.suffix == ".md":
         try:

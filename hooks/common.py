@@ -151,6 +151,64 @@ def fleet_repos() -> list[Path]:
     return out
 
 
+# ---- the per-session record: what THIS session touched, so Stop commits that and nothing else ----
+# One file per session id (session_start.py writes it, claim.py adds its claims, chore.py appends
+# the vault paths the session actually wrote, commit.py reads them back). Every writer goes
+# through the two helpers below so the read-modify-write is locked: two hook processes appending
+# a path in the same turn must not lose one of them, and neither may drop another key.
+
+def session_state_path(sid: str) -> Path:
+    return STATE / f"session-start-{sid or '-'}.json"
+
+
+def update_session_state(sid: str, mutate) -> dict:
+    """Read-modify-write the session's record under an exclusive lock; returns the new document.
+
+    `mutate(doc)` edits the dict in place. A malformed or missing file is treated as an empty
+    document rather than an error: the record is bookkeeping, and a session must never die of it."""
+    import fcntl
+    path = session_state_path(sid)
+    try:
+        STATE.mkdir(parents=True, exist_ok=True)
+        with open(STATE / f"session-{(sid or '-')}.lock", "w") as lk:
+            fcntl.flock(lk, fcntl.LOCK_EX)
+            try:
+                doc = json.loads(path.read_text(encoding="utf-8"))
+                if not isinstance(doc, dict):
+                    doc = {}
+            except (OSError, ValueError):
+                doc = {}
+            mutate(doc)
+            path.write_text(json.dumps(doc, indent=1), encoding="utf-8")
+            fcntl.flock(lk, fcntl.LOCK_UN)
+            return doc
+    except OSError as e:
+        log("hook-errors", f"session-state\t{sid}\t{e}")
+        return {}
+
+
+def record_touched(sid: str, rel: str) -> None:
+    """Note that this session wrote one vault-relative path. Order preserved, no duplicates."""
+    def add(doc: dict) -> None:
+        t = doc.get("touched")
+        if not isinstance(t, list):
+            t = []
+        if rel not in t:
+            t.append(rel)
+        doc["touched"] = t
+    update_session_state(sid, add)
+
+
+def touched_paths(sid: str) -> list[str]:
+    """The vault paths this session wrote, or [] — [] means "wrote nothing", never "commit all"."""
+    try:
+        doc = json.loads(session_state_path(sid).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    t = doc.get("touched") if isinstance(doc, dict) else None
+    return [p for p in t if isinstance(p, str)] if isinstance(t, list) else []
+
+
 def guarded(fn):
     """Run a hook body; never let a hook bug crash the session."""
     try:

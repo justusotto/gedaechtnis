@@ -24,6 +24,39 @@ import config as _cfg
 
 EV = "PreToolUse"
 
+def _trailing_pathspec(flags: str) -> bool:
+    """`git commit -m x Global/Map.md` IS path-limited: git reads a bare trailing token as a pathspec
+    with or without `--`. Council 2's dad test (Balthasar, 2026-09-09) found the door refusing that
+    form as "bare" for a stranger who never read the vault law. `flags` has quoted text blanked to
+    ` Q ` and heredocs to `HEREDOC`; options that take a value consume the next token."""
+    takes = {"-m", "-F", "--file", "--author", "--date", "-c", "-C", "--trailer", "--cleanup",
+             "--fixup", "--squash", "--reuse-message", "--reedit-message"}
+    toks = flags.split(); i = 0
+    while i < len(toks):
+        t = toks[i]
+        if t == "--":
+            return "--" not in toks[i + 1:] and _breadth(toks[i + 1:]) or True
+        if t in takes:
+            i += 2; continue
+        if t.startswith("-") or t == "HEREDOC":
+            i += 1; continue
+        return _breadth(toks[i:])          # a bare token — or a QUOTED path (`Q`) — is a pathspec
+    return False
+
+
+BREADTH = "BREADTH"
+
+
+def _breadth(pathspecs):
+    """`commit -m x .` (or `*`, `:/`) is path-limited only in name: `.` is every tracked modification,
+    the exact breadth `add .` is refused for (council 2, Balthasar iteration 2). Returns BREADTH for
+    that, True for a real pathspec."""
+    for t in pathspecs:
+        if t in (".", "*", ":/", "./"):
+            return BREADTH
+    return True
+
+
 # ---------------------------------------------------------------- bash: segment the command ----
 
 _SPLIT = re.compile(r"\s*(?:&&|\|\||;|\n|\|)\s*")
@@ -124,13 +157,18 @@ def rule_vault_git(cmd: str, cwd: str | None) -> str | None:
             if toks[i].startswith("-"):
                 i += 1; continue
             sub = toks[i]; break
-        if sub == "add" and re.search(r"(?:\s|^)(?:-A|--all|-a|-u|--update|\.)(?:\s|$)", seg[seg.index("add")+3:]):
+        # The subcommand is located as a WHOLE WORD after the git options — `seg.index("commit")`
+        # matched inside a PATH containing "commit" (a pytest tmp dir), so the body started mid-path
+        # and a path fragment read as a pathspec (found 2026-09-09 by the trailing-pathspec test).
+        sub_m = re.search(r"(?:^|\s)" + re.escape(sub or "\x00") + r"(?=\s|$)", seg[len(w[0]):]) if sub else None
+        after_sub = seg[len(w[0]) + sub_m.end():] if sub_m else ""
+        if sub == "add" and re.search(r"(?:\s|^)(?:-A|--all|-a|-u|--update|\.)(?:\s|$)", after_sub):
             return ("Vault law: never `git add -A`/`-a`/`-u`/`.` in ~/Atlas — a broad add sweeps another lane's "
                     "in-flight work into your commit. Add the exact paths: `git -C ~/Atlas add -- <file>`. "
                     "(Speculum/Kernel 'Standing constraints'; Global/Errata 'A file written before a concurrent "
                     "automated committer runs…')")
         if sub == "commit":
-            body = seg[seg.index("commit")+6:]
+            body = after_sub
             body = re.sub(r"<<-?\s*(['\"]?)(\w+)\1.*?\n\2\s*$", "HEREDOC", body, flags=re.S | re.M)   # a heredoc body is text, whatever it contains
             flags = re.sub(r"'[^']*'|\"(?:[^\"\\\\]|\\\\.)*\"", " Q ", body)   # quoted text cannot carry a flag
             if re.search(r"(?:\s|^)(?:-[a-zA-Z]*a[a-zA-Z]*|--all)(?:\s|$)", flags):
@@ -144,7 +182,10 @@ def rule_vault_git(cmd: str, cwd: str | None) -> str | None:
                 return ("A backtick or `$(` inside a DOUBLE-quoted `git commit -m` is command-substituted: the word vanishes "
                         "and the commit still succeeds, permanently (NO-AMEND). Use single quotes, or `git commit -F <msgfile>`. "
                         "(Global/Errata 'Backticks inside a DOUBLE-quoted git commit -m…')")
-            has_pathspec = re.search(r"\s--(?:\s|$)", flags) is not None
+            has_pathspec = _trailing_pathspec(flags)
+            if has_pathspec == BREADTH:
+                return ("Vault law: `git commit … .` is every tracked change, the breadth `add .` is refused for. "
+                        "Name the files: `git -C ~/Atlas commit -m '<msg>' -- <file>`.")
             assert_form = "diff --cached --name-only" in cmd
             if has_pathspec and re.search(r"\brm\s+(?:-r\s+)?--cached\b", cmd):
                 return ("`git rm --cached` followed by a pathspec commit (`commit … -- <paths>`) commits the WORKING TREE and silently "
@@ -188,11 +229,10 @@ def rule_launch_model(cmd: str) -> str | None:
             continue
         if len(w) > 1 and w[1] in _CLAUDE_SUBCMDS:
             continue
-        if "--model" not in w and not any(x.startswith("--model=") for x in w):
+        if _cfg.flag("require_launch_model") and "--model" not in w and not any(x.startswith("--model=") for x in w):
             return ("Every `claude` launch pins `--model` (and `--effort`) explicitly; the settings-file default is "
-                    "silent routing authority — a bare launch once routed a seven-worker wave to Fable at 2× cost. "
-                    "Add `--model <id> --effort <level>` from the queue row. (Global/Errata 'A settings-file model "
-                    "default is silent routing authority…'; Global/Map §Models)")
+                    "silent routing authority: a bare launch runs on whatever model the settings file happens to name, "
+                    "at whatever price. Add `--model <id> --effort <level>`.")
         if _cfg.flag("require_launch_effort") and "--effort" not in w and not any(x.startswith("--effort=") for x in w):
             return ("This `claude` launch pins `--model` but not `--effort`; the platform default is `high`, and the "
                     "ruled defaults hold ONLY if the launch pins them. Add `--effort <low|medium|high>`. (Global/Map §Models)")
@@ -207,6 +247,7 @@ _PROTECTED = [
     (re.compile(r"\.Trash"), "the Trash is NEVER emptied — it is his permanent restore net"),
     (re.compile(r"(?:~|/Users/[^/\s]+|\$HOME|\$\{HOME\})/Atlas(?:/|\s|$)"), "the vault and its history"),
 ]
+_VAULT_RX = re.escape(str(VAULT)) + r"(?:/|\s|$)"   # scope for the owner-class protections when protect_everywhere is off
 _DESTROY = re.compile(r"(?<!git )(?:^|\s)(?:rm|unlink|shred|rmdir)\s|\bfind\b.*\s-delete\b|\bgit\s+clean\b|>\s*\S*_cache\.json")
 
 
@@ -223,7 +264,10 @@ def rule_data_integrity(cmd: str) -> str | None:
         w0 = seg.split()
         if w0 and w0[0] == "git" and not re.search(r"\bgit\s+(?:-C\s+\S+\s+)?clean\b", seg):
             continue                                  # `git rm --cached` etc. are index operations; the vault-git rule owns them
+        everywhere = _cfg.flag("protect_everywhere")
         for rx, why in _PROTECTED:
+            if not everywhere and "vault" not in why and "Trash" not in why and not re.search(_VAULT_RX, seg):
+                continue                              # a stranger's own `media/` or `*_cache.json` outside the vault is his to delete
             if rx.search(seg):
                 # allow rm inside the vault's gitignored scratch (.atlas-locks, .pre-* backups) explicitly
                 if "vault" in why and re.search(r"Atlas/(?:\.atlas-locks|\.atlas-writer\.lock|[^\s]*\.pre-)", seg):
