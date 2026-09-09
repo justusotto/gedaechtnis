@@ -19,7 +19,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import (read_input, deny, ask, log, expand, under, vault_rel, lane_for, path_in_partition,
                     VAULT, HOME, STATE, ROLE_STEMS, guarded, shared_surface, pure_append,
-                    note_pre_exists)
+                    note_pre_exists, created_paths, take_filelock, release_filelock, LOCK_TTL)
+import fnmatch
 import shlex
 import config as _cfg
 import names
@@ -400,6 +401,17 @@ def rule_bash_partition(cmd: str, inp: dict) -> str | None:
         if mode == "deny":
             return (f"Bash write ({how}) to `{rel}`, outside lane {lane or 'UNKNOWN'}'s partition. The partition door binds Bash "
                     "writes too: append a keyed row to a shared surface with the Edit/Write tool or `ledger.py`, or relay. (Speculum/Kernel 'Never write another lane's partition')")
+    # D2's Bash half. A shell redirect is a whole-file overwrite with no anchor, so it belongs
+    # inside the same per-file mutex as Edit/Write; `chore.py bash` drops these when the command
+    # returns, and a lock older than LOCK_TTL is taken over exactly as it is on the Edit path.
+    for p, how in targets:
+        if how not in ("redirect", "redirect-append", "sed-i", "tee") or p.suffix != ".md":
+            continue
+        ok, age, holder = take_filelock(p, sid)
+        if not ok:
+            log("deny", f"bash\tfilelock\t{vault_rel(p)}\theld-by={holder}\tage={age:.1f}s\tsession={sid}")
+            return (f"Another session is editing `{vault_rel(p)}` right now (lock {int(age)}s old); retry the same edit in a "
+                    "moment — it will re-read the file. (Design §5.2 D2)")
     return None
 
 
@@ -455,6 +467,12 @@ def rule_display_name_filename(p: Path) -> str | None:
     """Deny reason for creating a vault `.md` file named after a display name, else None."""
     if p.suffix != ".md" or p.exists():
         return None
+    # Concilium is exempt: its files are named by the Concilium-native table, and `Index` — the
+    # native name of `Concilium/<Entity>/Index.md` — is also Map's display name. Refusing it here
+    # would deny the correct file name in the one place the vault requires it. The Concilium STEM
+    # rule still refuses `Concilium/<Entity>/Map.md`, so the two doors do not overlap.
+    if (vault_rel(p) or "").startswith("Concilium/"):
+        return None
     stem = p.stem
     # a real role stem is never denied, whatever the display table says: `Patterns` is both a stem
     # and its own display name, and `Inbox` is a stem the chores create.
@@ -483,6 +501,52 @@ def partition_mode() -> str:
         return "warn"
 
 
+# ------------------------------------------------------ D1: no whole-file Write (DESIGN §5.2) ----
+# `Edit` is a compare-and-swap: its anchor is matched against the file as it is at the moment of
+# the edit, so an edit against a paragraph another session changed FAILS instead of clobbering.
+# A whole-file `Write` has no anchor at all — it replaces the file from the session's stale
+# reading, and every line a sibling added since that read is gone with no error anywhere. So the
+# door refuses that one shape, and the refusal names the tool that does the same job safely.
+#
+# It binds prose memory files and NOTHING else. Exempt, each for its own reason:
+#   · a file that does not exist     — nothing to lose
+#   · an empty file                  — same
+#   · a file that is not `.md`       — a generator writing an HTML page or a verdict JSON into the
+#                                      vault is not editing memory and is never refused ([R3])
+#   · anything under `Cleanup */`    — a cleanup bundle is written whole, by construction ([R3])
+#   · a file THIS session created    — there is no other session's content in it to lose
+#   · a verified pure append to a SHARED surface — the append rule re-reads the file HERE and
+#     refuses unless the write extends what is on disk NOW, which is the same guarantee D1 asks
+#     of Edit. Without this the door would silently retract the keyed-row affordance §5.2 keeps.
+
+
+def _under_cleanup(rel: str) -> bool:
+    """Any ancestor directory named `Cleanup *` — the bundle convention, at any depth."""
+    return any(fnmatch.fnmatch(part, "Cleanup *") for part in Path(rel).parts[:-1])
+
+
+def rule_no_whole_file_write(tool: str, ti: dict, p: Path, rel: str, sid: str, lane: str | None) -> str | None:
+    if tool != "Write":
+        return None                                  # Edit / MultiEdit / NotebookEdit are anchored
+    if p.suffix != ".md" or not p.is_file():
+        return None
+    try:
+        if p.stat().st_size == 0:
+            return None
+    except OSError:
+        return None
+    if _under_cleanup(rel) or rel in created_paths(sid):
+        return None
+    kind = shared_surface(rel)
+    if kind:
+        ok, _why = pure_append(kind, p, "Write", ti, lane)
+        if ok:
+            return None
+    return (f"Whole-file Write to `{rel}` refused: another session may have changed this file since you read it. "
+            "Use Edit — its anchor is checked against the file as it is now. "
+            "(Design §5.2 D1; new, empty, non-.md and Cleanup files are exempt.)")
+
+
 def do_write(inp: dict) -> None:
     ti = inp.get("tool_input") or {}
     fp = ti.get("file_path") or ti.get("notebook_path") or ""
@@ -508,13 +572,34 @@ def do_write(inp: dict) -> None:
     lane, prefixes, marker = lane_for(cwd)
     mode = partition_mode()
     sid = inp.get("session_id", "-")
+
+    # D2 — take the per-file mutex, then D1. Every refusal from here on RELEASES the lock first:
+    # the tool call is not going to happen, so holding the file for the next ten seconds would
+    # block a sibling for a write that never occurred.
+    ok, age, holder = take_filelock(p, sid)
+    if not ok:
+        log("deny", f"write\tfilelock\t{rel}\theld-by={holder}\tage={age:.1f}s\tsession={sid}")
+        deny(EV, (f"Another session is editing `{rel}` right now (lock {int(age)}s old); retry the same edit in a moment — "
+                  "it will re-read the file. (Design §5.2 D2)"))
+        return
+
+    def refuse(reason: str) -> None:
+        release_filelock(p, sid)
+        deny(EV, reason)
+
+    d1 = rule_no_whole_file_write(inp.get("tool_name") or "", ti, p, rel, sid, lane)
+    if d1:
+        log("deny", f"write\twhole-file-write\t{rel}\tsession={sid}")
+        refuse(d1)
+        return
+
     if lane is None and cwd and under(expand(cwd), VAULT):
         log("partition", f"ok\tVAULT-CWD\t{rel}\tsession={sid}")
         return                                   # a session opened in the vault itself is the owner's own hand
     if lane is None:
         log("partition", f"{mode}\tUNKNOWN-LANE\t{rel}\tcwd={cwd}\tsession={sid}")
         if mode == "deny":
-            deny(EV, ("No `.atlas-lane` marker resolves from this cwd, so this session has NO declared write partition in "
+            refuse(("No `.atlas-lane` marker resolves from this cwd, so this session has NO declared write partition in "
                       "~/Atlas. Lane identity is DECLARED, never inferred: open the session in the repo that owns this "
                       "region, or relay through your outbox. (Speculum/Kernel 'Never write another lane's partition')"))
         return
@@ -528,13 +613,13 @@ def do_write(inp: dict) -> None:
         if ok:
             return                                   # the narrow audited exception: a keyed row, appended
         if mode == "deny":
-            deny(EV, (f"`{rel}` is a SHARED surface ({kind}): any lane may APPEND a keyed row to it, nothing else — and this "
+            refuse((f"`{rel}` is a SHARED surface ({kind}): any lane may APPEND a keyed row to it, nothing else — and this "
                       f"write is not a pure append ({why}). Append a row instead (queue: `- [ ] `q:…``; ledger: `gedaechtnis/ledger.py append`; "
                       "inbox: `- YYYY-MM-DD LANE …`)."))
         return
     log("partition", f"{mode}\t{lane}\t{rel}\tmarker={marker}\tsession={sid}")
     if mode == "deny":
-        deny(EV, (f"`{rel}` is outside lane {lane}'s declared partition ({marker}). A defect in another lane's paths is a "
+        refuse((f"`{rel}` is outside lane {lane}'s declared partition ({marker}). A defect in another lane's paths is a "
                   "briefing, not our edit: append a keyed row to a SHARED surface (its queue file, the Channels ledger, the "
                   "region kernel's Inbox) or write a notice in Channels/{lane}/. (Speculum/Kernel 'Never write another "
                   "lane's partition'; Global/Patterns 'A writer's PERMISSIONS must never decide a record's PLACEMENT')"))

@@ -14,7 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import (read_input, context, log, expand, under, vault_rel, fleet_repos, VAULT, STATE, guarded,
                     lane_for, path_in_partition, region_of_repo, repo_root_of, shared_surface,
-                    record_touched, was_created, ROLE_STEMS)
+                    record_touched, was_created, record_created, release_filelock, ROLE_STEMS)
 import names
 
 EV = "PostToolUse"
@@ -184,16 +184,29 @@ def do_write(inp: dict) -> None:
     if not fp:
         return
     p = expand(fp, inp.get("cwd"))
-    if not under(p, VAULT) or not p.is_file():
+    if not under(p, VAULT):
+        return
+    sid = inp.get("session_id", "-")
+    # D2, the release half. FIRST, and before the is_file() guard: the tool call this chore follows
+    # is over either way, so the mutex must come off even when the write left no file behind. A
+    # foreign session's lock is never touched (release_filelock checks the session id) — a release
+    # that ignored ownership would be the same defect as taking somebody else's lock.
+    release_filelock(p, sid)
+    if not p.is_file():
         return
     rel = vault_rel(p) or ""
     # The TOUCHED SET. Every vault file this session writes is recorded against its session id,
     # because that record is the whole authority for what the Stop hook commits: a hook that
     # instead committed "everything dirty in the partition" would sweep a sibling session's
     # half-written file, which is the one collision class actually measured in this vault.
-    record_touched(inp.get("session_id", "-"), rel)
+    record_touched(sid, rel)
     notes = []
     if was_created(p):                           # consumes the gate's marker either way
+        # The CREATED SET, on the same evidence and in the same breath as the Map row: a file this
+        # session made has no sibling's content in it, so D1 lets this session Write it whole.
+        # Recorded HERE rather than at the gate because only a PostToolUse can know the write
+        # actually happened — a creation the gate denied must never license a later overwrite.
+        record_created(sid, rel)
         note = map_row_for(p, rel)
         if note:
             notes.append(note)
@@ -351,10 +364,40 @@ def do_inbox(inp: dict) -> None:
                 + (f"; committed {sha}." if sha else "; NOT committed (see chore.log)."))
 
 
+# ------------------------------------------------ D2's Bash half: release what Bash locked ----
+# `rule_bash_partition` takes the same per-file mutex for a shell write to a vault `.md` file
+# (`>`, `>>`, `tee`, `sed -i`), because a shell redirect is a whole-file overwrite with no anchor
+# at all. Until this chore existed there was no PostToolUse on Bash, so every such lock could only
+# expire — correct, but it made a sibling wait ten seconds for a write that finished in ten
+# milliseconds. This releases them the moment the command returns. It releases ONLY locks this
+# session holds, and it repairs nothing else: a chore that started editing files after a shell
+# command would be guessing at what the command meant.
+
+
+def do_bash(inp: dict) -> None:
+    cmd = (inp.get("tool_input") or {}).get("command") or ""
+    if not cmd:
+        return
+    sid = inp.get("session_id", "-")
+    try:
+        from gate import bash_write_targets           # the same target list the gate locked from
+    except ImportError as e:                          # pragma: no cover - the two files ship together
+        log("chore", f"bash-release import failed: {e}")
+        return
+    freed = []
+    for p, how in bash_write_targets(cmd, inp.get("cwd")):
+        if how in ("redirect", "redirect-append", "sed-i", "tee") and p.suffix == ".md":
+            if release_filelock(p, sid):
+                freed.append(vault_rel(p) or str(p))
+    if freed:
+        log("chore", f"bash\treleased={len(freed)}\t{' '.join(freed)}")
+
+
 def main() -> None:
     which = sys.argv[1] if len(sys.argv) > 1 else ""
     inp = read_input()
-    {"artifact": do_artifact, "write": do_write, "inbox": do_inbox}.get(which, lambda _i: None)(inp)
+    {"artifact": do_artifact, "write": do_write, "inbox": do_inbox,
+     "bash": do_bash}.get(which, lambda _i: None)(inp)
 
 
 if __name__ == "__main__":

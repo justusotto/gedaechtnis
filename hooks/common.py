@@ -267,6 +267,102 @@ def was_created(p: Path) -> bool:
     return v == "0"
 
 
+def record_created(sid: str, rel: str) -> None:
+    """Note that THIS session created this vault-relative path (chore.py, on the evidence of the
+    gate's pre-exists marker — a PostToolUse record, so the file really was written).
+
+    D1 reads this back: a whole-file `Write` to a file this session made is not a lost update,
+    because there is no other session's content in it to lose. The record is per session id and
+    lives beside the touched set, so it dies with the session as it should."""
+    def add(doc: dict) -> None:
+        c = doc.get("created")
+        if not isinstance(c, list):
+            c = []
+        if rel not in c:
+            c.append(rel)
+        doc["created"] = c
+    update_session_state(sid, add)
+
+
+def created_paths(sid: str) -> list[str]:
+    """The vault paths this session created, or [] — [] means "created nothing", never "all"."""
+    try:
+        doc = json.loads(session_state_path(sid).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    c = doc.get("created") if isinstance(doc, dict) else None
+    return [p for p in c if isinstance(p, str)] if isinstance(c, list) else []
+
+
+# ---- D2: the per-file mutex, PreToolUse → PostToolUse (DESIGN §5.2 D2) ----
+# Edit is a compare-and-swap, but the swap happens inside the tool: read, match the anchor, write.
+# Two sessions can be inside that window on the same file at the same moment, and the second one's
+# match is then against text the first is about to replace. The mutex closes exactly that window:
+# the PreToolUse gate takes a per-file lock, the PostToolUse chore drops it, and a second session
+# meeting a live lock is told to RETRY — which makes the model re-read, which is the correct fix.
+#
+# The lock lives under the STATE dir, never in the vault: it is session bookkeeping, and a lock
+# file inside the vault would be committed, synced and read as memory.
+#
+# STALENESS IS THE WHOLE FAIL-SAFE. A PostToolUse that never fires — the tool errored, the hook
+# process died, the session was killed mid-turn — would otherwise leave a file locked forever. So
+# a lock older than LOCK_TTL seconds is not a lock: it is taken over silently by the next writer,
+# who overwrites it with its own session id. The cost of the takeover being wrong is one lost
+# 10-second race; the cost of not having it is a file no session can ever edit again.
+
+LOCK_TTL = 10.0
+
+
+def filelock_path(p: Path) -> Path:
+    import hashlib
+    try:
+        real = os.path.realpath(str(p))
+    except OSError:
+        real = str(p)
+    return STATE / "filelocks" / hashlib.sha1(real.encode("utf-8")).hexdigest()
+
+
+def read_filelock(p: Path) -> dict | None:
+    try:
+        doc = json.loads(filelock_path(p).read_text(encoding="utf-8"))
+        return doc if isinstance(doc, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def take_filelock(p: Path, sid: str) -> tuple[bool, float, str]:
+    """Try to hold `p` for this session. Returns (ok, age_of_blocking_lock, blocking_session).
+
+    Refuses only for a lock that is BOTH foreign and younger than LOCK_TTL. Our own lock is
+    re-stamped (a retry of the same edit must not deadlock against itself), and a stale one is
+    taken over — see the staleness note above."""
+    cur = read_filelock(p)
+    if cur:
+        age = max(0.0, time.time() - float(cur.get("ts") or 0))
+        if cur.get("session_id") != sid and age < LOCK_TTL:
+            return False, age, str(cur.get("session_id") or "?")
+    try:
+        d = filelock_path(p)
+        d.parent.mkdir(parents=True, exist_ok=True)
+        d.write_text(json.dumps({"session_id": sid, "ts": time.time(), "path": str(p)}), encoding="utf-8")
+    except OSError as e:
+        log("hook-errors", f"filelock-take\t{p}\t{e}")
+    return True, 0.0, sid
+
+
+def release_filelock(p: Path, sid: str) -> bool:
+    """Drop the lock on `p` if it is OURS. A foreign session's lock is never removed: releasing
+    somebody else's mutex is the same defect as taking it."""
+    cur = read_filelock(p)
+    if not cur or cur.get("session_id") != sid:
+        return False
+    try:
+        filelock_path(p).unlink()
+        return True
+    except OSError:
+        return False
+
+
 def guarded(fn):
     """Run a hook body; never let a hook bug crash the session."""
     try:

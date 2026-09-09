@@ -304,9 +304,16 @@ def test_foreign_queue_append_allowed_in_deny_mode_but_rewrite_denied(world):
     append = run("gate.py", "write", {"cwd": str(world["repo"]), "tool_name": "Write", "session_id": "t", "tool_input": {
         "file_path": str(q), "content": q.read_text() + "- [ ] `q:MN-2026-09-08-NEW-1` a row CARD needs MINING-OPS to see | q:MN-2026-09-08-NEW-1\n"}}, world["env"])
     assert append is None
+    # A whole-file REWRITE is refused twice over, and D1 is the outer door: it does not even reach
+    # the shared-surface rule, because "you may have lost content you never read" outranks "this is
+    # not a keyed row". Both refusals are proven — D1 on the `Write` shape, the shared-surface rule
+    # on the anchored `Edit` that gets past D1.
     rewrite = run("gate.py", "write", {"cwd": str(world["repo"]), "tool_name": "Write", "session_id": "t", "tool_input": {
         "file_path": str(q), "content": "- [x] `q:MN-2026-09-01-X-1` I closed your row | q:MN-2026-09-01-X-1\n"}}, world["env"])
-    assert decision(rewrite) == "deny" and "SHARED surface" in rewrite["hookSpecificOutput"]["permissionDecisionReason"]
+    assert decision(rewrite) == "deny" and "Whole-file Write" in reason(rewrite)
+    edit_rewrite = run("gate.py", "write", {"cwd": str(world["repo"]), "tool_name": "Edit", "session_id": "t", "tool_input": {
+        "file_path": str(q), "old_string": "existing row", "new_string": "row I closed for you"}}, world["env"])
+    assert decision(edit_rewrite) == "deny" and "SHARED surface" in reason(edit_rewrite)
     prose = run("gate.py", "write", {"cwd": str(world["repo"]), "tool_name": "Write", "session_id": "t", "tool_input": {
         "file_path": str(q), "content": q.read_text() + "some prose that is not a row\n"}}, world["env"])
     assert decision(prose) == "deny"
@@ -906,7 +913,12 @@ def test_an_existing_display_named_file_is_someones_data_and_is_left_alone(world
     f = world["vault"] / "Mnemosyne" / "UkrainianCard" / "Decisions.md"
     f.write_text("someone's real notes\n")
     assert write(world, f) is None
-    assert wwrite(world, f, content="more") is None
+    # A whole-file `Write` to it IS refused — by D1, which owns every whole-file overwrite of an
+    # existing prose file, and never by the display door. The distinction matters: the display
+    # door's refusal would tell the stranger their file name is wrong, which it is not.
+    res = wwrite(world, f, content="more")
+    assert decision(res) == "deny" and "Whole-file Write" in reason(res)
+    assert "display names are never file names" not in reason(res)
 
 
 def test_a_bash_redirect_to_a_display_name_is_denied_too(world):
