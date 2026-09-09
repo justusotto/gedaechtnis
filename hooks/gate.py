@@ -19,7 +19,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import (read_input, deny, ask, log, expand, under, vault_rel, lane_for, path_in_partition,
                     VAULT, HOME, STATE, ROLE_STEMS, guarded, shared_surface, pure_append,
-                    note_pre_exists, clear_pre_exists, created_paths, take_filelock, release_filelock, LOCK_TTL)
+                    note_pre_exists, clear_pre_exists, created_paths, take_filelock, release_filelock)
 import fnmatch
 import shlex
 import config as _cfg
@@ -580,7 +580,10 @@ def do_write(inp: dict) -> None:
 
     # D2 — take the per-file mutex, then D1. Every refusal from here on RELEASES the lock first:
     # the tool call is not going to happen, so holding the file for the next ten seconds would
-    # block a sibling for a write that never occurred.
+    # block a sibling for a write that never occurred. `NotebookEdit` is the one tool whose lock
+    # the chore cannot release (hooks.json has no PostToolUse for it, and it carries
+    # `notebook_path` rather than `file_path`), so a notebook's lock ages out at LOCK_TTL instead —
+    # the same fail-safe that covers a hook that dies, and the reason there has to be one.
     ok, age, holder = take_filelock(p, sid)
     if not ok:
         log("deny", f"write\tfilelock\t{rel}\theld-by={holder}\tage={age:.1f}s\tsession={sid}")
