@@ -289,9 +289,24 @@ def region_of_repo(repo: Path) -> str | None:
         top = m.group(1).split("/")[0]
         if top in ("Global", "Pharos", "Channels", "Workflows", "Limen", "Concilium"):
             continue
-        if "/" in m.group(1) or top == "Speculum":
+        if "/" in m.group(1) or top == "Speculum" or _is_leaf_region(VAULT / top):
             return m.group(1)
     return None
+
+
+def _is_leaf_region(d: Path) -> bool:
+    """A one-segment directory is a REGION when no child directory of its own carries a
+    Position.md or Kernel.md — a stranger's flat vault (`<vault>/<Region>/`) has exactly this
+    shape; an Atlas umbrella (`Mnemosyne/`) has child regions and is never one."""
+    try:
+        if not d.is_dir() or not any((d / f).is_file() for f in ("Position.md", "Kernel.md", "Map.md")):
+            return False
+        for child in d.iterdir():
+            if child.is_dir() and not child.name.startswith(".") and any((child / f).is_file() for f in ("Position.md", "Kernel.md")):
+                return False
+    except OSError:
+        return False
+    return True
 
 
 def repo_root_of(path: Path) -> Path | None:

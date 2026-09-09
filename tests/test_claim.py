@@ -261,3 +261,13 @@ def test_a_region_missing_from_the_vault_is_not_claimed(world):
     (w["repo"] / ".atlas-lane").write_text("lane: X\npath: Mnemosyne/NoSuchRegion/\n")
     hook(w, "start")
     assert calls(w) == []
+
+
+def test_user_prompt_submit_reclaims_with_a_promptless_payload(world):
+    """Stop fires at the end of EVERY turn, so hooks.json re-runs `start` on UserPromptSubmit,
+    whose payload carries no `source`. It must claim exactly like a startup does."""
+    hj = json.loads((HOOKS / "hooks.json").read_text())
+    assert "UserPromptSubmit" in hj["hooks"], "the per-turn re-claim must be wired"
+    assert "claim.py start" in hj["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
+    hook(world, "start", source=None)
+    assert any(str(c).startswith("claim-interactive") for c in calls(world)), calls(world)
