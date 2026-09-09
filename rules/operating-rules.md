@@ -1,21 +1,24 @@
 # Operating rules — how a session uses the vault
 
-The vault is this project's memory. Each project folder (a *region*) carries six files: **Map**
-(what the project is, plus an index), **Position** (where it stands), **Canon** (settled
-decisions), **Patterns** (what works), **Errata** (what went wrong), **Aporia** (open questions).
-A region may also carry a **Kernel** — its always-loaded index. Other files are created only when
-there is something to put in them.
+The vault is this project's memory. Each project folder (a *region*) carries six files, shown
+under a plain-English name; the file on disk keeps its short name (`Canon.md`, not
+`Decisions.md`) either way — **Index** (`Map.md`, what the project is, plus an index), **Status**
+(`Position.md`, where it stands), **Decisions** (`Canon.md`, settled decisions), **Patterns**
+(`Patterns.md`, what works), **Mistakes** (`Errata.md`, what went wrong), **Open questions**
+(`Aporia.md`, unanswered). A region may also carry a **Boot** (`Kernel.md`) — its always-loaded
+index. Other files are created only when there is something to put in them.
 
 ## What goes where
 
-- A decision becomes settled → **Canon**: what was decided, the date, why. Supersede an entry in
-  place with a dated line; never rewrite one from memory.
-- A bug is diagnosed and fixed, or a mistake is corrected → **Errata**: the mechanism first, then
-  what to do instead, so the same mistake is not made twice.
-- An approach works for the second time → **Patterns**: the rule in a few lines.
-- A question surfaces that nobody has answered → **Aporia**, with an urgency and today's date.
-- The state of the work changes (shipped, in flight, deferred, next) → **Position**.
-- A file is added to the region → one row in **Map** pointing at it.
+- A decision becomes settled → **Decisions** (`Canon.md`): what was decided, the date, why.
+  Supersede an entry in place with a dated line; never rewrite one from memory.
+- A bug is diagnosed and fixed, or a mistake is corrected → **Mistakes** (`Errata.md`): the
+  mechanism first, then what to do instead, so the same mistake is not made twice.
+- An approach works for the second time → **Patterns** (`Patterns.md`): the rule in a few lines.
+- A question surfaces that nobody has answered → **Open questions** (`Aporia.md`), with an
+  urgency and today's date.
+- The state of the work changes (shipped, in flight, deferred, next) → **Status** (`Position.md`).
+- A file is added to the region → one row in **Index** (`Map.md`) pointing at it.
 
 Knowledge that applies to every project goes in `Global/`, with a pointer from the region — never
 a second copy: a duplicated fact diverges, and the stale half is the one that gets read.

@@ -12,11 +12,11 @@ Close this session out. Two parts, in order.
     Committing: <the paths the Stop hook will commit>
     Open: <what is left for the next session — or "nothing">
 
-Rules for it: name entries, not files touched — "the apostrophe decision, in Canon" beats "edited
-three files". Invent nothing; if this session made no vault entry, say so, and say whether it
-should have (a decision settled, a bug fixed or a question raised without an entry is the failure
-this line exists to catch). Put only genuine judgment calls under *Needs a decision* — anything
-safe, cheap or mechanical was yours to decide and should already be recorded.
+Rules for it: name entries, not files touched — "the apostrophe decision, in Decisions
+(Canon.md)" beats "edited three files". Invent nothing; if this session made no vault entry, say
+so, and say whether it should have (a decision settled, a bug fixed or a question raised without
+an entry is the failure this line exists to catch). Put only genuine judgment calls under *Needs a
+decision* — anything safe, cheap or mechanical was yours to decide and should already be recorded.
 
 **2. What is about to be committed.** Run:
 
