@@ -4,12 +4,26 @@
 A memory that has to be committed by hand is a memory that is half-written: the session that
 took the trouble to record a decision is the same session that then has to remember the vault's
 git law, and the note that never got committed is indistinguishable from the note that was never
-made. So the commit is machinery. At Stop, this hook stages the files that changed under the
-paths THIS repo's `.atlas-lane` marker declares, and commits exactly those.
+made. So the commit is machinery. At Stop, this hook stages the vault files THIS SESSION wrote,
+inside the paths THIS repo's `.atlas-lane` marker declares, and commits exactly those.
 
     lane, paths  <- the marker found by walking up from the session's cwd (common.lane_for)
-    stage        <- `git add -- <file> …`, one explicit file per path, never a directory sweep
+    touched      <- the vault paths this session wrote, recorded per session id by chore.py on
+                    every PostToolUse Edit/Write (`touched: [...]` in session-start-<sid>.json)
+    stage        <- `git add -- <file> …`, one explicit file, never a directory sweep
     commit       <- `git commit -m "session-end auto-commit: [LANE] DATE" -- <staged files>`
+
+**The unit is the TOUCHED SET, not "everything dirty in the partition", and the difference is the
+whole point.** The only collision this vault has actually suffered is a session committing a
+SIBLING session's half-written file: same lane, same declared prefix, two live sessions, and the
+one that stopped first swept an edit its author had not finished — four instances in a single
+night. A partition tells you what a lane MAY write; it cannot tell you which of two sessions in
+that lane wrote a given line. The session's own record can, so that is what is committed.
+
+Two consequences, stated rather than discovered: a file BOTH sessions edited is committed by
+whichever stops first, carrying both edits (git has no way to split them, and leaving it
+uncommitted would be worse); and the second session's Stop then finds nothing left for that file
+and logs one line saying so. A session that wrote nothing to the vault commits nothing, silently.
 
 **The fail-safe is the whole design, and it is deliberately narrow.** No marker, an unparsable
 marker, a marker with no `lane:` or no `path:`, or a `path:` that is absolute or contains `..` —
@@ -29,13 +43,17 @@ undone by the next session:
   - never a bare `git commit` — the pathspec is what makes the commit carry only what this lane
     staged, whoever else has something in the shared index.
 
-**What it commits is derived from the index, not from the prefix list.** After staging, the hook
-asks git which paths under its prefixes are actually staged and commits those; a prefix that
-matches nothing is then simply absent instead of making `git commit -- <prefix>` fail, and
-another lane's staged files — which live outside these prefixes — are neither committed nor
-unstaged. The one residual, named rather than hidden: inside a prefix BOTH lanes declare
-(`Global/`, typically), a sibling's already-staged edit is indistinguishable from this lane's own
-and will ride along. Separating those needs an authorship signal git does not keep.
+**What it commits is read back from the index, and only for its own paths.** After staging, the
+hook asks git which of ITS files are actually staged and commits those by name; a file that
+turned out to have nothing to stage is simply absent instead of making `git commit -- <path>`
+fail, and anything another session has staged — inside this partition or outside it — is neither
+committed nor unstaged. Asking git about the PREFIX instead is precisely how a sibling's staged
+file would ride along, which is why the pathspec here is the touched list.
+
+**The residual, named rather than hidden.** A vault file written by something other than the Edit
+or Write tool — a shell command, a script the session ran — is not in the touched set and is not
+committed here. That is the deliberate trade: an unrecorded write stays in the working tree for
+its author to commit, which is recoverable, while a sweep of a sibling's half-written file is not.
 
 Identity: `Gedächtnis <gedaechtnis@local>`, a fixed machine identity, so `git log` tells a hook
 commit from a person's at a glance. `auto_commit: false` in the config file (or
@@ -46,7 +64,7 @@ import os, subprocess, sys, time
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config
-from common import read_input, log, lane_for, path_in_partition, VAULT, guarded
+from common import read_input, log, lane_for, path_in_partition, touched_paths, VAULT, guarded
 
 GIT_NAME = "Gedächtnis"
 GIT_EMAIL = "gedaechtnis@local"
@@ -68,19 +86,19 @@ def git(args: list[str], timeout: int = 30) -> tuple[int, str, str]:
         return 124, "", str(e)
 
 
-def changed_paths(prefixes: list[str]) -> list[str]:
-    """Vault-relative paths that are modified, deleted or untracked AND inside the partition.
+def dirty_paths() -> set[str]:
+    """Every vault-relative path git reports as changed: modified, deleted, staged or untracked.
 
     Read from `git status --porcelain -z`, which quotes nothing and separates records with NUL,
     so a path with a space, a quote or a newline in it survives. A rename record carries two
-    paths (new, then old); both are considered, because committing only half of a rename that
-    straddles the partition edge would leave the vault in a state nobody wrote."""
+    paths (new, then old); both count as dirty. This set is an INTERSECTION filter, never a
+    source of paths: what to commit comes from the session's touched set."""
     rc, out, err = git(["status", "--porcelain", "-z"])
     if rc != 0:
         log("commit", f"status FAILED rc={rc} detail={err[:200]!r}")
-        return []
+        return set()
     recs = out.split("\0") if out else []
-    found: list[str] = []
+    found: set[str] = set()
     i = 0
     while i < len(recs):
         rec = recs[i]
@@ -93,16 +111,34 @@ def changed_paths(prefixes: list[str]) -> list[str]:
             cands.append(recs[i])
             i += 1
         for c in cands:
-            c = c.rstrip("/")                          # `?? dir/` — stage the directory itself
-            if c and path_in_partition(c, prefixes) and c not in found:
-                found.append(c)
+            c = c.rstrip("/")
+            if c:
+                found.add(c)
     return found
 
 
-def staged_under(prefixes: list[str]) -> list[str]:
-    """What is actually staged under our prefixes — the commit's pathspec, read back from the
-    index rather than assumed from the list we asked for."""
-    rc, out, err = git(["diff", "--cached", "--name-only", "-z", "--", *prefixes])
+def is_dirty(rel: str, dirty: set[str]) -> bool:
+    """Is this path one git would commit something for?
+
+    Its own entry, or an ANCESTOR's: git reports a wholly untracked directory as one `?? dir/`
+    record and never names the files inside it, so a session's first write into a brand-new
+    region would otherwise look clean and be dropped."""
+    if rel in dirty:
+        return True
+    parts = rel.split("/")
+    return any("/".join(parts[:n]) in dirty for n in range(1, len(parts)))
+
+
+def staged_of(paths: list[str]) -> list[str]:
+    """Which of OUR paths are actually staged — the commit's pathspec, read back from the index
+    rather than assumed from the list we asked for.
+
+    Asked about our own paths, never about the prefixes: a sibling session's staged file inside
+    the same declared prefix must be neither committed nor unstaged, and asking git about the
+    prefix is exactly how it would end up in this commit."""
+    if not paths:
+        return []
+    rc, out, err = git(["diff", "--cached", "--name-only", "-z", "--", *paths])
     if rc != 0:
         log("commit", f"diff --cached FAILED rc={rc} detail={err[:200]!r}")
         return []
@@ -126,16 +162,26 @@ def main() -> None:
     if not (VAULT / ".git").exists():
         log("commit", f"sid={sid} lane={lane} vault={VAULT} not-a-git-repo action=staged-nothing")
         return
-    to_stage = changed_paths(prefixes)
+    mine = [p for p in touched_paths(sid) if path_in_partition(p, prefixes)]
+    if not mine:
+        return                                        # this session wrote nothing here: say nothing
+    dirty = dirty_paths()
+    to_stage = [p for p in mine if is_dirty(p, dirty)]
     if not to_stage:
-        return                                        # an ordinary no-op session: say nothing
+        # Everything this session wrote is already in history — typically because a sibling
+        # session that edited the same file stopped first and carried both sets of edits. That
+        # is the designed outcome, not a failure, but it is logged so a reader can tell it from
+        # a session whose work vanished.
+        log("commit", f"sid={sid} lane={lane} nothing-left-to-commit "
+                      f"(already committed elsewhere): {' '.join(mine)}")
+        return
     for i in range(0, len(to_stage), CHUNK):
         rc, _out, err = git(["add", "--", *to_stage[i:i + CHUNK]])
         if rc != 0:
             log("commit", f"sid={sid} lane={lane} stage FAILED rc={rc} detail={err[:200]!r}")
-    paths = staged_under(prefixes)
+    paths = staged_of(to_stage)
     if not paths:
-        log("commit", f"sid={sid} lane={lane} commit SKIPPED (nothing staged under {prefixes}) "
+        log("commit", f"sid={sid} lane={lane} commit SKIPPED (nothing staged) "
                       f"left-uncommitted={' '.join(to_stage)}")
         return
     subject = f"session-end auto-commit: [{lane}] {time.strftime('%Y-%m-%d')}"
