@@ -1,0 +1,27 @@
+[
+  {
+    "question": "why must a git commit message be composed in a file instead of passed as a raw string",
+    "expected": "Errata.md#Compose commit messages in a file, not inline",
+    "region": "Demo"
+  },
+  {
+    "question": "what happens when a claude code at-import target file is missing from disk",
+    "expected": "Errata.md#A missing @-import is skipped, not fatal",
+    "region": "Demo"
+  },
+  {
+    "question": "why should a cache directory never be deleted without asking first",
+    "expected": "Patterns.md#Cache files are user data, never deleted without asking",
+    "region": "Demo"
+  },
+  {
+    "question": "why repeat the control run twice to measure a metric's noise floor",
+    "expected": "Patterns.md#Measure the floor with a repeat of the control",
+    "region": "Demo"
+  },
+  {
+    "question": "how does a claim mechanism stop two sessions racing to write one region",
+    "expected": "Canon.md#One writer per region at a time",
+    "region": "Demo"
+  }
+]
