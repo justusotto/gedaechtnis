@@ -251,6 +251,39 @@ def test_the_footer_names_its_sources_and_says_nothing_else_was_searched(home):
            " ".join(out.split()), out
 
 
+SCREEN = """\
+Gedächtnis found 4 projects Claude Code has worked in.
+
+    #  project                          last session   region it would get
+    1  work/ledger-api                  today          ledger-api
+    2  work/website                     2 days ago     website
+    3  work/scratch-notes               31 days ago    scratch-notes
+    4  work/old-prototype               210 days ago   old-prototype   (no session in 90 days)
+
+Enter takes every row except #4 (the rows with a note); name a number to include one anyway.
+Found via Claude Code's own project list (~/.claude.json, `projects` key only) and a depth-2 look \
+under: ~/work. Nothing else on this disk was searched.
+
+"""
+
+
+def test_the_whole_screen_is_exactly_this(home):
+    """PROVES the screen the user actually sees, character for character — the columns line up, the
+    dates read as English, the region names are the repo folders verbatim, the stale row is present
+    and marked, and the footer names its sources. Pinned in full because this block IS the product's
+    first impression: a column that drifts or a sentence that quietly changes is a regression nobody
+    else would catch."""
+    repos = [git_repo(home / "work" / n) for n in
+             ("ledger-api", "website", "scratch-notes", "old-prototype")]
+    for repo, days in zip(repos, (0, 2, 31, 210)):
+        transcript(home, repo, days_ago=days + 0.5)      # mid-day, so no boundary flake
+    claude_json(home, repos)
+    rc, out, err = init(home, "--dry-run", cwd=repos[0])
+    assert rc == 0, err
+    printed = out.split("Gedächtnis init —")[0]
+    assert printed == SCREEN, repr(printed)
+
+
 # --------------------------------------------------------------- recency and staleness ----
 def test_a_candidate_older_than_ninety_days_is_listed_but_not_created(home):
     """PROVES: the 90-day default is a TICK, not a filter — the stale row is visible, named as
