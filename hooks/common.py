@@ -250,6 +250,20 @@ def note_pre_exists(p: Path) -> None:
         pass
 
 
+def clear_pre_exists(p: Path) -> None:
+    """Drop the marker because the write is NOT going to happen (the gate denied it).
+
+    Without this a denied creation leaves `0` on disk, and the next PostToolUse chore for that
+    path — for a write some OTHER session performed — reads it back as "this session created the
+    file". Found 2026-09-09 by D1's own test: the session was then credited with a file it never
+    made and allowed to overwrite it whole. A marker is a record of an observation about a write;
+    a refused write has no record to leave."""
+    try:
+        pre_exists_marker(p).unlink()
+    except OSError:
+        pass
+
+
 def was_created(p: Path) -> bool:
     """True when the gate saw `p` ABSENT immediately before this write; consumes the marker.
 

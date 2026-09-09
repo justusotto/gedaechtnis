@@ -431,6 +431,7 @@ def test_clone_worktree_create_and_clean_remove(tmp_path):
 def test_region_of_repo_handles_one_segment_region(world, tmp_path):
     from pathlib import Path as P
     import importlib.util, sys as _s
+    _s.modules.pop("config", None)   # common.py imports `config`; a copy cached by an earlier test would pin ITS vault
     spec = importlib.util.spec_from_file_location("common_t", str(HOOKS / "common.py")); m = importlib.util.module_from_spec(spec)
     _s.modules["common_t"] = m; os.environ["GEDAECHTNIS_VAULT"] = str(world["vault"]); spec.loader.exec_module(m)
     r = tmp_path / ("atlas-" + "system"); r.mkdir(); (r / "CLAUDE.md").write_text(f"@{world['vault']}/Global/Map.md\n@{world['vault']}/Speculum/Kernel.md\n")

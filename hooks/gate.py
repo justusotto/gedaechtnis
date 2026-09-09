@@ -19,7 +19,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import (read_input, deny, ask, log, expand, under, vault_rel, lane_for, path_in_partition,
                     VAULT, HOME, STATE, ROLE_STEMS, guarded, shared_surface, pure_append,
-                    note_pre_exists, created_paths, take_filelock, release_filelock, LOCK_TTL)
+                    note_pre_exists, clear_pre_exists, created_paths, take_filelock, release_filelock, LOCK_TTL)
 import fnmatch
 import shlex
 import config as _cfg
@@ -560,6 +560,7 @@ def do_write(inp: dict) -> None:
     note_pre_exists(p)      # the only moment anything can still tell a CREATION from an edit (chore.py reads this back)
     # Concilium stem rule — a real refusal regardless of mode (Kernel: TRIP-WIRE kind ii)
     if rel.startswith("Concilium/") and p.stem in ROLE_STEMS:
+        clear_pre_exists(p)                      # a refused write leaves no record of itself
         deny(EV, (f"Concilium STEM RULE: no file under ~/Atlas/Concilium/ may carry a vault role stem (`{p.stem}`) — it would "
                   "leak into kernel_freshness, the Lustrum arm and umbrella discovery. Use the Concilium-native names "
                   "(Fundamentum · Positio · Quaestiones · Vitia · Verba · Lex · Index). (Speculum/Kernel 'Standing constraints')"))
@@ -567,6 +568,7 @@ def do_write(inp: dict) -> None:
     r = rule_display_name_filename(p)
     if r:
         log("deny", f"write\tdisplay-name-filename\t{rel}")
+        clear_pre_exists(p)                      # a refused write leaves no record of itself
         deny(EV, r)
         return
     lane, prefixes, marker = lane_for(cwd)
@@ -579,12 +581,17 @@ def do_write(inp: dict) -> None:
     ok, age, holder = take_filelock(p, sid)
     if not ok:
         log("deny", f"write\tfilelock\t{rel}\theld-by={holder}\tage={age:.1f}s\tsession={sid}")
+        clear_pre_exists(p)                      # a refused write leaves no record of itself
         deny(EV, (f"Another session is editing `{rel}` right now (lock {int(age)}s old); retry the same edit in a moment — "
                   "it will re-read the file. (Design §5.2 D2)"))
         return
 
     def refuse(reason: str) -> None:
+        # A refused write leaves nothing behind: not the mutex (a sibling would wait ten seconds
+        # for a write that never happened) and not the pre-exists marker (a later chore would read
+        # it as a creation by this session and let D1 wave the overwrite through).
         release_filelock(p, sid)
+        clear_pre_exists(p)
         deny(EV, reason)
 
     d1 = rule_no_whole_file_write(inp.get("tool_name") or "", ti, p, rel, sid, lane)
