@@ -14,18 +14,25 @@ protects a vault; it never ships one.
 
 ## Install
 
+One command, run from inside the project you want to give a memory:
+
 ```sh
-git clone <this repo> ~/src/gedaechtnis
-ln -s ~/src/gedaechtnis ~/.claude/skills/gedaechtnis
+git clone <this repo> ~/src/gedaechtnis && python3 ~/src/gedaechtnis/init.py
 ```
 
-Restart Claude Code (or `/reload-plugins`). Claude Code discovers any directory containing
-`.claude-plugin/plugin.json` under a skills directory, so the plugin loads in place — there is
-nothing to build and no dependencies beyond Python 3.9+ from the standard library.
+`init.py` asks nothing. It creates a vault at `~/Gedaechtnis` (or uses `~/Atlas` if that directory
+already exists) and `git init`s it; a folder for this project in the vault with six starter files
+(Map, Position, Canon, Patterns, Errata, Aporia — every other file is born on its first write); a
+*lane* for the project — the writer identity its sessions use — declared in the vault's
+`Global/fleet-roster.md` and in a `.atlas-lane` marker in the repo; an @-import line in the repo's
+`CLAUDE.md`; `~/.claude/gedaechtnis/config.json` naming the vault; and the symlink
+`~/.claude/skills/gedaechtnis` that makes Claude Code load the plugin. It creates only what is
+absent and never overwrites a file: run it again and every line reports `kept`. `--dry-run` shows
+the plan; `--repo`, `--vault`, `--lane` and `--region` override the defaults.
 
-Optionally write `~/.claude/gedaechtnis/config.json` to say where your vault is (see
-[Configuration](#configuration)). Without it the plugin uses `~/Gedaechtnis`, or `~/Atlas` if that
-directory already exists.
+Then restart Claude Code (or `/reload-plugins`) and open it in the repo: the first session prints a
+facts block naming your vault and lane. There is nothing to build and no dependency beyond Python
+3.9+ from the standard library.
 
 ## What each hook does
 
@@ -56,6 +63,7 @@ Every refusal and repair is logged under the state directory: `deny.log`, `parti
 ## Configuration
 
 Precedence, per setting: environment variable → `~/.claude/gedaechtnis/config.json` → default.
+`init.py` writes the config file with the vault it created; edit it to move the vault.
 
 | JSON key | environment variable | default |
 |---|---|---|
