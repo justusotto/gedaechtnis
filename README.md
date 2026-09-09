@@ -14,18 +14,25 @@ protects a vault; it never ships one.
 
 ## Install
 
+One command, run from inside the project you want to give a memory:
+
 ```sh
-git clone <this repo> ~/src/gedaechtnis
-ln -s ~/src/gedaechtnis ~/.claude/skills/gedaechtnis
+git clone <this repo> ~/src/gedaechtnis && python3 ~/src/gedaechtnis/init.py
 ```
 
-Restart Claude Code (or `/reload-plugins`). Claude Code discovers any directory containing
-`.claude-plugin/plugin.json` under a skills directory, so the plugin loads in place — there is
-nothing to build and no dependencies beyond Python 3.9+ from the standard library.
+`init.py` asks nothing. It creates a vault at `~/Gedaechtnis` (or uses `~/Atlas` if that directory
+already exists) and `git init`s it; a folder for this project in the vault with six starter files
+(Map, Position, Canon, Patterns, Errata, Aporia — every other file is born on its first write); a
+*lane* for the project — the writer identity its sessions use — declared in the vault's
+`Global/fleet-roster.md` and in a `.atlas-lane` marker in the repo; an @-import line in the repo's
+`CLAUDE.md`; `~/.claude/gedaechtnis/config.json` naming the vault; and the symlink
+`~/.claude/skills/gedaechtnis` that makes Claude Code load the plugin. It creates only what is
+absent and never overwrites a file: run it again and every line reports `kept`. `--dry-run` shows
+the plan; `--repo`, `--vault`, `--lane` and `--region` override the defaults.
 
-Optionally write `~/.claude/gedaechtnis/config.json` to say where your vault is (see
-[Configuration](#configuration)). Without it the plugin uses `~/Gedaechtnis`, or `~/Atlas` if that
-directory already exists.
+Then restart Claude Code (or `/reload-plugins`) and open it in the repo: the first session prints a
+facts block naming your vault and lane. There is nothing to build and no dependency beyond Python
+3.9+ from the standard library.
 
 ## What each hook does
 
@@ -38,6 +45,8 @@ directory already exists.
 | PostToolUse Edit/Write | `chore.py write` | Repairs a queue file's missing trailing newline (without it the next appended row glues onto the previous line and no parser sees it); reports commit SHAs in the text that resolve in no known repo; and, when an edit removes a heading or an id, lists every other file still citing it. |
 | PostToolUse Edit/Write | `chore.py inbox` | When a session writes in a region that is not its own, appends one row to that region's `Inbox.md`, so the record lands where the work happened rather than where the writer had permission. |
 | SessionStart | `session_start.py` | States the facts a session should not have to ask for: which lane it is, what it may write, the partition mode, the vault's HEAD and uncommitted count, unread inbox and ledger rows. |
+| SessionStart | `claim.py start` | Takes this session's per-region writer claim, so the vault's one-writer-per-region rule is kept by machinery instead of by a ritual performed from memory. Does nothing at all when no claim helper is configured, when the session has no lane, or when its partition names no region. |
+| Stop | `claim.py stop` | Gives back exactly the claims this session took, and nothing else. A claim that is never released is worse than none: the next session defers to a holder that no longer exists. |
 
 Two more tools ship alongside the hooks:
 
@@ -56,6 +65,7 @@ Every refusal and repair is logged under the state directory: `deny.log`, `parti
 ## Configuration
 
 Precedence, per setting: environment variable → `~/.claude/gedaechtnis/config.json` → default.
+`init.py` writes the config file with the vault it created; edit it to move the vault.
 
 | JSON key | environment variable | default |
 |---|---|---|
@@ -65,6 +75,9 @@ Precedence, per setting: environment variable → `~/.claude/gedaechtnis/config.
 | `worktrees_dir` | `GEDAECHTNIS_WORKTREES` | `~/.claude/worktrees` |
 | `owner_pages_status` | — | none; the session-start hook then says nothing about review pages |
 | `python` | — | the interpreter running the hook |
+| `tool_root` | `GEDAECHTNIS_TOOL_ROOT` | the checkout this plugin lives in |
+| `claim_tool` | `GEDAECHTNIS_CLAIM_TOOL` | `<tool_root>/skills/atlas-region/helpers/region_claim.sh`; absent = the claim hooks do nothing |
+| `auto_claim` | `GEDAECHTNIS_AUTO_CLAIM` | `true` — coordination that must be switched on is coordination that is off |
 
 ```json
 {
