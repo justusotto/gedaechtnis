@@ -77,6 +77,7 @@ PLUGIN = Path(__file__).resolve().parent
 sys.path.insert(0, str(PLUGIN / "hooks"))
 import config  # noqa: E402  (every path is resolved there)
 import common  # noqa: E402  (git_root: the same bounded walk the hooks do)
+import names  # noqa: E402  (display names over the stems this file writes to disk)
 
 CORE_SIX = ("Map", "Position", "Canon", "Patterns", "Errata", "Aporia")
 ROSTER_FENCE = "fleet-roster"
@@ -423,8 +424,27 @@ def parse_answer(raw: str, cands, now: float):
 
 
 # ---------------------------------------------------------------- templates ----
+# Title lines and the Map's index rows show the DISPLAY name (DESIGN §6); the file on disk keeps
+# its stem regardless of `language` — `Canon.md` is never renamed to `Decisions.md`.
+def _title(region: str, stem: str) -> str:
+    return f"# {region} — {names.display(stem)}"
+
+
+def _row(stem: str) -> str:
+    """One Map index row, as an Obsidian display-alias link: the target is the stem (so the link
+    still resolves whatever `language` is set to), the reader sees the display name."""
+    return f"- [[{stem}|{names.display(stem)}]] — {names.gloss(stem)}"
+
+
+def _frontmatter(stem: str) -> str:
+    """The one YAML key a role file gets at birth: `aliases: [<display name>]`, so Obsidian's
+    own search/link resolution finds the file under its display name too. Nothing else — DESIGN
+    §6.2.3 costs this at ~30 B per file, and that is the whole budget."""
+    return f"---\naliases: [{names.display(stem)}]\n---\n"
+
+
 def t_map(region: str) -> str:
-    return f"""# {region} — Map
+    return f"""{_title(region, "Map")}
 
 ## Purpose
 
@@ -433,18 +453,18 @@ project's Vision: it changes rarely; everything below it is an index.)
 
 ## Files in this folder
 
-- [[Position]] — where the project stands right now: shipped, in flight, deferred, and what comes next
-- [[Canon]] — decisions that are settled, each with the reason, so nobody re-argues them
-- [[Patterns]] — approaches that worked more than once
-- [[Errata]] — mistakes made and how they were fixed, so they are not made twice
-- [[Aporia]] — open questions nobody has answered yet
+{_row("Position")}
+{_row("Canon")}
+{_row("Patterns")}
+{_row("Errata")}
+{_row("Aporia")}
 
 Other files appear here as they are needed; nothing has to be created in advance.
 """
 
 
 def t_position(region: str) -> str:
-    return f"""# {region} — Position
+    return f"""{_title(region, "Position")}
 
 Current state. Updated as work happens; the newest facts at the top of each section.
 
@@ -465,7 +485,7 @@ The planned route forward, in priority order.
 
 
 def t_canon(region: str) -> str:
-    return f"""# {region} — Canon
+    return f"""{_title(region, "Canon")}
 
 Locked decisions. One entry per decision: what was decided, when, and why. Check here before
 re-opening a question; supersede an entry in place rather than deleting it.
@@ -477,7 +497,7 @@ re-opening a question; supersede an entry in place rather than deleting it.
 
 
 def t_patterns(region: str) -> str:
-    return f"""# {region} — Patterns
+    return f"""{_title(region, "Patterns")}
 
 Approaches that have worked at least twice. Each entry states the rule in a few lines; the story
 behind it can go beneath.
@@ -485,7 +505,7 @@ behind it can go beneath.
 
 
 def t_errata(region: str) -> str:
-    return f"""# {region} — Errata
+    return f"""{_title(region, "Errata")}
 
 Mistakes and bugs, with what went wrong and what to do instead. Every future session reads this,
 so an entry here is how the same mistake is not made twice.
@@ -493,10 +513,10 @@ so an entry here is how the same mistake is not made twice.
 
 
 def t_aporia(region: str) -> str:
-    return f"""# {region} — Aporia
+    return f"""{_title(region, "Aporia")}
 
 Open questions. Each carries an urgency (BLOCKING / NEXT / DEFERRED) and the date it was last
-looked at; a question answered moves to Canon.
+looked at; a question answered moves to [[Canon|{names.display("Canon")}]].
 """
 
 
@@ -511,10 +531,13 @@ This folder is a memory that outlives any single conversation. Claude Code reads
 when a session starts and writes to it as work happens, so the next session — tomorrow, or on
 another project — begins knowing what was decided, what went wrong, and what is still open.
 
-- **One folder per project** (a *region*). Each starts with six files: `Map` (what the project
-  is, and an index), `Position` (where it stands), `Canon` (settled decisions), `Patterns`
-  (what works), `Errata` (what went wrong) and `Aporia` (open questions). Other files are added
-  when there is something to put in them.
+- **One folder per project** (a *region*). Each starts with six files, shown under a plain name
+  but kept on disk under its short one: **{names.display("Map")}** (`Map.md`, what the project is,
+  and an index), **{names.display("Position")}** (`Position.md`, where it stands),
+  **{names.display("Canon")}** (`Canon.md`, settled decisions), **{names.display("Patterns")}**
+  (`Patterns.md`, what works), **{names.display("Errata")}** (`Errata.md`, what went wrong) and
+  **{names.display("Aporia")}** (`Aporia.md`, open questions). Other files are added when there is
+  something to put in them.
 - **`Global/`** holds what applies to every project.
 - **`Global/fleet-roster.md`** says which project may write which folders. A project's repo
   carries a small `.atlas-lane` file naming its *lane* — the writer identity a session uses.
@@ -618,9 +641,9 @@ def plan(repo: Path, vault: Path, lane: str, region: str, cfg_path: Path, skills
     else:
         steps.append(Step(vault / ".git", "kept"))
 
-    # the region: six core files
+    # the region: six core files — an Obsidian display-alias in frontmatter, then the template
     for stem in CORE_SIX:
-        file(vault / region / f"{stem}.md", TEMPLATES[stem](region))
+        file(vault / region / f"{stem}.md", _frontmatter(stem) + TEMPLATES[stem](region))
 
     # Global
     file(vault / "Global" / "Kernel.md", t_kernel(vault))
