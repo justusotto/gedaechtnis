@@ -37,6 +37,7 @@ import json, os, re, subprocess, sys, time
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config
+import names
 from common import read_input, context, log, lane_for, git_root, VAULT, STATE, guarded
 
 EV = "SessionStart"
@@ -152,6 +153,7 @@ def main() -> None:
     lines = ["Gedächtnis session facts (hook-generated):", f"- Session id {sid}; this session's start record is ~/.claude/gedaechtnis/session-start-{sid}.json (pass that path to the debriefer)."]
     if lane:
         lines.append(f"- Lane {lane}, declared by {marker}; vault write partition: {', '.join(prefixes)}.")
+        lines.extend(memory_files_lines(prefixes))
     else:
         lines.append(no_memory_line(cwd))
     lines.append(f"- Partition hook mode: {mode.upper()} (" + ("logs would-be refusals to ~/.claude/gedaechtnis/partition.log, blocks nothing" if mode == "warn" else "writes outside the partition are refused") + ").")
@@ -208,6 +210,27 @@ def main() -> None:
             pass
     log("session", f"{sid}\tlane={lane}\tcwd={cwd}\thead={vault_head}")
     context(EV, "\n".join(lines + rules_block(inp.get("source"))))
+
+
+def memory_files_lines(prefixes: list) -> list:
+    """One fact line per declared partition prefix that is a REGION — a vault directory holding
+    role files directly — naming its EXISTING role files as display labels ("Decisions
+    (Canon.md)"), in `names.json`'s own row order. A prefix with no role file directly inside it
+    (`Global/`'s queue subpaths, a `.md` leaf like `Pharos/README.md`) contributes no line: this
+    is a fact about what memory the model can read here, not an inventory of the partition."""
+    out = []
+    for pre in prefixes:
+        p = pre.rstrip("/")
+        if not p or p.endswith(".md"):
+            continue
+        d = VAULT / p
+        if not d.is_dir():
+            continue
+        present = [s for s in names.ordered() if (d / f"{s}.md").is_file()]
+        if not present:
+            continue
+        out.append(f"- Memory files in {p}: " + " · ".join(names.label(s) for s in present) + ".")
+    return out
 
 
 NO_MARKER = ("- No .atlas-lane marker resolves from this cwd: this session has NO declared vault "
