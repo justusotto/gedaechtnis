@@ -104,6 +104,24 @@ def find_marker(cwd: str | None) -> Path | None:
     return None
 
 
+def git_root(start: str | Path | None) -> Path | None:
+    """The git toplevel containing `start`, or None — the same bounded walk `find_marker` does.
+
+    No subprocess: `.git` is a directory in a checkout and a file in a worktree, and both are
+    what "this is a repo" means here. HOME is never the answer even when it is itself a repo:
+    offering a memory to a user's entire home directory is never what they meant."""
+    if not start:
+        return None
+    d = Path(start)
+    for _ in range(12):
+        if d == d.parent or d == HOME:
+            return None
+        if (d / ".git").exists():
+            return d
+        d = d.parent
+    return None
+
+
 def parse_marker(marker: Path) -> tuple[str | None, list[str]]:
     lane, paths = None, []
     try:

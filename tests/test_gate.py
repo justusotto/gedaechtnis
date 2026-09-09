@@ -774,12 +774,29 @@ def test_operating_rules_can_be_switched_off(world):
 
 def test_operating_rules_file_is_generic_and_small():
     """The file is loaded into every session that starts, so its size is a contract; and it
-    speaks the six-file vocabulary rather than any one vault's private names."""
+    speaks the six-file vocabulary rather than any one vault's private names.
+
+    The ceiling was 2,500 B and is 4,500 B since the three-questions bullet landed: the rules text
+    is where "nothing else asks the user anything" has to be stated, and a budget that pushes that
+    sentence out buys a few hundred bytes at the price of the discipline it exists to carry."""
     rules = Path(__file__).resolve().parents[1] / "rules" / "operating-rules.md"
     text = rules.read_text(encoding="utf-8")
-    assert len(text.encode("utf-8")) <= 2500
+    assert len(text.encode("utf-8")) <= 4500
     for stem in ("Map", "Position", "Canon", "Patterns", "Errata", "Aporia"):
         assert f"**{stem}**" in text
+
+
+def test_the_operating_rules_name_the_three_questions_and_claim_no_others():
+    """PROVES the §3.4 contract the rules text carries: exactly three questions are named, and the
+    text says in so many words that nothing else in it asks the user anything. A fourth question
+    appearing in this file is a defect, and this is the only place it would be caught."""
+    rules = Path(__file__).resolve().parents[1] / "rules" / "operating-rules.md"
+    text = rules.read_text(encoding="utf-8")
+    assert "exactly three things" in text
+    assert "(yes / no / never)" in text                      # the no-memory question, verbatim
+    assert "which of the\n  projects found should get a memory" in text
+    assert "gather them into one folder" in text             # the cleanup question
+    assert "Nothing else\n  in these rules asks the user anything" in text
 
 
 def test_commit_dot_is_breadth_and_a_quoted_path_is_a_pathspec(world):

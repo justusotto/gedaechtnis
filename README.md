@@ -14,25 +14,71 @@ protects a vault; it never ships one.
 
 ## Install
 
-One command, run from inside the project you want to give a memory:
+One command, run from anywhere:
 
 ```sh
 git clone <this repo> ~/src/gedaechtnis && python3 ~/src/gedaechtnis/init.py
 ```
 
-`init.py` asks nothing. It creates a vault at `~/Gedaechtnis` (or uses `~/Atlas` if that directory
-already exists) and `git init`s it; a folder for this project in the vault with six starter files
-(Map, Position, Canon, Patterns, Errata, Aporia — every other file is born on its first write); a
-*lane* for the project — the writer identity its sessions use — declared in the vault's
-`Global/fleet-roster.md` and in a `.atlas-lane` marker in the repo; an @-import line in the repo's
-`CLAUDE.md`; `~/.claude/gedaechtnis/config.json` naming the vault; and the symlink
+Most people have more than one project, so `init.py` finds them and asks **one** question:
+
+```
+Gedächtnis found 5 projects Claude Code has worked in.
+
+    #  project                          last session   region it would get
+    1  src/ledger-api                   today          ledger-api
+    2  src/website                      2 days ago     website
+    3  work/scratch-notes               31 days ago    scratch-notes
+    4  code/old-prototype               210 days ago   old-prototype   (no session in 90 days)
+
+Enter takes every row except #4 (the rows with a note); name a number to include one anyway.
+Found via Claude Code's own project list (~/.claude.json, `projects` key only) and a depth-2 look
+under: ~/Projects, ~/src, ~/code. Nothing else on this disk was searched.
+
+Give these projects a memory?  [Enter = all]  [numbers, e.g. 1 3 4]  [none]  [later]
+```
+
+Enter takes every project you have worked in during the last 90 days. Typing numbers takes exactly
+those, and the rows you did not name are remembered as declined so you are never asked about them
+again. `none` writes nothing; `later` writes nothing and remembers nothing. Everything you choose is
+set up in one act, and the vault gets one first commit.
+
+**Where the list comes from — and what is never read.** Claude Code already keeps a list of the
+directories it has been opened in, and that list is your working set. Gedächtnis reads exactly one
+key of `~/.claude.json` — `projects` — and never writes that file; it reads the modification times
+of `~/.claude/projects/*/` as a "last session" signal only; it asks `git config --global` for the
+repos git itself already tracks; and it looks **two levels deep, no deeper**, under the directories
+in the `roots` setting. It does not scan your disk, read your shell history (which carries commands
+and, routinely, secrets), or ask Spotlight. Anything under a temp directory, in an agent worktree,
+in a scratchpad, or in the vault itself is skipped, as is your home directory itself.
+
+If your repos live somewhere the default `roots` do not name — JetBrains' project directory, say,
+which this plugin deliberately does not spell out — add one line to the config file:
+`"roots": ["~/src", "~/wherever-mine-are"]`.
+
+Other ways to run it: `--repo DIR` sets up that one project and shows no screen; `--discover` shows
+the screen even then; `--decline` (optionally `--repo DIR`) records that a project wants no memory
+and writes nothing else; `--offer-declined` lists the declined ones again, unticked; `--all` ignores
+the declined list for one run; `--dry-run` shows the plan and writes nothing; `--yes`, like a
+non-terminal stdin, takes the default without asking.
+
+For each chosen project it creates: a vault at `~/Gedaechtnis` (or uses `~/Atlas` if that directory
+already exists), `git init`-ed; a folder for the project in the vault, named after the repo folder
+**verbatim**, with six starter files (Map, Position, Canon, Patterns, Errata, Aporia — every other
+file is born on its first write); a *lane* — the writer identity its sessions use — declared in the
+vault's `Global/fleet-roster.md` and in a `.atlas-lane` marker in the repo; an @-import line in the
+repo's `CLAUDE.md`; `~/.claude/gedaechtnis/config.json` naming the vault; and the symlink
 `~/.claude/skills/gedaechtnis` that makes Claude Code load the plugin. It creates only what is
-absent and never overwrites a file: run it again and every line reports `kept`. `--dry-run` shows
-the plan; `--repo`, `--vault`, `--lane` and `--region` override the defaults.
+absent and never overwrites a file: run it again and every line reports `kept`.
 
 Then restart Claude Code (or `/reload-plugins`) and open it in the repo: the first session prints a
 facts block naming your vault and lane. There is nothing to build and no dependency beyond Python
 3.9+ from the standard library.
+
+**A project you add later** is not forgotten and not taken silently. The first time a session starts
+in a git repo with no memory, the facts block asks you once, in one line — *"This project has no
+memory yet — create one? (yes / no / never)"* — and then drops the subject. `never` is remembered;
+`no` is not asked again that day.
 
 ## What your sessions do with it
 
@@ -40,11 +86,12 @@ Once installed, a session in that project gets four things without being asked, 
 your `CLAUDE.md` empty:
 
 - **The rules arrive at boot.** Every session that starts is handed
-  [`rules/operating-rules.md`](rules/operating-rules.md) — under 2,500 B saying which of the six
+  [`rules/operating-rules.md`](rules/operating-rules.md) — under 3,000 B saying which of the six
   files a decision, a bug, a working approach, an open question or a state change goes in, to
   write it while the work happens rather than in a summary at the end, never to delete a vault
-  file, and how to end the session. Injected at `startup` only, because a resumed session already
-  has it. `inject_rules: false` turns it off.
+  file, how to end the session, and the three questions a session ever asks you (the install
+  screen, the no-memory question, a cleanup with candidates — and nothing else). Injected at
+  `startup` only, because a resumed session already has it. `inject_rules: false` turns it off.
 - **The notes commit themselves.** At Stop, the vault files *this session wrote* — recorded as it
   writes them, and intersected with the paths its `.atlas-lane` marker declares — are staged one
   by one and committed as `Gedächtnis <gedaechtnis@local>`. Never `git add -A`, never `--amend`,
@@ -74,7 +121,7 @@ pin a small model.
 | PostToolUse Edit/Write | `chore.py write` | Repairs a queue file's missing trailing newline (without it the next appended row glues onto the previous line and no parser sees it); reports commit SHAs in the text that resolve in no known repo; and, when an edit removes a heading or an id, lists every other file still citing it. |
 | PostToolUse Edit/Write | `chore.py inbox` | When a session writes in a region that is not its own, appends one row to that region's `Inbox.md`, so the record lands where the work happened rather than where the writer had permission. |
 | PostToolUse Edit/Write | `chore.py write` | Also records the vault path just written against this session's id — the touched set the Stop commit is built from. |
-| SessionStart | `session_start.py` | States the facts a session should not have to ask for: which lane it is, what it may write, the partition mode, the vault's HEAD and uncommitted count, unread inbox and ledger rows. On a `startup` (not a resume or a compact) it also injects the operating rules. |
+| SessionStart | `session_start.py` | States the facts a session should not have to ask for: which lane it is, what it may write, the partition mode, the vault's HEAD and uncommitted count, unread inbox and ledger rows. On a `startup` (not a resume or a compact) it also injects the operating rules. In a git repo that has no memory yet, it tells the session to ask you once — *"create one? (yes / no / never)"* — and at most once per project per day. |
 | SessionStart | `claim.py start` | Takes this session's per-region writer claim, so the vault's one-writer-per-region rule is kept by machinery instead of by a ritual performed from memory. Does nothing at all when no claim helper is configured, when the session has no lane, or when its partition names no region. |
 | Stop | `claim.py stop` | Gives back exactly the claims this session took, and nothing else. A claim that is never released is worse than none: the next session defers to a holder that no longer exists. |
 | Stop | `commit.py` | Commits this session's own vault writes, inside the lane's declared paths, path-limited and as a fixed machine identity. Not "everything dirty in the partition": the collision that actually happens is one session sweeping another's half-written file, and only the touched set can tell two sessions in one lane apart. No marker ⇒ nothing is staged, one line in the log, exit clean. |
@@ -105,6 +152,8 @@ Precedence, per setting: environment variable → `~/.claude/gedaechtnis/config.
 | JSON key | environment variable | default |
 |---|---|---|
 | `vault` | `GEDAECHTNIS_VAULT` | `~/Gedaechtnis`, or `~/Atlas` if it exists |
+| `roots` | `GEDAECHTNIS_ROOTS` (colon-separated) | `~/Projects`, `~/projects`, `~/src`, `~/code`, `~/dev`, `~/repos`, `~/Developer`, `~/IdeaProjects`, `~/AndroidStudioProjects`, `~/Documents/GitHub`, `~/go/src` — looked under two levels deep, and nowhere else |
+| `declined` | — | none; appended by `init.py --decline`, and nothing else writes it |
 | `state_dir` | `GEDAECHTNIS_STATE_DIR` | `~/.claude/gedaechtnis` |
 | `fleet_roster` | `GEDAECHTNIS_FLEET_ROSTER` | `<vault>/Global/fleet-roster.md` |
 | `worktrees_dir` | `GEDAECHTNIS_WORKTREES` | `~/.claude/worktrees` |

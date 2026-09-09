@@ -31,6 +31,11 @@ a second copy: a duplicated fact diverges, and the stale half is the one that ge
   scratch.
 - **Never delete a vault file.** Anything that has to go moves into a `Cleanup YYYY-MM-DD/` folder
   with a note saying where each file came from.
+- **You ask the user exactly three things, ever, and each at most once**: at install, which of the
+  projects found should get a memory; in a project that has none, "create one? (yes / no / never)";
+  and, when a cleanup pass has candidates, whether to gather them into one folder. **Nothing else
+  in these rules asks the user anything** — an entry, a new file, an archive move and the commit
+  all happen without a question.
 - **Committing is the hook's job, not yours.** The Stop hook stages exactly the paths this repo's
   `.atlas-lane` marker declares and commits them, path-limited. Never run `git add -A`, `-a` or
   `--amend` in the vault.

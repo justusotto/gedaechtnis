@@ -28,6 +28,10 @@ def env_for(home: Path) -> dict:
     e["HOME"] = str(home)
     e["GEDAECHTNIS_CONFIG"] = str(home / ".claude" / "gedaechtnis" / "config.json")
     e["GEDAECHTNIS_STATE_DIR"] = str(home / "state")
+    # A fake TMPDIR, because the discovery filter drops candidates under the real one and the
+    # suite's own tmp_path lives there: without this the filter would be measuring pytest's
+    # layout rather than the rule. Nothing is written under it unless a test does so.
+    e["TMPDIR"] = str(home / "faketmp")
     return e
 
 
@@ -91,29 +95,29 @@ def test_clean_home_gets_everything(home):
     assert rc == 0, err
     vault = home / "Gedaechtnis"
     for stem in CORE_SIX:
-        assert (vault / "MyProject" / f"{stem}.md").is_file(), stem
+        assert (vault / "my_project" / f"{stem}.md").is_file(), stem
     assert (vault / "Global" / "Kernel.md").is_file()
     assert (vault / "Global" / "fleet-roster.md").is_file()
     assert (vault / ".git").is_dir()
     assert (home / "my_project" / ".atlas-lane").read_text(encoding="utf-8").splitlines()[-3:] == \
-        ["lane: MY-PROJECT", "path: MyProject/", "path: Global/"]
+        ["lane: MY-PROJECT", "path: my_project/", "path: Global/"]
     claude_md = (home / "my_project" / "CLAUDE.md").read_text(encoding="utf-8")
-    assert f"@{vault / 'MyProject' / 'Position.md'}" in claude_md.splitlines()
+    assert f"@{vault / 'my_project' / 'Position.md'}" in claude_md.splitlines()
     cfg = json.loads((home / ".claude" / "gedaechtnis" / "config.json").read_text(encoding="utf-8"))
     assert Path(os.path.expanduser(cfg["vault"])).resolve() == vault.resolve()
     link = home / ".claude" / "skills" / "gedaechtnis"
     assert link.is_symlink() and Path(os.readlink(link)) == PLUGIN
     lanes = parse_roster((vault / "Global" / "fleet-roster.md").read_text(encoding="utf-8"))
-    assert lanes == {"MY-PROJECT": {"repos": ["my_project"], "paths": ["MyProject/", "Global/"]}}
+    assert lanes == {"MY-PROJECT": {"repos": ["my_project"], "paths": ["my_project/", "Global/"]}}
     # the report names every path and the one next step
     verbs = dict((p, v) for v, p in report_lines(out))
-    assert verbs[str(vault / "MyProject" / "Map.md")] == "created"
+    assert verbs[str(vault / "my_project" / "Map.md")] == "created"
     assert verbs[str(link)] == "created"
     assert "Next step: open Claude Code in this repo; the first session prints a facts block naming your vault and lane." in out
     # the vault's first commit carries exactly the created files, nothing else
     log = subprocess.run(["git", "-C", str(vault), "show", "--name-only", "--format=", "HEAD"],
                          capture_output=True, text=True).stdout.split()
-    assert sorted(log) == sorted([f"MyProject/{s}.md" for s in CORE_SIX] + ["Global/Kernel.md", "Global/fleet-roster.md"])
+    assert sorted(log) == sorted([f"my_project/{s}.md" for s in CORE_SIX] + ["Global/Kernel.md", "Global/fleet-roster.md"])
     status = subprocess.run(["git", "-C", str(vault), "status", "--porcelain"], capture_output=True, text=True).stdout
     assert status.strip() == ""
 
@@ -128,7 +132,7 @@ def test_an_existing_atlas_directory_is_the_default_vault(home):
     (home / "Atlas").mkdir()
     rc, out, _ = init(home)
     assert rc == 0
-    assert (home / "Atlas" / "MyProject" / "Map.md").is_file()
+    assert (home / "Atlas" / "my_project" / "Map.md").is_file()
     assert not (home / "Gedaechtnis").exists()
 
 
@@ -146,21 +150,21 @@ def test_second_run_changes_nothing_and_reports_kept(home):
 
 def test_a_pre_existing_region_file_is_untouched(home):
     vault = home / "Gedaechtnis"
-    (vault / "MyProject").mkdir(parents=True)
-    mine = vault / "MyProject" / "Canon.md"
+    (vault / "my_project").mkdir(parents=True)
+    mine = vault / "my_project" / "Canon.md"
     mine.write_bytes(b"# my own canon\n\nwritten before init ran\n")
     rc, out, _ = init(home)
     assert rc == 0
     assert mine.read_bytes() == b"# my own canon\n\nwritten before init ran\n"
     assert dict((p, v) for v, p in report_lines(out))[str(mine)] == "kept"
-    assert (vault / "MyProject" / "Map.md").is_file()          # the absent siblings were still created
+    assert (vault / "my_project" / "Map.md").is_file()          # the absent siblings were still created
 
 
 def test_an_existing_marker_is_kept_and_its_lane_adopted(home):
-    (home / "my_project" / ".atlas-lane").write_text("lane: MINE\npath: MyProject/\npath: Global/\n", encoding="utf-8")
+    (home / "my_project" / ".atlas-lane").write_text("lane: MINE\npath: my_project/\npath: Global/\n", encoding="utf-8")
     rc, out, _ = init(home)
     assert rc == 0
-    assert "lane MINE" in out.splitlines()[0]
+    assert any("lane MINE" in l for l in out.splitlines()), out
     lanes = parse_roster((home / "Gedaechtnis" / "Global" / "fleet-roster.md").read_text(encoding="utf-8"))
     assert list(lanes) == ["MINE"]
 
@@ -180,7 +184,7 @@ def test_existing_roster_with_another_lane_gets_this_lane_appended_inside_the_fe
     assert text.endswith("```\n\nfooter\n")                                 # prose below the fence untouched
     lanes = parse_roster(text)
     assert lanes == {"OTHER": {"repos": ["elsewhere/other"], "paths": ["Other/", "Global/"]},
-                     "MY-PROJECT": {"repos": ["my_project"], "paths": ["MyProject/", "Global/"]}}
+                     "MY-PROJECT": {"repos": ["my_project"], "paths": ["my_project/", "Global/"]}}
     assert dict((p, v) for v, p in report_lines(out))[str(roster)] == "updated"
     # and the change is ONE insertion of well-formed rows: what the write gate would admit
     a = 0
@@ -206,7 +210,7 @@ def test_existing_claude_md_gains_only_the_import_line(home):
     assert rc == 0
     text = claude_md.read_text(encoding="utf-8")
     assert text.startswith("# my project\n\nmy own instructions\n")
-    imp = f"@{home / 'Gedaechtnis' / 'MyProject' / 'Position.md'}"
+    imp = f"@{home / 'Gedaechtnis' / 'my_project' / 'Position.md'}"
     assert text.count(imp) == 1 and text.endswith(imp + "\n")
     init(home)
     assert claude_md.read_text(encoding="utf-8") == text
@@ -263,7 +267,7 @@ def test_after_init_the_session_start_hook_names_the_lane_and_the_vault(home):
     assert p.returncode == 0, p.stderr
     ctx = json.loads(p.stdout)["hookSpecificOutput"]["additionalContext"]
     assert "Lane MY-PROJECT" in ctx and str(repo / ".atlas-lane") in ctx
-    assert "write partition: MyProject, Global." in ctx                       # the partition the marker declares
+    assert "write partition: my_project, Global." in ctx                       # the partition the marker declares
     assert f"Vault {home / 'Gedaechtnis'}" in ctx and "HEAD at session start" in ctx
     assert (home / "state" / "session-start-t.json").is_file()                # state went to the sandbox, not ~/.claude
     assert not (home / ".claude" / "gedaechtnis" / "session-start-t.json").exists()
