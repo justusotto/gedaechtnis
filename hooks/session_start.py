@@ -9,10 +9,17 @@ partition-hook mode, vault dirt, what this session's @-import chain cost to boot
 such script configured the hook says nothing about it at all, rather than guessing where one
 might live.
 
+★ THE OFFER, FOR A PROJECT WITH NO MEMORY. Where no marker resolves, the cwd is inside a git repo,
+a vault exists and the repo has not been declined, the block tells the model to ask the user ONE
+line — "This project has no memory yet — create one? (yes / no / never)" — and names the exact
+command for each answer. The facts block cannot prompt; the conversation can, and that is the right
+surface for the one question. Shown at most once per repo per day (a stamp in the state dir), so a
+`no` is never nagged; every other time, and in a non-repo directory, the plain one-line fact.
+
 ★ THE OPERATING RULES. A stranger's install has an empty CLAUDE.md and no prose anywhere telling
 a session what the six vault files are for. Rather than asking them to write that prose, the hook
 injects `rules/operating-rules.md` as additionalContext — the memory-writing discipline itself,
-generic, under 2,500 B. It is injected at `startup` ONLY: a `resume` or a `compact` continues a
+generic, under 3,000 B. It is injected at `startup` ONLY: a `resume` or a `compact` continues a
 session that already has it, and re-sending it there would buy nothing and cost tokens every time.
 `inject_rules: false` in the config file (or GEDAECHTNIS_INJECT_RULES=0) turns it off for an
 install whose own CLAUDE.md already says all of this.
@@ -30,7 +37,8 @@ import json, os, re, subprocess, sys, time
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config
-from common import read_input, context, log, lane_for, VAULT, STATE, guarded
+import names
+from common import read_input, context, log, lane_for, git_root, VAULT, STATE, guarded
 
 EV = "SessionStart"
 
@@ -145,8 +153,9 @@ def main() -> None:
     lines = ["Gedächtnis session facts (hook-generated):", f"- Session id {sid}; this session's start record is ~/.claude/gedaechtnis/session-start-{sid}.json (pass that path to the debriefer)."]
     if lane:
         lines.append(f"- Lane {lane}, declared by {marker}; vault write partition: {', '.join(prefixes)}.")
+        lines.extend(memory_files_lines(prefixes))
     else:
-        lines.append("- No .atlas-lane marker resolves from this cwd: this session has NO declared vault write partition (the Stop hook will commit nothing).")
+        lines.append(no_memory_line(cwd))
     lines.append(f"- Partition hook mode: {mode.upper()} (" + ("logs would-be refusals to ~/.claude/gedaechtnis/partition.log, blocks nothing" if mode == "warn" else "writes outside the partition are refused") + ").")
     if vault_head:
         lines.append(f"- Vault {VAULT}: HEAD at session start {vault_head[:8]}; dirty paths in the vault right now: {n_dirty}.")
@@ -201,6 +210,68 @@ def main() -> None:
             pass
     log("session", f"{sid}\tlane={lane}\tcwd={cwd}\thead={vault_head}")
     context(EV, "\n".join(lines + rules_block(inp.get("source"))))
+
+
+def memory_files_lines(prefixes: list) -> list:
+    """One fact line per declared partition prefix that is a REGION — a vault directory holding
+    role files directly — naming its EXISTING role files as display labels ("Decisions
+    (Canon.md)"), in `names.json`'s own row order. A prefix with no role file directly inside it
+    (`Global/`'s queue subpaths, a `.md` leaf like `Pharos/README.md`) contributes no line: this
+    is a fact about what memory the model can read here, not an inventory of the partition."""
+    out = []
+    for pre in prefixes:
+        p = pre.rstrip("/")
+        if not p or p.endswith(".md"):
+            continue
+        d = VAULT / p
+        if not d.is_dir():
+            continue
+        present = [s for s in names.ordered() if (d / f"{s}.md").is_file()]
+        if not present:
+            continue
+        out.append(f"- Memory files in {p}: " + " · ".join(names.label(s) for s in present) + ".")
+    return out
+
+
+NO_MARKER = ("- No .atlas-lane marker resolves from this cwd: this session has NO declared vault "
+             "write partition (the Stop hook will commit nothing).")
+
+
+def no_memory_line(cwd: str) -> str:
+    """The one line a session with no lane gets — the plain fact, or, ONCE per repo per day, the
+    offer to create a memory for it.
+
+    The facts block cannot ask a question; the model can. So the block does not ask — it tells the
+    model to ask, once, in one line, at the top of its first reply, and then to drop it. The offer
+    appears only where it would be true and welcome: inside a git repo (a memory belongs to a
+    project, not to whatever directory a terminal happened to open in), with a vault already on
+    this machine, and in a repo the user has not already said no to. A stamp file caps it at one
+    offer per repo per day, because a `no` that gets asked again at the next boot is a nag, and a
+    nagging tool is turned off."""
+    repo = git_root(cwd)
+    if repo is None or not VAULT.is_dir():
+        return NO_MARKER
+    if str(repo) in config.declined() or str(Path(os.path.realpath(str(repo)))) in config.declined():
+        return NO_MARKER
+    import hashlib
+    stamp = STATE / ("offer-" + hashlib.sha1(str(repo).encode()).hexdigest() + ".stamp")
+    today = time.strftime("%Y-%m-%d")
+    try:
+        if stamp.read_text(encoding="utf-8").strip() == today:
+            return NO_MARKER                       # already offered today: the fact, not the offer
+    except OSError:
+        pass
+    try:
+        STATE.mkdir(parents=True, exist_ok=True)
+        stamp.write_text(today + "\n", encoding="utf-8")
+    except OSError:
+        pass
+    init_py = Path(__file__).resolve().parent.parent / "init.py"
+    return ('- This project has no memory yet. Ask the user ONCE, in one line, at the start of your '
+            'first reply: "This project has no memory yet — create one? (yes / no / never)". On yes '
+            f'run `python3 {init_py} --yes --repo {repo}`; on never run `python3 {init_py} '
+            f'--decline --repo {repo}`; on no, do not ask again this session. Say nothing more '
+            'about it.')
 
 
 def rules_block(source) -> list[str]:

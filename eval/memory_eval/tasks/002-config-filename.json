@@ -1,0 +1,14 @@
+{
+  "task_id": "002-config-filename",
+  "title": "Config filename convention",
+  "positive_control": false,
+  "description": "A narrower, single-file version of the same shape as 001 — a project convention decided on day 1 that day 2 must recall. Not flagged as the positive control (001 already covers that proof), but built the same way: a run with no memory has nothing but the day-2 prompt itself to go on.",
+  "day1_prompt": "Decide and record a project convention: this project's config file must be named settings.toml, not config.yaml.",
+  "memory_sentence": "This project's config file must be named settings.toml.",
+  "canon_heading": "The config file is named settings.toml",
+  "fact": "settings.toml",
+  "day_n": 2,
+  "day_n_prompt": "It is day 2. What must the config file be named in this project? Answer with only the filename.",
+  "checker_file": "config-name-answer.txt",
+  "checker_must_contain": "settings.toml"
+}

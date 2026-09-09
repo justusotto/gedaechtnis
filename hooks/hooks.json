@@ -34,6 +34,16 @@
     ],
     "PostToolUse": [
       {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -B \"${CLAUDE_PLUGIN_ROOT}\"/hooks/chore.py bash",
+            "timeout": 10
+          }
+        ]
+      },
+      {
         "matcher": "Artifact",
         "hooks": [
           {

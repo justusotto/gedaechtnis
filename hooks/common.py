@@ -104,6 +104,24 @@ def find_marker(cwd: str | None) -> Path | None:
     return None
 
 
+def git_root(start: str | Path | None) -> Path | None:
+    """The git toplevel containing `start`, or None — the same bounded walk `find_marker` does.
+
+    No subprocess: `.git` is a directory in a checkout and a file in a worktree, and both are
+    what "this is a repo" means here. HOME is never the answer even when it is itself a repo:
+    offering a memory to a user's entire home directory is never what they meant."""
+    if not start:
+        return None
+    d = Path(start)
+    for _ in range(12):
+        if d == d.parent or d == HOME:
+            return None
+        if (d / ".git").exists():
+            return d
+        d = d.parent
+    return None
+
+
 def parse_marker(marker: Path) -> tuple[str | None, list[str]]:
     lane, paths = None, []
     try:
@@ -207,6 +225,198 @@ def touched_paths(sid: str) -> list[str]:
         return []
     t = doc.get("touched") if isinstance(doc, dict) else None
     return [p for p in t if isinstance(p, str)] if isinstance(t, list) else []
+
+
+# ---- was this write a CREATION? the PreToolUse gate is the only place that can still see ----
+# A PostToolUse chore runs after the file exists, so it cannot tell a new file from an edited one.
+# The gate, which runs immediately before the same tool call, can: it stamps one tiny marker per
+# path saying whether the path existed at that moment, and the chore reads it back and consumes it.
+# Chosen over an mtime/ctime heuristic because it is a RECORDED OBSERVATION rather than an
+# inference — it does not move with the filesystem's timestamp granularity, a `Write` that
+# rewrites an existing file byte-for-byte, or a file copied into place by something else.
+
+def pre_exists_marker(p: Path) -> Path:
+    import hashlib
+    return STATE / ("pre-exists-" + hashlib.sha1(str(p).encode("utf-8")).hexdigest()[:16])
+
+
+def note_pre_exists(p: Path) -> None:
+    """Record, at PreToolUse time, whether `p` is already on disk. Rewritten on every gate call
+    for that path, so a marker left behind by a DENIED write is corrected before it is ever read."""
+    try:
+        STATE.mkdir(parents=True, exist_ok=True)
+        pre_exists_marker(p).write_text("1" if p.exists() else "0", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def clear_pre_exists(p: Path) -> None:
+    """Drop the marker because the write is NOT going to happen (the gate denied it).
+
+    Without this a denied creation leaves `0` on disk, and the next PostToolUse chore for that
+    path — for a write some OTHER session performed — reads it back as "this session created the
+    file". Found 2026-09-09 by D1's own test: the session was then credited with a file it never
+    made and allowed to overwrite it whole. A marker is a record of an observation about a write;
+    a refused write has no record to leave."""
+    try:
+        pre_exists_marker(p).unlink()
+    except OSError:
+        pass
+
+
+def was_created(p: Path) -> bool:
+    """True when the gate saw `p` ABSENT immediately before this write; consumes the marker.
+
+    No marker (the gate is not wired, or it never saw this path) → False. A chore that cannot
+    PROVE the file is new treats it as old: the Map row is added on evidence, never on a guess."""
+    m = pre_exists_marker(p)
+    try:
+        v = m.read_text(encoding="utf-8").strip()
+    except OSError:
+        return False
+    try:
+        m.unlink()
+    except OSError:
+        pass
+    return v == "0"
+
+
+def record_created(sid: str, rel: str) -> None:
+    """Note that THIS session created this vault-relative path (chore.py, on the evidence of the
+    gate's pre-exists marker — a PostToolUse record, so the file really was written).
+
+    D1 reads this back: a whole-file `Write` to a file this session made is not a lost update,
+    because there is no other session's content in it to lose. The record is per session id and
+    lives beside the touched set, so it dies with the session as it should."""
+    def add(doc: dict) -> None:
+        c = doc.get("created")
+        if not isinstance(c, list):
+            c = []
+        if rel not in c:
+            c.append(rel)
+        doc["created"] = c
+    update_session_state(sid, add)
+
+
+def created_paths(sid: str) -> list[str]:
+    """The vault paths this session created, or [] — [] means "created nothing", never "all"."""
+    try:
+        doc = json.loads(session_state_path(sid).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    c = doc.get("created") if isinstance(doc, dict) else None
+    return [p for p in c if isinstance(p, str)] if isinstance(c, list) else []
+
+
+# ---- D2: the per-file mutex, PreToolUse → PostToolUse (DESIGN §5.2 D2) ----
+# Edit is a compare-and-swap, but the swap happens inside the tool: read, match the anchor, write.
+# Two sessions can be inside that window on the same file at the same moment, and the second one's
+# match is then against text the first is about to replace. The mutex closes exactly that window:
+# the PreToolUse gate takes a per-file lock, the PostToolUse chore drops it, and a second session
+# meeting a live lock is told to RETRY — which makes the model re-read, which is the correct fix.
+#
+# The lock lives under the STATE dir, never in the vault: it is session bookkeeping, and a lock
+# file inside the vault would be committed, synced and read as memory.
+#
+# STALENESS IS THE WHOLE FAIL-SAFE. A PostToolUse that never fires — the tool errored, the hook
+# process died, the session was killed mid-turn — would otherwise leave a file locked forever. So
+# a lock older than LOCK_TTL seconds is not a lock: it is taken over silently by the next writer,
+# who overwrites it with its own session id. The cost of the takeover being wrong is one lost
+# 10-second race; the cost of not having it is a file no session can ever edit again.
+
+LOCK_TTL = 10.0
+
+
+def filelock_path(p: Path) -> Path:
+    import hashlib
+    try:
+        real = os.path.realpath(str(p))
+    except OSError:
+        real = str(p)
+    return STATE / "filelocks" / hashlib.sha1(real.encode("utf-8")).hexdigest()
+
+
+def read_filelock(p: Path) -> dict | None:
+    try:
+        doc = json.loads(filelock_path(p).read_text(encoding="utf-8"))
+        return doc if isinstance(doc, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def _filelock_mutex(p: Path):
+    """An flock-held fd guarding the check-and-set on `p`'s lock record.
+
+    A SEPARATE file from the record, and one that is never unlinked, because flock is held on an
+    INODE: if the guard were the record itself, a process could be granted the lock on an inode a
+    releasing process had already unlinked, and two sessions would each believe they held it.
+
+    This guard is why the take is atomic at all. Read-then-write without it is a TOCTOU race —
+    two gate processes both read "no lock", both write their own, both proceed, and one write
+    clobbers the other. Measured: with the naive version, sim_two_writers lost 1 of 240 entries
+    WITH the doors on (2026-09-09), which is the whole class D2 exists to stop."""
+    import fcntl
+    d = filelock_path(p)
+    d.parent.mkdir(parents=True, exist_ok=True)
+    fh = open(str(d) + ".mx", "a+")
+    fcntl.flock(fh, fcntl.LOCK_EX)
+    return fh
+
+
+def _filelock_unmutex(fh) -> None:
+    import fcntl
+    try:
+        fcntl.flock(fh, fcntl.LOCK_UN)
+    finally:
+        fh.close()
+
+
+def take_filelock(p: Path, sid: str) -> tuple[bool, float, str]:
+    """Try to hold `p` for this session. Returns (ok, age_of_blocking_lock, blocking_session).
+
+    Refuses only for a lock that is BOTH foreign and younger than LOCK_TTL. Our own lock is
+    re-stamped (a retry of the same edit must not deadlock against itself), and a stale one is
+    taken over — see the staleness note above. The whole check-and-set runs under the mutex."""
+    try:
+        fh = _filelock_mutex(p)
+    except OSError as e:
+        log("hook-errors", f"filelock-mutex\t{p}\t{e}")
+        return True, 0.0, sid                 # a guard that cannot open must not block the session
+    try:
+        cur = read_filelock(p)
+        if cur:
+            age = max(0.0, time.time() - float(cur.get("ts") or 0))
+            if cur.get("session_id") != sid and age < LOCK_TTL:
+                return False, age, str(cur.get("session_id") or "?")
+        try:
+            filelock_path(p).write_text(json.dumps({"session_id": sid, "ts": time.time(), "path": str(p)}),
+                                        encoding="utf-8")
+        except OSError as e:
+            log("hook-errors", f"filelock-take\t{p}\t{e}")
+        return True, 0.0, sid
+    finally:
+        _filelock_unmutex(fh)
+
+
+def release_filelock(p: Path, sid: str) -> bool:
+    """Drop the lock on `p` if it is OURS. A foreign session's lock is never removed: releasing
+    somebody else's mutex is the same defect as taking it. Under the same guard as the take, so a
+    release can never interleave with a concurrent check-and-set."""
+    try:
+        fh = _filelock_mutex(p)
+    except OSError:
+        return False
+    try:
+        cur = read_filelock(p)
+        if not cur or cur.get("session_id") != sid:
+            return False
+        try:
+            filelock_path(p).unlink()
+            return True
+        except OSError:
+            return False
+    finally:
+        _filelock_unmutex(fh)
 
 
 def guarded(fn):

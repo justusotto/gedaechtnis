@@ -14,7 +14,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import (read_input, context, log, expand, under, vault_rel, fleet_repos, VAULT, STATE, guarded,
                     lane_for, path_in_partition, region_of_repo, repo_root_of, shared_surface,
-                    record_touched)
+                    record_touched, was_created, record_created, release_filelock, ROLE_STEMS)
+import names
 
 EV = "PostToolUse"
 UUID = re.compile(r"https://claude\.ai/code/artifact/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})")
@@ -93,6 +94,74 @@ def do_artifact(inp: dict) -> None:
                 + (f", committed {sha}." if sha else ", written but NOT committed (git refused; see ~/.claude/gedaechtnis/chore.log)."))
 
 
+# ---- born on first write: a new role file gets its row in the region's Map (DESIGN §3.1) ----
+# "Any other role file is born on its first write — nothing asks." Nothing asks, and nothing has to
+# remember either: the file appears, and the index that points at it grows by exactly one row.
+# NOT a region folder — these carry no Map of their own and their own Map files are hand-kept.
+NON_REGION = ("Global", "Pharos", "Channels", "Workflows", "Limen", "Concilium", ".hooks", ".tools")
+
+
+def _vault_has_head() -> bool:
+    """Does the vault have a commit yet? (The same question `init.py` asks before its first
+    commit — a path-limited commit onto an unborn branch is not a thing git will do.)"""
+    try:
+        return _git(["rev-parse", "--verify", "-q", "HEAD"], VAULT).returncode == 0
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+
+
+def map_row_for(p: Path, rel: str) -> str | None:
+    """Add the Map row for a just-CREATED role file; returns the report line, or None.
+
+    Every arm is a refusal to act: not a role stem, no Map.md beside it, already linked, or the
+    file was not created by this write — the row is added on evidence and never on a guess."""
+    stem = p.stem
+    parts = rel.split("/")
+    if p.suffix != ".md" or stem not in ROLE_STEMS or stem == "Map":
+        return None                              # Map.md does not index itself
+    if len(parts) < 2 or len(parts) > 3 or parts[0] in NON_REGION:
+        return None
+    map_p = p.parent / "Map.md"
+    if not map_p.is_file():
+        return None                              # a region with no Map is left exactly as it is
+    try:
+        txt = map_p.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    if re.search(r"\[\[" + re.escape(stem) + r"(?=[|\]#])", txt):
+        return None                              # already indexed, under any display name
+    row = f"- [[{stem}|{names.display(stem)}]] — {names.gloss(stem)}\n"
+    lines = txt.splitlines(keepends=True)
+    at = None
+    for i, l in enumerate(lines):
+        if l.startswith("- [["):
+            at = i + 1                           # after the LAST existing row, before any trailing paragraph
+    if at is None:
+        for i, l in enumerate(lines):
+            if re.match(r"^#{1,6}\s+Files in this folder\s*$", l.strip()):
+                at = i + 1
+                while at < len(lines) and not lines[at].strip():
+                    at += 1
+                break
+    if at is None:
+        lines.append("\n" if lines and lines[-1].strip() else "")
+        at = len(lines)
+    lines.insert(at, row)
+    new = "".join(lines)
+    tmp = map_p.with_suffix(".md.tmp-" + stem)
+    try:
+        tmp.write_text(new, encoding="utf-8")
+        os.replace(tmp, map_p)                   # atomic: no reader ever sees a half-written index
+    except OSError as e:
+        log("chore", f"map-row\t{rel}\twrite failed: {e}")
+        return None
+    map_rel = vault_rel(map_p) or ""
+    sha = commit_path_limited(VAULT, map_rel, f"{map_rel}: index {stem}.md") if _vault_has_head() else None
+    log("chore", f"map-row\t{rel}\trow={stem}\tcommit={sha}")
+    return (f"New file {rel}: added one row to {map_rel} — `{row.strip()}`"
+            + (f", committed {sha}." if sha else "."))
+
+
 HEX = re.compile(r"`([0-9a-f]{7,12})`")
 
 
@@ -115,15 +184,32 @@ def do_write(inp: dict) -> None:
     if not fp:
         return
     p = expand(fp, inp.get("cwd"))
-    if not under(p, VAULT) or not p.is_file():
+    if not under(p, VAULT):
+        return
+    sid = inp.get("session_id", "-")
+    # D2, the release half. FIRST, and before the is_file() guard: the tool call this chore follows
+    # is over either way, so the mutex must come off even when the write left no file behind. A
+    # foreign session's lock is never touched (release_filelock checks the session id) — a release
+    # that ignored ownership would be the same defect as taking somebody else's lock.
+    release_filelock(p, sid)
+    if not p.is_file():
         return
     rel = vault_rel(p) or ""
     # The TOUCHED SET. Every vault file this session writes is recorded against its session id,
     # because that record is the whole authority for what the Stop hook commits: a hook that
     # instead committed "everything dirty in the partition" would sweep a sibling session's
     # half-written file, which is the one collision class actually measured in this vault.
-    record_touched(inp.get("session_id", "-"), rel)
+    record_touched(sid, rel)
     notes = []
+    if was_created(p):                           # consumes the gate's marker either way
+        # The CREATED SET, on the same evidence and in the same breath as the Map row: a file this
+        # session made has no sibling's content in it, so D1 lets this session Write it whole.
+        # Recorded HERE rather than at the gate because only a PostToolUse can know the write
+        # actually happened — a creation the gate denied must never license a later overwrite.
+        record_created(sid, rel)
+        note = map_row_for(p, rel)
+        if note:
+            notes.append(note)
     if rel.startswith("Pharos/queues/") and p.suffix == ".md":
         try:
             b = p.read_bytes()
@@ -278,10 +364,40 @@ def do_inbox(inp: dict) -> None:
                 + (f"; committed {sha}." if sha else "; NOT committed (see chore.log)."))
 
 
+# ------------------------------------------------ D2's Bash half: release what Bash locked ----
+# `rule_bash_partition` takes the same per-file mutex for a shell write to a vault `.md` file
+# (`>`, `>>`, `tee`, `sed -i`), because a shell redirect is a whole-file overwrite with no anchor
+# at all. Until this chore existed there was no PostToolUse on Bash, so every such lock could only
+# expire — correct, but it made a sibling wait ten seconds for a write that finished in ten
+# milliseconds. This releases them the moment the command returns. It releases ONLY locks this
+# session holds, and it repairs nothing else: a chore that started editing files after a shell
+# command would be guessing at what the command meant.
+
+
+def do_bash(inp: dict) -> None:
+    cmd = (inp.get("tool_input") or {}).get("command") or ""
+    if not cmd:
+        return
+    sid = inp.get("session_id", "-")
+    try:
+        from gate import bash_write_targets           # the same target list the gate locked from
+    except ImportError as e:                          # pragma: no cover - the two files ship together
+        log("chore", f"bash-release import failed: {e}")
+        return
+    freed = []
+    for p, how in bash_write_targets(cmd, inp.get("cwd")):
+        if how in ("redirect", "redirect-append", "sed-i", "tee") and p.suffix == ".md":
+            if release_filelock(p, sid):
+                freed.append(vault_rel(p) or str(p))
+    if freed:
+        log("chore", f"bash\treleased={len(freed)}\t{' '.join(freed)}")
+
+
 def main() -> None:
     which = sys.argv[1] if len(sys.argv) > 1 else ""
     inp = read_input()
-    {"artifact": do_artifact, "write": do_write, "inbox": do_inbox}.get(which, lambda _i: None)(inp)
+    {"artifact": do_artifact, "write": do_write, "inbox": do_inbox,
+     "bash": do_bash}.get(which, lambda _i: None)(inp)
 
 
 if __name__ == "__main__":

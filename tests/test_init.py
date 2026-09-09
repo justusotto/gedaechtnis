@@ -23,17 +23,22 @@ def home(tmp_path):
     return h
 
 
-def env_for(home: Path) -> dict:
+def env_for(home: Path, **extra) -> dict:
     e = {k: v for k, v in os.environ.items() if not k.startswith("GEDAECHTNIS_")}
     e["HOME"] = str(home)
     e["GEDAECHTNIS_CONFIG"] = str(home / ".claude" / "gedaechtnis" / "config.json")
     e["GEDAECHTNIS_STATE_DIR"] = str(home / "state")
+    # A fake TMPDIR, because the discovery filter drops candidates under the real one and the
+    # suite's own tmp_path lives there: without this the filter would be measuring pytest's
+    # layout rather than the rule. Nothing is written under it unless a test does so.
+    e["TMPDIR"] = str(home / "faketmp")
+    e.update(extra)
     return e
 
 
-def init(home: Path, *args: str, cwd: Path | None = None):
+def init(home: Path, *args: str, cwd: Path | None = None, **extra_env):
     p = subprocess.run([sys.executable, str(INIT), *args], cwd=str(cwd or home / "my_project"),
-                       capture_output=True, text=True, env=env_for(home), stdin=subprocess.DEVNULL, timeout=120)
+                       capture_output=True, text=True, env=env_for(home, **extra_env), stdin=subprocess.DEVNULL, timeout=120)
     return p.returncode, p.stdout, p.stderr
 
 
@@ -91,29 +96,29 @@ def test_clean_home_gets_everything(home):
     assert rc == 0, err
     vault = home / "Gedaechtnis"
     for stem in CORE_SIX:
-        assert (vault / "MyProject" / f"{stem}.md").is_file(), stem
+        assert (vault / "my_project" / f"{stem}.md").is_file(), stem
     assert (vault / "Global" / "Kernel.md").is_file()
     assert (vault / "Global" / "fleet-roster.md").is_file()
     assert (vault / ".git").is_dir()
     assert (home / "my_project" / ".atlas-lane").read_text(encoding="utf-8").splitlines()[-3:] == \
-        ["lane: MY-PROJECT", "path: MyProject/", "path: Global/"]
+        ["lane: MY-PROJECT", "path: my_project/", "path: Global/"]
     claude_md = (home / "my_project" / "CLAUDE.md").read_text(encoding="utf-8")
-    assert f"@{vault / 'MyProject' / 'Position.md'}" in claude_md.splitlines()
+    assert f"@{vault / 'my_project' / 'Position.md'}" in claude_md.splitlines()
     cfg = json.loads((home / ".claude" / "gedaechtnis" / "config.json").read_text(encoding="utf-8"))
     assert Path(os.path.expanduser(cfg["vault"])).resolve() == vault.resolve()
     link = home / ".claude" / "skills" / "gedaechtnis"
     assert link.is_symlink() and Path(os.readlink(link)) == PLUGIN
     lanes = parse_roster((vault / "Global" / "fleet-roster.md").read_text(encoding="utf-8"))
-    assert lanes == {"MY-PROJECT": {"repos": ["my_project"], "paths": ["MyProject/", "Global/"]}}
+    assert lanes == {"MY-PROJECT": {"repos": ["my_project"], "paths": ["my_project/", "Global/"]}}
     # the report names every path and the one next step
     verbs = dict((p, v) for v, p in report_lines(out))
-    assert verbs[str(vault / "MyProject" / "Map.md")] == "created"
+    assert verbs[str(vault / "my_project" / "Map.md")] == "created"
     assert verbs[str(link)] == "created"
     assert "Next step: open Claude Code in this repo; the first session prints a facts block naming your vault and lane." in out
     # the vault's first commit carries exactly the created files, nothing else
     log = subprocess.run(["git", "-C", str(vault), "show", "--name-only", "--format=", "HEAD"],
                          capture_output=True, text=True).stdout.split()
-    assert sorted(log) == sorted([f"MyProject/{s}.md" for s in CORE_SIX] + ["Global/Kernel.md", "Global/fleet-roster.md"])
+    assert sorted(log) == sorted([f"my_project/{s}.md" for s in CORE_SIX] + ["Global/Kernel.md", "Global/fleet-roster.md"])
     status = subprocess.run(["git", "-C", str(vault), "status", "--porcelain"], capture_output=True, text=True).stdout
     assert status.strip() == ""
 
@@ -128,7 +133,7 @@ def test_an_existing_atlas_directory_is_the_default_vault(home):
     (home / "Atlas").mkdir()
     rc, out, _ = init(home)
     assert rc == 0
-    assert (home / "Atlas" / "MyProject" / "Map.md").is_file()
+    assert (home / "Atlas" / "my_project" / "Map.md").is_file()
     assert not (home / "Gedaechtnis").exists()
 
 
@@ -146,21 +151,21 @@ def test_second_run_changes_nothing_and_reports_kept(home):
 
 def test_a_pre_existing_region_file_is_untouched(home):
     vault = home / "Gedaechtnis"
-    (vault / "MyProject").mkdir(parents=True)
-    mine = vault / "MyProject" / "Canon.md"
+    (vault / "my_project").mkdir(parents=True)
+    mine = vault / "my_project" / "Canon.md"
     mine.write_bytes(b"# my own canon\n\nwritten before init ran\n")
     rc, out, _ = init(home)
     assert rc == 0
     assert mine.read_bytes() == b"# my own canon\n\nwritten before init ran\n"
     assert dict((p, v) for v, p in report_lines(out))[str(mine)] == "kept"
-    assert (vault / "MyProject" / "Map.md").is_file()          # the absent siblings were still created
+    assert (vault / "my_project" / "Map.md").is_file()          # the absent siblings were still created
 
 
 def test_an_existing_marker_is_kept_and_its_lane_adopted(home):
-    (home / "my_project" / ".atlas-lane").write_text("lane: MINE\npath: MyProject/\npath: Global/\n", encoding="utf-8")
+    (home / "my_project" / ".atlas-lane").write_text("lane: MINE\npath: my_project/\npath: Global/\n", encoding="utf-8")
     rc, out, _ = init(home)
     assert rc == 0
-    assert "lane MINE" in out.splitlines()[0]
+    assert any("lane MINE" in l for l in out.splitlines()), out
     lanes = parse_roster((home / "Gedaechtnis" / "Global" / "fleet-roster.md").read_text(encoding="utf-8"))
     assert list(lanes) == ["MINE"]
 
@@ -180,7 +185,7 @@ def test_existing_roster_with_another_lane_gets_this_lane_appended_inside_the_fe
     assert text.endswith("```\n\nfooter\n")                                 # prose below the fence untouched
     lanes = parse_roster(text)
     assert lanes == {"OTHER": {"repos": ["elsewhere/other"], "paths": ["Other/", "Global/"]},
-                     "MY-PROJECT": {"repos": ["my_project"], "paths": ["MyProject/", "Global/"]}}
+                     "MY-PROJECT": {"repos": ["my_project"], "paths": ["my_project/", "Global/"]}}
     assert dict((p, v) for v, p in report_lines(out))[str(roster)] == "updated"
     # and the change is ONE insertion of well-formed rows: what the write gate would admit
     a = 0
@@ -206,7 +211,7 @@ def test_existing_claude_md_gains_only_the_import_line(home):
     assert rc == 0
     text = claude_md.read_text(encoding="utf-8")
     assert text.startswith("# my project\n\nmy own instructions\n")
-    imp = f"@{home / 'Gedaechtnis' / 'MyProject' / 'Position.md'}"
+    imp = f"@{home / 'Gedaechtnis' / 'my_project' / 'Position.md'}"
     assert text.count(imp) == 1 and text.endswith(imp + "\n")
     init(home)
     assert claude_md.read_text(encoding="utf-8") == text
@@ -263,7 +268,96 @@ def test_after_init_the_session_start_hook_names_the_lane_and_the_vault(home):
     assert p.returncode == 0, p.stderr
     ctx = json.loads(p.stdout)["hookSpecificOutput"]["additionalContext"]
     assert "Lane MY-PROJECT" in ctx and str(repo / ".atlas-lane") in ctx
-    assert "write partition: MyProject, Global." in ctx                       # the partition the marker declares
+    assert "write partition: my_project, Global." in ctx                       # the partition the marker declares
     assert f"Vault {home / 'Gedaechtnis'}" in ctx and "HEAD at session start" in ctx
     assert (home / "state" / "session-start-t.json").is_file()                # state went to the sandbox, not ~/.claude
     assert not (home / ".claude" / "gedaechtnis" / "session-start-t.json").exists()
+
+
+# --------------------------------------------------------- display layer (WP3, §6) ----
+def session_facts(home: Path, sid: str = "t", cwd: Path | None = None, **extra_env) -> str:
+    repo = cwd or home / "my_project"
+    p = subprocess.run([sys.executable, str(SESSION_START)],
+                       input=json.dumps({"session_id": sid, "cwd": str(repo), "source": "startup"}),
+                       capture_output=True, text=True, env=env_for(home, **extra_env), timeout=60)
+    assert p.returncode == 0, p.stderr
+    return json.loads(p.stdout)["hookSpecificOutput"]["additionalContext"]
+
+
+def test_map_template_has_display_alias_links(home):
+    assert init(home)[0] == 0
+    text = (home / "Gedaechtnis" / "my_project" / "Map.md").read_text(encoding="utf-8")
+    assert "[[Canon|Decisions]]" in text
+    assert "[[Position|Status]]" in text
+    assert "[[Patterns|Patterns]]" in text
+    assert "[[Errata|Mistakes]]" in text
+    assert "[[Aporia|Open questions]]" in text
+
+
+def test_titles_use_the_display_name(home):
+    assert init(home)[0] == 0
+    vault = home / "Gedaechtnis" / "my_project"
+    assert vault.joinpath("Canon.md").read_text(encoding="utf-8").splitlines()[3] == "# my_project — Decisions"
+    assert vault.joinpath("Errata.md").read_text(encoding="utf-8").splitlines()[3] == "# my_project — Mistakes"
+    assert vault.joinpath("Aporia.md").read_text(encoding="utf-8").splitlines()[3] == "# my_project — Open questions"
+
+
+def test_core_files_get_exactly_one_alias_at_birth(home):
+    assert init(home)[0] == 0
+    vault = home / "Gedaechtnis" / "my_project"
+    want = {"Map": "Index", "Position": "Status", "Canon": "Decisions", "Patterns": "Patterns",
+           "Errata": "Mistakes", "Aporia": "Open questions"}
+    for stem, disp in want.items():
+        lines = vault.joinpath(f"{stem}.md").read_text(encoding="utf-8").splitlines()
+        assert lines[0] == "---"
+        assert lines[1] == f"aliases: [{disp}]"
+        assert lines[2] == "---"
+        # only `aliases` — nothing else in the frontmatter block
+        assert lines[3].startswith("# ")
+
+
+def test_a_second_run_keeps_the_aliases_frontmatter(home):
+    assert init(home)[0] == 0
+    vault = home / "Gedaechtnis" / "my_project"
+    before = {p.name: p.read_bytes() for p in vault.glob("*.md")}
+    rc, out, err = init(home)
+    assert rc == 0, err
+    rows = report_lines(out)
+    assert rows and all(v == "kept" for v, _ in rows), out
+    after = {p.name: p.read_bytes() for p in vault.glob("*.md")}
+    assert before == after
+
+
+def test_language_de_flips_titles_but_not_the_filenames(home):
+    assert init(home, GEDAECHTNIS_LANGUAGE="de")[0] == 0
+    vault = home / "Gedaechtnis" / "my_project"
+    for stem in CORE_SIX:                                     # the six stems are untouched on disk
+        assert vault.joinpath(f"{stem}.md").is_file(), stem
+    assert not any((vault / f"{n}.md").exists() for n in
+                  ("Entscheidungen", "Fehler", "Muster", "Offene Fragen", "Index", "Stand"))
+    canon = vault.joinpath("Canon.md").read_text(encoding="utf-8")
+    assert "# my_project — Entscheidungen" in canon
+    assert "aliases: [Entscheidungen]" in canon
+    errata = vault.joinpath("Errata.md").read_text(encoding="utf-8")
+    assert "# my_project — Fehler" in errata
+
+
+def test_facts_block_language_de_flips_the_memory_files_line(home):
+    assert init(home)[0] == 0
+    ctx = session_facts(home, GEDAECHTNIS_LANGUAGE="de")
+    line = next(l for l in ctx.splitlines() if l.startswith("- Memory files in my_project:"))
+    assert "Entscheidungen (Canon.md)" in line
+    assert "Fehler (Errata.md)" in line
+    assert "Decisions" not in line and "Mistakes" not in line
+
+
+def test_facts_block_memory_files_line_lists_only_existing_files(home):
+    assert init(home)[0] == 0
+    (home / "Gedaechtnis" / "my_project" / "Errata.md").unlink()
+    ctx = session_facts(home)
+    line = next(l for l in ctx.splitlines() if l.startswith("- Memory files in my_project:"))
+    assert "Decisions (Canon.md)" in line
+    assert "Mistakes (Errata.md)" not in line
+    # Global holds only Kernel.md at birth, and gets its own line naming it
+    global_line = next((l for l in ctx.splitlines() if l.startswith("- Memory files in Global:")), None)
+    assert global_line is not None and "Boot (Kernel.md)" in global_line

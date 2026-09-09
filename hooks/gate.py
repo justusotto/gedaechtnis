@@ -18,9 +18,12 @@ import re, sys, os
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import (read_input, deny, ask, log, expand, under, vault_rel, lane_for, path_in_partition,
-                    VAULT, HOME, STATE, ROLE_STEMS, guarded, shared_surface, pure_append)
+                    VAULT, HOME, STATE, ROLE_STEMS, guarded, shared_surface, pure_append,
+                    note_pre_exists, clear_pre_exists, created_paths, take_filelock, release_filelock)
+import fnmatch
 import shlex
 import config as _cfg
+import names
 
 EV = "PreToolUse"
 
@@ -272,7 +275,10 @@ def rule_data_integrity(cmd: str) -> str | None:
                 continue                              # a stranger's own `media/` or `*_cache.json` outside the vault is his to delete
             if rx.search(seg):
                 # allow rm inside the vault's gitignored scratch (.atlas-locks, .pre-* backups) explicitly
-                if "vault" in why and re.search(r"Atlas/(?:\.atlas-locks|\.atlas-writer\.lock|[^\s]*\.pre-)", seg):
+                # the vault's name, not the literal `Atlas` — the same correction council 2 made to
+                # _PROTECTED above: a stranger whose vault is `~/Gedaechtnis` gets its own scratch
+                # carve-out, instead of being asked about every lock file it cleans up
+                if "vault" in why and re.search(re.escape(VAULT.name) + r"/(?:\.atlas-locks|\.atlas-writer\.lock|[^\s]*\.pre-)", seg):
                     continue
                 return (f"Defaults never delete: {why}. Deletions go to the Trash via Finder in one `Cleanup YYYY-MM-DD/` "
                         "bundle with a README, never `rm`; and this class asks the owner first. (Global/Nomos §Data integrity)")
@@ -366,6 +372,10 @@ def rule_bash_partition(cmd: str, inp: dict) -> str | None:
             return (f"Defaults never delete: `mv` moves `{rel}` OUT of its place in the vault — for every reader that is a deletion "
                     "(a wikilink, an @-import or a lane's partition now points at nothing). Move within the vault with `git mv` and a "
                     "path-limited commit, or ask. (Global/Nomos §Data integrity)")
+        if how not in ("mv-out", "rm"):
+            r = rule_display_name_filename(p)      # deterministic, like the stem rule: every mode, every lane
+            if r:
+                return r + f" (Bash write via {how}.)"
     if lane is None and cwd and under(expand(cwd), VAULT):
         log("partition", f"ok\tVAULT-CWD\tbash\tsession={sid}")
         return None                                    # a session opened in the vault itself is the owner's own hand
@@ -394,6 +404,17 @@ def rule_bash_partition(cmd: str, inp: dict) -> str | None:
         if mode == "deny":
             return (f"Bash write ({how}) to `{rel}`, outside lane {lane or 'UNKNOWN'}'s partition. The partition door binds Bash "
                     "writes too: append a keyed row to a shared surface with the Edit/Write tool or `ledger.py`, or relay. (Speculum/Kernel 'Never write another lane's partition')")
+    # D2's Bash half. A shell redirect is a whole-file overwrite with no anchor, so it belongs
+    # inside the same per-file mutex as Edit/Write; `chore.py bash` drops these when the command
+    # returns, and a lock older than LOCK_TTL is taken over exactly as it is on the Edit path.
+    for p, how in targets:
+        if how not in ("redirect", "redirect-append", "sed-i", "tee") or p.suffix != ".md":
+            continue
+        ok, age, holder = take_filelock(p, sid)
+        if not ok:
+            log("deny", f"bash\tfilelock\t{vault_rel(p)}\theld-by={holder}\tage={age:.1f}s\tsession={sid}")
+            return (f"Another session is editing `{vault_rel(p)}` right now (lock {int(age)}s old); retry the same edit in a "
+                    "moment — it will re-read the file. (Design §5.2 D2)")
     return None
 
 
@@ -415,6 +436,64 @@ def do_bash(inp: dict) -> None:
             return
 
 
+# ------------------------------------------------- the display-name-as-filename door (§6.3) ----
+# The display layer shows `Canon.md` as "Decisions". A model that reads "write it to Decisions"
+# may create `Decisions.md`, and then the region has two files for one role, neither of which any
+# consumer of ROLE_STEMS can see. The door is deterministic, so it refuses in every partition mode
+# — like the Concilium stem rule — and only for a file that does not exist yet: an existing
+# `Decisions.md` is somebody's data, and this door never touches data.
+
+
+def _fold(s: str) -> str:
+    """`open-questions` · `Open_Questions` · `OPEN QUESTIONS` all fold to `open questions`."""
+    return re.sub(r"\s+", " ", s.replace("_", " ").replace("-", " ")).strip().casefold()
+
+
+_DISPLAY_TO_STEM: dict | None = None
+
+
+def display_to_stem() -> dict:
+    """{folded display name (every language column) → the stem it names}."""
+    global _DISPLAY_TO_STEM
+    if _DISPLAY_TO_STEM is None:
+        m = {}
+        for stem in names.stems():
+            for lang in ("en", "de"):
+                d = names.display(stem, lang)
+                if d:
+                    m.setdefault(_fold(d), stem)
+        _DISPLAY_TO_STEM = m
+    return _DISPLAY_TO_STEM
+
+
+def rule_display_name_filename(p: Path) -> str | None:
+    """Deny reason for creating a vault `.md` file named after a display name, else None."""
+    if p.suffix != ".md" or p.exists():
+        return None
+    # Concilium is exempt: its files are named by the Concilium-native table, and `Index` — the
+    # native name of `Concilium/<Entity>/Index.md` — is also Map's display name. Refusing it here
+    # would deny the correct file name in the one place the vault requires it. The Concilium STEM
+    # rule still refuses `Concilium/<Entity>/Map.md`, so the two doors do not overlap.
+    if (vault_rel(p) or "").startswith("Concilium/"):
+        return None
+    stem = p.stem
+    # a real role stem is never denied, whatever the display table says: `Patterns` is both a stem
+    # and its own display name, and `Inbox` is a stem the chores create.
+    if stem.casefold() in {s.casefold() for s in (set(ROLE_STEMS) | set(names.stems()))}:
+        return None
+    folded = _fold(stem)
+    if folded not in {_fold(d) for d in names.all_display_names()}:
+        return None
+    target = display_to_stem().get(folded)
+    if not target:
+        return None                              # a display name we cannot resolve names no file to point at
+    rel_dir = vault_rel(p.parent)
+    where = f"{rel_dir}/{target}.md" if rel_dir and rel_dir != "." else f"{target}.md"
+    return (f'The file is `{target}.md` (shown as "{names.display(target)}"); display names are never file names — '
+            f"every consumer of the vault's role stems looks for `{target}.md` and would never see `{p.name}`. "
+            f"Write to `{where}`.")
+
+
 # --------------------------------------------------------------------------- write hooks ----
 
 def partition_mode() -> str:
@@ -423,6 +502,52 @@ def partition_mode() -> str:
         return v if v in ("warn", "deny") else "warn"
     except OSError:
         return "warn"
+
+
+# ------------------------------------------------------ D1: no whole-file Write (DESIGN §5.2) ----
+# `Edit` is a compare-and-swap: its anchor is matched against the file as it is at the moment of
+# the edit, so an edit against a paragraph another session changed FAILS instead of clobbering.
+# A whole-file `Write` has no anchor at all — it replaces the file from the session's stale
+# reading, and every line a sibling added since that read is gone with no error anywhere. So the
+# door refuses that one shape, and the refusal names the tool that does the same job safely.
+#
+# It binds prose memory files and NOTHING else. Exempt, each for its own reason:
+#   · a file that does not exist     — nothing to lose
+#   · an empty file                  — same
+#   · a file that is not `.md`       — a generator writing an HTML page or a verdict JSON into the
+#                                      vault is not editing memory and is never refused ([R3])
+#   · anything under `Cleanup */`    — a cleanup bundle is written whole, by construction ([R3])
+#   · a file THIS session created    — there is no other session's content in it to lose
+#   · a verified pure append to a SHARED surface — the append rule re-reads the file HERE and
+#     refuses unless the write extends what is on disk NOW, which is the same guarantee D1 asks
+#     of Edit. Without this the door would silently retract the keyed-row affordance §5.2 keeps.
+
+
+def _under_cleanup(rel: str) -> bool:
+    """Any ancestor directory named `Cleanup *` — the bundle convention, at any depth."""
+    return any(fnmatch.fnmatch(part, "Cleanup *") for part in Path(rel).parts[:-1])
+
+
+def rule_no_whole_file_write(tool: str, ti: dict, p: Path, rel: str, sid: str, lane: str | None) -> str | None:
+    if tool != "Write":
+        return None                                  # Edit / MultiEdit / NotebookEdit are anchored
+    if p.suffix != ".md" or not p.is_file():
+        return None
+    try:
+        if p.stat().st_size == 0:
+            return None
+    except OSError:
+        return None
+    if _under_cleanup(rel) or rel in created_paths(sid):
+        return None
+    kind = shared_surface(rel)
+    if kind:
+        ok, _why = pure_append(kind, p, "Write", ti, lane)
+        if ok:
+            return None
+    return (f"Whole-file Write to `{rel}` refused: another session may have changed this file since you read it. "
+            "Use Edit — its anchor is checked against the file as it is now. "
+            "(Design §5.2 D1; new, empty, non-.md and Cleanup files are exempt.)")
 
 
 def do_write(inp: dict) -> None:
@@ -435,22 +560,59 @@ def do_write(inp: dict) -> None:
     if not under(p, VAULT):
         return
     rel = vault_rel(p) or ""
+    note_pre_exists(p)      # the only moment anything can still tell a CREATION from an edit (chore.py reads this back)
     # Concilium stem rule — a real refusal regardless of mode (Kernel: TRIP-WIRE kind ii)
     if rel.startswith("Concilium/") and p.stem in ROLE_STEMS:
+        clear_pre_exists(p)                      # a refused write leaves no record of itself
         deny(EV, (f"Concilium STEM RULE: no file under ~/Atlas/Concilium/ may carry a vault role stem (`{p.stem}`) — it would "
                   "leak into kernel_freshness, the Lustrum arm and umbrella discovery. Use the Concilium-native names "
                   "(Fundamentum · Positio · Quaestiones · Vitia · Verba · Lex · Index). (Speculum/Kernel 'Standing constraints')"))
         return
+    r = rule_display_name_filename(p)
+    if r:
+        log("deny", f"write\tdisplay-name-filename\t{rel}")
+        clear_pre_exists(p)                      # a refused write leaves no record of itself
+        deny(EV, r)
+        return
     lane, prefixes, marker = lane_for(cwd)
     mode = partition_mode()
     sid = inp.get("session_id", "-")
+
+    # D2 — take the per-file mutex, then D1. Every refusal from here on RELEASES the lock first:
+    # the tool call is not going to happen, so holding the file for the next ten seconds would
+    # block a sibling for a write that never occurred. `NotebookEdit` is the one tool whose lock
+    # the chore cannot release (hooks.json has no PostToolUse for it, and it carries
+    # `notebook_path` rather than `file_path`), so a notebook's lock ages out at LOCK_TTL instead —
+    # the same fail-safe that covers a hook that dies, and the reason there has to be one.
+    ok, age, holder = take_filelock(p, sid)
+    if not ok:
+        log("deny", f"write\tfilelock\t{rel}\theld-by={holder}\tage={age:.1f}s\tsession={sid}")
+        clear_pre_exists(p)                      # a refused write leaves no record of itself
+        deny(EV, (f"Another session is editing `{rel}` right now (lock {int(age)}s old); retry the same edit in a moment — "
+                  "it will re-read the file. (Design §5.2 D2)"))
+        return
+
+    def refuse(reason: str) -> None:
+        # A refused write leaves nothing behind: not the mutex (a sibling would wait ten seconds
+        # for a write that never happened) and not the pre-exists marker (a later chore would read
+        # it as a creation by this session and let D1 wave the overwrite through).
+        release_filelock(p, sid)
+        clear_pre_exists(p)
+        deny(EV, reason)
+
+    d1 = rule_no_whole_file_write(inp.get("tool_name") or "", ti, p, rel, sid, lane)
+    if d1:
+        log("deny", f"write\twhole-file-write\t{rel}\tsession={sid}")
+        refuse(d1)
+        return
+
     if lane is None and cwd and under(expand(cwd), VAULT):
         log("partition", f"ok\tVAULT-CWD\t{rel}\tsession={sid}")
         return                                   # a session opened in the vault itself is the owner's own hand
     if lane is None:
         log("partition", f"{mode}\tUNKNOWN-LANE\t{rel}\tcwd={cwd}\tsession={sid}")
         if mode == "deny":
-            deny(EV, ("No `.atlas-lane` marker resolves from this cwd, so this session has NO declared write partition in "
+            refuse(("No `.atlas-lane` marker resolves from this cwd, so this session has NO declared write partition in "
                       "~/Atlas. Lane identity is DECLARED, never inferred: open the session in the repo that owns this "
                       "region, or relay through your outbox. (Speculum/Kernel 'Never write another lane's partition')"))
         return
@@ -464,13 +626,13 @@ def do_write(inp: dict) -> None:
         if ok:
             return                                   # the narrow audited exception: a keyed row, appended
         if mode == "deny":
-            deny(EV, (f"`{rel}` is a SHARED surface ({kind}): any lane may APPEND a keyed row to it, nothing else — and this "
+            refuse((f"`{rel}` is a SHARED surface ({kind}): any lane may APPEND a keyed row to it, nothing else — and this "
                       f"write is not a pure append ({why}). Append a row instead (queue: `- [ ] `q:…``; ledger: `gedaechtnis/ledger.py append`; "
                       "inbox: `- YYYY-MM-DD LANE …`)."))
         return
     log("partition", f"{mode}\t{lane}\t{rel}\tmarker={marker}\tsession={sid}")
     if mode == "deny":
-        deny(EV, (f"`{rel}` is outside lane {lane}'s declared partition ({marker}). A defect in another lane's paths is a "
+        refuse((f"`{rel}` is outside lane {lane}'s declared partition ({marker}). A defect in another lane's paths is a "
                   "briefing, not our edit: append a keyed row to a SHARED surface (its queue file, the Channels ledger, the "
                   "region kernel's Inbox) or write a notice in Channels/{lane}/. (Speculum/Kernel 'Never write another "
                   "lane's partition'; Global/Patterns 'A writer's PERMISSIONS must never decide a record's PLACEMENT')"))

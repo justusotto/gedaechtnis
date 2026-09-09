@@ -1,0 +1,14 @@
+{
+  "task_id": "001-db-choice",
+  "title": "Database choice",
+  "positive_control": true,
+  "description": "Day 1 decides and records a project decision that is never restated anywhere else. Day 3 must answer with it. The day-3 prompt and the throwaway repo contain no other source for the fact, so a run with no memory mechanism cannot pass this task by any means other than guessing — that is what makes it the positive control: if the 'no memory' arm ever succeeds here, the harness itself is not testing memory and every other result from it is meaningless.",
+  "day1_prompt": "We are setting up a new project. Decide and record: the project's database is PostgreSQL.",
+  "memory_sentence": "The project's database is PostgreSQL.",
+  "canon_heading": "The project's database is PostgreSQL",
+  "fact": "PostgreSQL",
+  "day_n": 3,
+  "day_n_prompt": "It is day 3 of the project. What database did we decide to use? Answer with only the database name.",
+  "checker_file": "db-choice-answer.txt",
+  "checker_must_contain": "PostgreSQL"
+}

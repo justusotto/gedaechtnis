@@ -1,21 +1,25 @@
 # Operating rules — how a session uses the vault
 
-The vault is this project's memory. Each project folder (a *region*) carries six files: **Map**
-(what the project is, plus an index), **Position** (where it stands), **Canon** (settled
-decisions), **Patterns** (what works), **Errata** (what went wrong), **Aporia** (open questions).
-A region may also carry a **Kernel** — its always-loaded index. Other files are created only when
-there is something to put in them.
+The vault is this project's memory. Each project folder (a *region*) carries six files, shown
+under a plain-English name; the file on disk keeps its short name (`Canon.md`, not
+`Decisions.md`) either way — **Index** (`Map.md`, what the project is, plus an index), **Status**
+(`Position.md`, where it stands), **Decisions** (`Canon.md`, settled decisions), **Patterns**
+(`Patterns.md`, what works), **Mistakes** (`Errata.md`, what went wrong), **Open questions**
+(`Aporia.md`, unanswered). A region may also carry a **Boot** (`Kernel.md`) — its always-loaded
+index. Other files are created only when there is something to put in them.
 
 ## What goes where
 
-- A decision becomes settled → **Canon**: what was decided, the date, why. Supersede an entry in
-  place with a dated line; never rewrite one from memory.
-- A bug is diagnosed and fixed, or a mistake is corrected → **Errata**: the mechanism first, then
-  what to do instead, so the same mistake is not made twice.
-- An approach works for the second time → **Patterns**: the rule in a few lines.
-- A question surfaces that nobody has answered → **Aporia**, with an urgency and today's date.
-- The state of the work changes (shipped, in flight, deferred, next) → **Position**.
-- A file is added to the region → one row in **Map** pointing at it.
+- A decision becomes settled → **Decisions** (`Canon.md`): what was decided, the date, why.
+  Supersede an entry in place with a dated line; never rewrite one from memory.
+- A bug is diagnosed and fixed, or a mistake is corrected → **Mistakes** (`Errata.md`): the
+  mechanism first, then what to do instead, so the same mistake is not made twice.
+- An approach works for the second time → **Patterns** (`Patterns.md`): the rule in a few lines.
+- A question surfaces that nobody has answered → **Open questions** (`Aporia.md`), with an
+  urgency and today's date.
+- The state of the work changes (shipped, in flight, deferred, next) → **Status** (`Position.md`).
+- A role file is added to the region → the hook adds its row to **Index** (`Map.md`) for you, the
+  first time you write it. Just write the file; nothing has to be created or indexed in advance.
 
 Knowledge that applies to every project goes in `Global/`, with a pointer from the region — never
 a second copy: a duplicated fact diverges, and the stale half is the one that gets read.
@@ -31,6 +35,15 @@ a second copy: a duplicated fact diverges, and the stale half is the one that ge
   scratch.
 - **Never delete a vault file.** Anything that has to go moves into a `Cleanup YYYY-MM-DD/` folder
   with a note saying where each file came from.
+- **Edit an existing note, never rewrite it whole.** Another session may have added something
+  since you read it, and a whole-file write drops that silently; an edit's anchor is checked
+  against the file as it is now, so a stale one fails instead. If an edit is refused because
+  another session is in that file, **retry the same edit** — the retry re-reads it.
+- **You ask the user exactly three things, ever, and each at most once**: at install, which of the
+  projects found should get a memory; in a project that has none, "create one? (yes / no / never)";
+  and, when a cleanup pass has candidates, whether to gather them into one folder. **Nothing else
+  in these rules asks the user anything** — an entry, a new file, an archive move and the commit
+  all happen without a question.
 - **Committing is the hook's job, not yours.** The Stop hook stages exactly the paths this repo's
   `.atlas-lane` marker declares and commits them, path-limited. Never run `git add -A`, `-a` or
   `--amend` in the vault.
