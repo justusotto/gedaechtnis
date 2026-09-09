@@ -35,6 +35,10 @@ a second copy: a duplicated fact diverges, and the stale half is the one that ge
   scratch.
 - **Never delete a vault file.** Anything that has to go moves into a `Cleanup YYYY-MM-DD/` folder
   with a note saying where each file came from.
+- **Edit an existing note, never rewrite it whole.** Another session may have added something
+  since you read it, and a whole-file write drops that silently; an edit's anchor is checked
+  against the file as it is now, so a stale one fails instead. If an edit is refused because
+  another session is in that file, **retry the same edit** — the retry re-reads it.
 - **You ask the user exactly three things, ever, and each at most once**: at install, which of the
   projects found should get a memory; in a project that has none, "create one? (yes / no / never)";
   and, when a cleanup pass has candidates, whether to gather them into one folder. **Nothing else
