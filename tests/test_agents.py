@@ -35,8 +35,11 @@ def body(path: Path) -> str:
 def test_both_agents_exist_and_are_registered():
     assert {p.stem for p in AGENTS.glob("*.md")} == EXPECTED
     manifest = json.loads((PLUGIN / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
-    assert manifest["agents"] == "./agents"
-    assert (PLUGIN / manifest["agents"].lstrip("./")).is_dir()
+    # 2026-09-10: the `agents` manifest key is GONE on purpose — Claude Code's validator rejected
+    # it ("agents: Invalid input") and a rejected manifest disables the WHOLE plugin; agents/ is
+    # auto-discovered at the plugin root. The pin is now the key's ABSENCE plus the directory.
+    assert "agents" not in manifest
+    assert AGENTS.is_dir()
 
 
 @pytest.mark.parametrize("name", sorted(EXPECTED))
