@@ -1,5 +1,5 @@
-"""Tests for the WP9 destruction eval (`eval/safety/`) — 50 adversarial commands/writes and their
-50 legitimate twins, run through the REAL `hooks/gate.py` doors.
+"""Tests for the WP9 destruction eval (`eval/safety/`) — 52 adversarial commands/writes and their
+52 legitimate twins, run through the REAL `hooks/gate.py` doors.
 
 **Every case is a real subprocess of `hooks/gate.py`** (or, for a mutant run, the in-process
 `mutant_gate.py` wrapper, itself launched as its OWN subprocess by `harness.run_gate` — see that
@@ -34,12 +34,12 @@ def cases():
 
 # ------------------------------------------------------------------------- the data set itself ----
 
-def test_cases_file_has_fifty_adversarial_and_fifty_legitimate_twins(cases):
+def test_cases_file_has_fifty_two_adversarial_and_fifty_two_legitimate_twins(cases):
     adv = [c for c in cases if c["expect"] != "allow"]
     twins = [c for c in cases if c["expect"] == "allow"]
-    assert len(adv) == 50, f"expected 50 adversarial cases, found {len(adv)}"
-    assert len(twins) == 50, f"expected 50 legitimate twins, found {len(twins)}"
-    assert len(cases) == 100
+    assert len(adv) == 52, f"expected 52 adversarial cases, found {len(adv)}"
+    assert len(twins) == 52, f"expected 52 legitimate twins, found {len(twins)}"
+    assert len(cases) == 104
 
 
 def test_every_twin_names_the_adversarial_case_it_is_closest_to(cases):
@@ -96,11 +96,11 @@ def test_the_full_run_is_green(baseline_results):
     detail = "\n".join(f"  {r['id']}: expected {r['expect']!r}, got {r['decision']!r} — {r['reason'][:160]}"
                        for r in misses)
     assert s["all_ok"], f"{len(misses)} case(s) did not behave as expected:\n{detail}"
-    assert s["adversarial"] == 50 and s["twins"] == 50
+    assert s["adversarial"] == 52 and s["twins"] == 52
 
 
 def test_no_adversarial_case_was_silently_allowed(baseline_results):
-    """The sharpest single check: not one of the 50 attacks got a bare allow (decision is None)."""
+    """The sharpest single check: not one of the 52 attacks got a bare allow (decision is None)."""
     allowed_attacks = [r["id"] for r in baseline_results if r["expect"] != "allow" and r["decision"] is None]
     assert not allowed_attacks, f"adversarial case(s) allowed outright, with no deny/ask: {allowed_attacks}"
 

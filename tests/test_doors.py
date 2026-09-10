@@ -295,6 +295,143 @@ def test_d2_locks_live_in_the_state_dir_and_NEVER_in_the_vault(world):
     assert stray == [], stray
 
 
+# =============================== D1's bash half: no whole-file truncation (WP9 gaps 1 and 2) =====
+# `rule_bash_no_whole_file_write` in gate.py. Same exemptions as D1, same MODE-INDEPENDENCE (it
+# fires whatever `partition.mode` says — no `world["state"]/"partition.mode"` is ever written in
+# this section, on purpose): it is a data-loss guard, not a partition rule.
+
+def test_bash_truncate_refuses_a_redirect_over_an_existing_prose_file(world):
+    """POSITIVE control, gap 1. PROVES the door fires on the one Bash shape with no anchor at all —
+    worse than `Write`, which D1 already catches: a plain `>` carries no compare-and-swap whatsoever."""
+    f = region(world) / "Errata.md"
+    f.write_text("# Errata\n\n- an entry another session wrote\n")
+    res = bash(world, f"echo 'gone' > {f}")
+    assert decision(res) == "deny"
+    r = reason(res)
+    assert "truncates `Mnemosyne/UkrainianCard/Errata.md`" in r
+    assert "Use Edit" in r and "Design §5.2 D1" in r
+
+
+def test_bash_append_redirect_leaves_the_file_alone(world):
+    """NEGATIVE control: `>>` is a pure append, never refused by this rule."""
+    f = region(world) / "Errata.md"
+    f.write_text("# Errata\n\n- an entry\n")
+    assert bash(world, f"echo '- more' >> {f}") is None
+
+
+def test_bash_truncate_exempts_a_file_that_does_not_exist(world):
+    """NEGATIVE control: nothing in a file that is not there to lose."""
+    assert bash(world, f"echo hi > {region(world) / 'Brand-New.md'}") is None
+
+
+def test_bash_truncate_exempts_an_existing_but_EMPTY_file(world):
+    """NEGATIVE control, tested apart from the new-file case, same reasoning as D1's own."""
+    f = region(world) / "Errata.md"
+    f.write_text("")
+    assert f.exists() and f.stat().st_size == 0
+    assert bash(world, f"echo hi > {f}") is None
+
+
+@pytest.mark.parametrize("name", ["report.html", "verdict.json", "rows.tsv"])
+def test_bash_truncate_exempts_files_that_are_not_markdown(world, name):
+    """NEGATIVE controls: a generator's own output file is not memory."""
+    f = region(world) / name
+    f.write_text("existing generated content\n")
+    assert bash(world, f"echo hi > {f}") is None, name
+
+
+def test_bash_truncate_exempts_a_path_outside_the_vault(world, tmp_path):
+    """NEGATIVE control: `bash_write_targets` never even sees a non-vault path."""
+    f = tmp_path / "scratch.md"
+    f.write_text("existing content\n")
+    assert bash(world, f"echo hi > {f}") is None
+
+
+def test_bash_truncate_exempts_a_file_THIS_session_created_and_still_refuses_another_session(world):
+    """The discriminating pair — the SAME created-set D1 reads (no second bookkeeping channel): A
+    creates the file via Write and may then truncate it with Bash; B, meeting the identical file a
+    turn later, may not."""
+    f = region(world) / "Position.md"
+    assert gate_write(world, f, sid="A") is None            # the creation: gate stamps pre-exists=0
+    f.write_text("# Position\n\nfirst content\n")
+    chore_write(world, f, sid="A")                          # PostToolUse records the creation
+    assert bash(world, f"echo 'rewritten by its author' > {f}", sid="A") is None
+    res = bash(world, f"echo 'clobbered by a stranger' > {f}", sid="B")
+    assert decision(res) == "deny" and "truncates" in reason(res)
+
+
+@pytest.mark.parametrize("cmd_tpl", [
+    "cp {SRC} {DST}",
+    "mv {SRC} {DST}",
+    "install {SRC} {DST}",
+    "truncate -s 0 {DST}",
+])
+def test_bash_truncate_covers_cp_mv_install_and_truncate(world, tmp_path, cmd_tpl):
+    """POSITIVE controls on the other truncating shapes named in the gap: `cp`/`mv`/`install` ONTO
+    an existing non-empty vault `.md`, and `truncate` itself, are refused exactly like `>`."""
+    f = region(world) / "Errata.md"
+    f.write_text("# Errata\n\n- an entry\n")
+    src = tmp_path / "src.md"; src.write_text("replacement\n")
+    cmd = cmd_tpl.format(SRC=src, DST=f)
+    res = bash(world, cmd, sid=f"tester-{cmd_tpl.split()[0]}")
+    assert decision(res) == "deny", cmd
+    assert "truncates" in reason(res) or "SHARED surface" in reason(res), cmd
+
+
+def test_bash_truncate_covers_dd_of(world):
+    """POSITIVE control: `dd of=` names its target as a `key=value` argument, not a bare token or a
+    `>`-spelled redirect — a caller that only recognised the `>` family would miss it entirely."""
+    f = region(world) / "Errata.md"
+    f.write_text("# Errata\n\n- an entry\n")
+    res = bash(world, f"dd if=/dev/zero of={f} bs=1 count=1")
+    assert decision(res) == "deny" and "truncates" in reason(res)
+
+
+def test_sed_i_is_deliberately_NOT_covered_by_this_rule(world):
+    """NEGATIVE control, and a documented scope decision, not an oversight: `sed -i` does not
+    replace a file's whole content by construction (an ordinary substitution leaves the rest of the
+    file alone), and a syntactic guess at "does this script empty the file" would either miss real
+    wipes or refuse legitimate targeted edits. It stays covered by D2's mutex only."""
+    f = region(world) / "Errata.md"
+    f.write_text("# Errata\n\n- an entry\n")
+    assert bash(world, f"sed -i '' 's/an entry/a replaced entry/' {f}") is None
+
+
+def test_tee_without_a_truncates_but_tee_dash_a_appends(world):
+    """The discriminating pair the gap named explicitly: plain `tee` truncates like `>` and is
+    refused; `tee -a` is a pure append like `>>` and is allowed."""
+    f = region(world) / "Errata.md"
+    f.write_text("# Errata\n\n- an entry\n")
+    res = bash(world, f"echo 'gone' | tee {f}")
+    assert decision(res) == "deny" and "truncates" in reason(res)
+    assert bash(world, f"echo '- more' | tee -a {f}") is None
+
+
+def test_bash_truncate_refuses_the_lanes_OWN_queue_file_and_names_the_append_only_rule(world):
+    """POSITIVE control, gap 2: `path_in_partition` says this queue file is CARD's, but a queue row
+    grammar is atomic single-Edit appends, never a read-modify-write — even for its own declaring
+    lane. A bash `>` has no anchor at all, so it is refused regardless of partition mode, and the
+    message names the rule rather than talking about partitions."""
+    q = world["vault"] / "Pharos" / "queues" / "regions" / "ukrainian-card.md"
+    q.write_text("- [ ] `q:CA-2026-01-01-SEED-1` seed row\n")
+    marker = world["repo"] / ".atlas-lane"
+    marker.write_text(marker.read_text() + "path: Pharos/queues/regions/ukrainian-card.md\n")
+    res = bash(world, f"echo 'clobbered' > {q}")
+    assert decision(res) == "deny"
+    r = reason(res)
+    assert "SHARED surface" in r and "atomic single-Edit appends" in r and "never a read-modify-write" in r
+
+
+def test_bash_append_to_the_lanes_OWN_queue_file_is_allowed(world):
+    """NEGATIVE control, the twin of the case above: `>>` is a pure append, and this rule never
+    refuses one, own-lane or not."""
+    q = world["vault"] / "Pharos" / "queues" / "regions" / "ukrainian-card.md"
+    q.write_text("- [ ] `q:CA-2026-01-01-SEED-1` seed row\n")
+    marker = world["repo"] / ".atlas-lane"
+    marker.write_text(marker.read_text() + "path: Pharos/queues/regions/ukrainian-card.md\n")
+    assert bash(world, f"echo '- [ ] \\`q:CA-2026-01-02-NEW-1\\` new row' >> {q}") is None
+
+
 # ============================ the Concilium exemption from the display-name door (WP3-B) ========
 
 def test_concilium_Index_is_allowed_but_a_role_stem_there_is_still_refused(world):
