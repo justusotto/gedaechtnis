@@ -83,7 +83,7 @@ light of either; a decision about the shadow copies would be a NEW dated entry b
 
 Implements the ruling recorded on `Speculum/Ledger-decide-and-record.md` under "Recall: the
 shadow's generated views are EXCLUDED from recall by default, under a NEW dated pre-registration
-entry, re-run before any index arm" (2026-09-10 22:20, handed to the seat by Justus). **Product
+entry, re-run before any index arm" (2026-09-10 22:20, handed to the seat by the owner). **Product
 change, built and reviewed separately from this measurement:** `.gedaechtnis/` — the log-and-views
 shadow's byte-identical `# GENERATED` mirror of every imported entry — joins `Pharos/` and
 `Channels/` in `recall.py`'s excluded-by-default set (`GENERATED_DIRS`, a set distinct from
