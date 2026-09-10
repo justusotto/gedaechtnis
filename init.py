@@ -66,6 +66,15 @@ What it creates (each line of the report names one of these):
                                   right command for a machine already set up — a full run there
                                   would resolve a region from the repo's basename and create it);
                                   `--remove-outage-check` undoes it, also on its own.
+  <state>/outage-check-installed.json
+                                  when that check FIRST began guarding, written once and never
+                                  rewritten — including when the settings entry was already there
+                                  and no stamp was (the state a machine installed before this
+                                  existed is in). A session whose transcript is older than the
+                                  stamp predates the guard and is exempted rather than refused: on
+                                  2026-09-10 the install locked the INSTALLING session out of its
+                                  own next eight prompts, and a session cannot restart itself.
+                                  `--remove-outage-check` removes it; `--dry-run` writes neither.
 
 When the vault had no commit yet, the files this run created are committed as its first commit
 (path-limited, exactly the created files, nothing else — the vault's own git law).
@@ -637,7 +646,7 @@ class Step:
 
 
 def plan(repo: Path, vault: Path, lane: str, region: str, cfg_path: Path, skills_dir: Path,
-         settings_path: Path | None = None) -> list[Step]:
+         settings_path: Path | None = None, state: Path | None = None) -> list[Step]:
     steps: list[Step] = []
 
     def file(path: Path, content: str, note: str = ""):
@@ -729,6 +738,16 @@ def plan(repo: Path, vault: Path, lane: str, region: str, cfg_path: Path, skills
                 steps.append(Step(settings_path, verb,
                                   lambda p=settings_path, d=merged: _write_settings(p, d),
                                   "UserPromptSubmit plugin-outage check (`init.py --remove-outage-check` undoes it)"))
+            # The stamp goes down whenever the check is registered — including the `kept` case,
+            # where the hook is already installed but nothing ever recorded WHEN. Written once and
+            # never rewritten; sessions older than it are exempt instead of locked out.
+            stamp = outage_stamp_path(state)
+            if stamp.exists():
+                steps.append(Step(stamp, "kept", note="when the outage check began guarding"))
+            else:
+                steps.append(Step(stamp, "created",
+                                  lambda p=stamp: write_install_stamp(p),
+                                  "when the outage check began guarding; sessions older than it are exempt"))
     return steps
 
 
@@ -742,6 +761,28 @@ def plan(repo: Path, vault: Path, lane: str, region: str, cfg_path: Path, skills
 
 OUTAGE_SCRIPT = PLUGIN / "outage_check.py"
 OUTAGE_MARK = "outage_check.py"          # how an already-installed entry is recognised
+OUTAGE_STAMP = "outage-check-installed.json"     # in the state dir, beside the check's own log
+
+
+def outage_stamp_path(state: Path | None = None) -> Path:
+    """`<state>/outage-check-installed.json` — the same state directory `outage_check.state_dir()`
+    resolves (env > config.json > ~/.claude/gedaechtnis), which is what `config.STATE` already is."""
+    return (config.STATE if state is None else Path(state)) / OUTAGE_STAMP
+
+
+def write_install_stamp(path: Path) -> bool:
+    """Write the stamp if it is absent; return whether it was written.
+
+    NEVER rewritten. Its value is the moment this check FIRST began guarding, and every session
+    older than that moment is exempted by it (`outage_check.predates_install`) — so a rewrite
+    would silently re-lock out exactly the sessions the stamp exists to protect."""
+    if path.exists():
+        return False
+    now = time.time()
+    _write(path, json.dumps({"installed_at": now,
+                             "iso": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(now))},
+                            indent=2) + "\n")
+    return True
 
 
 def outage_command(script: Path = OUTAGE_SCRIPT) -> str:
@@ -873,15 +914,27 @@ def _install_outage(settings_path: Path, dry_run: bool = False) -> int:
     data, changed = install_outage_check(data)
     if not changed:
         print(f"  kept         {settings_path}  (already runs the plugin-outage check)")
-        return 0
-    verb = "updated" if settings_path.exists() else "created"
+    else:
+        verb = "updated" if settings_path.exists() else "created"
+        if dry_run:
+            print(f"  would {verb[:6]}  {settings_path}  (UserPromptSubmit plugin-outage check)")
+        else:
+            _write_settings(settings_path, data)
+            print(f"  {verb:13}{settings_path}  (UserPromptSubmit plugin-outage check; "
+                  "`init.py --remove-outage-check` undoes it)")
+    # Also in the `kept` case: a machine installed before the stamp existed has the hook and no
+    # record of when it went up, which is the state that locked a live session out on 2026-09-10.
+    stamp = outage_stamp_path()
     if dry_run:
-        print(f"  would {verb[:6]}  {settings_path}  (UserPromptSubmit plugin-outage check)")
-        return 0
-    _write_settings(settings_path, data)
-    print(f"  {verb:13}{settings_path}  (UserPromptSubmit plugin-outage check; "
-          "`init.py --remove-outage-check` undoes it)")
-    print("  Restart Claude Code for it to take effect.")
+        if not stamp.exists():
+            print(f"  would create  {stamp}  (when the outage check began guarding)")
+    elif write_install_stamp(stamp):
+        print(f"  created      {stamp}  (when the outage check began guarding; sessions older "
+              "than it are exempt)")
+    else:
+        print(f"  kept         {stamp}  (when the outage check began guarding)")
+    if changed and not dry_run:
+        print("  Restart Claude Code for it to take effect.")
     return 0
 
 
@@ -896,6 +949,12 @@ def _remove_outage(settings_path: Path) -> int:
         print(f"  removed      {settings_path}  (UserPromptSubmit plugin-outage check)")
     else:
         print(f"  kept         {settings_path}  (no plugin-outage check was installed)")
+    stamp = outage_stamp_path()
+    try:
+        stamp.unlink()
+        print(f"  removed      {stamp}")
+    except OSError:
+        pass                                   # absent, or not ours to delete: nothing to undo
     return 0
 
 
@@ -1095,7 +1154,7 @@ def main(argv=None) -> int:
     created: list[Path] = []
     for t, region, lane in plans:
         steps = plan(t, vault, lane, region, cfg_path, skills_dir,
-                     None if a.no_outage_check else settings_path)
+                     None if a.no_outage_check else settings_path, state=config.STATE)
         print(f"Gedächtnis init — repo {t}, vault {vault}, lane {lane}, region {region}" + (" (dry run)" if a.dry_run else ""))
         todo = [s for s in steps if s.verb != "kept"]
         if single and todo and not a.dry_run and not a.yes and sys.stdin.isatty():

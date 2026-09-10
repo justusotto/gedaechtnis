@@ -21,6 +21,12 @@ THE CONTROLS, and which is real:
 
 Every case redirects HOME and every GEDAECHTNIS_* path into tmp_path, so the suite never reads or
 writes a real vault, a real ~/.claude, or the real state directory.
+
+The second half of the file covers the PREDATES-INSTALL exemption, added 2026-09-10 after the
+install refused the installing session's own next eight prompts. Its controls are paired the same
+way: the exemption case and the block case differ in the STAMP alone (birth time cannot be set, so
+the file is fixed and the stamp moves around it), and every unreadable stamp, unreadable transcript
+and absent stamp is asserted to block exactly as the code did before the branch existed.
 """
 from __future__ import annotations
 
@@ -88,6 +94,137 @@ def log_rows(w) -> list[str]:
 
 def write_config(w, **keys):
     w["cfg"].write_text(json.dumps(keys, indent=2) + "\n", encoding="utf-8")
+
+
+# ---------------------------------------------- the predates-install exemption ----
+# A hook in the USER settings is read on EVERY prompt, not only in sessions started after it was
+# installed — which is how, on 2026-09-10, the session that installed this check refused its own
+# next eight prompts. The stamp says when the guard went up; a transcript older than the stamp
+# means the session was already running, and a running session cannot restart itself.
+STAMP = "outage-check-installed.json"
+HAS_BIRTHTIME = hasattr(os.stat(__file__), "st_birthtime")
+needs_birthtime = pytest.mark.skipif(not HAS_BIRTHTIME,
+                                     reason="st_birthtime is macOS/BSD; without it nothing is exempt")
+
+
+def transcript(w, name: str = "sess.jsonl") -> Path:
+    """A stand-in for `~/.claude/projects/<mangled>/<sid>.jsonl`, whose BIRTH time is the signal.
+    Birth time cannot be set, so every case varies the STAMP against this file's real one."""
+    p = w["tmp"] / "transcripts" / name
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text('{"type":"summary"}\n', encoding="utf-8")
+    return p
+
+
+def birth(p: Path) -> float:
+    info = os.stat(p)
+    return float(getattr(info, "st_birthtime", info.st_mtime))
+
+
+def write_stamp(w, at, iso="2026-09-10T17:12:00"):
+    """`at=None` writes a stamp with no usable `installed_at`; a str writes raw bytes."""
+    w["state"].mkdir(parents=True, exist_ok=True)
+    f = w["state"] / STAMP
+    if isinstance(at, str):
+        f.write_text(at, encoding="utf-8")
+    else:
+        body = {"iso": iso} if at is None else {"installed_at": at, "iso": iso}
+        f.write_text(json.dumps(body, indent=2) + "\n", encoding="utf-8")
+    return f
+
+
+@needs_birthtime
+def test_a_session_older_than_the_install_is_exempt_not_refused(world):
+    """THE SPECIMEN: sid 2d87c590 started 2026-09-08, the check was installed 2026-09-10 17:12,
+    and eight prompts were refused. Its transcript predates the stamp, so it proceeds."""
+    t = transcript(world)
+    write_stamp(world, birth(t) + 10)
+    r = check(world, {"session_id": "SID-OLD", "transcript_path": str(t), "prompt": "hello"})
+    assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+    assert "predates" in r.stdout, r.stdout
+    rows = log_rows(world)
+    assert len(rows) == 1 and "predates-install\tsid=SID-OLD" in rows[0], rows
+    assert not any("\tblock\t" in row or row.endswith("block") for row in rows), rows
+
+
+@needs_birthtime
+def test_the_exemption_is_the_stamp_and_nothing_else(world):
+    """Positive/negative pair on the ONE comparison: same session, same transcript, two stamps."""
+    t = transcript(world)
+    stamp = write_stamp(world, birth(t) + 10)
+    assert check(world, {"session_id": "SID-X", "transcript_path": str(t)}).returncode == 0
+    stamp.unlink()
+    write_stamp(world, birth(t) - 10)
+    assert check(world, {"session_id": "SID-X", "transcript_path": str(t)}).returncode == 2
+
+
+def test_a_session_started_after_the_install_still_blocks(world):
+    t = transcript(world)
+    write_stamp(world, birth(t) - 10)                  # the guard went up BEFORE this session
+    r = check(world, {"session_id": "SID-NEW", "transcript_path": str(t)})
+    assert r.returncode == 2, (r.returncode, r.stdout, r.stderr)
+    rows = log_rows(world)
+    assert len(rows) == 1 and "block\tsid=SID-NEW" in rows[0], rows
+
+
+def test_no_stamp_blocks_exactly_as_before(world):
+    """The pre-fix behaviour, unchanged: with nothing saying when the guard went up, nobody is
+    exempt — an old transcript alone must never open the door."""
+    t = transcript(world)
+    assert not (world["state"] / STAMP).exists()
+    r = check(world, {"session_id": "SID-DEAD", "transcript_path": str(t)})
+    assert r.returncode == 2, (r.returncode, r.stdout)
+    assert len(log_rows(world)) == 1 and "block" in log_rows(world)[0]
+
+
+@needs_birthtime
+@pytest.mark.parametrize("payload", [
+    {},                                                        # no transcript_path at all
+    {"transcript_path": ""},
+    {"transcript_path": "   "},
+    {"transcript_path": None},
+    {"transcript_path": 17},                                   # a schema change, not a path
+    {"transcript_path": "/no/such/transcript-4f2a.jsonl"},     # names a file that is not there
+])
+def test_without_a_readable_transcript_the_stamp_exempts_nobody(world, payload):
+    t = transcript(world)
+    write_stamp(world, birth(t) + 10)                          # old enough, if it could be read
+    r = check(world, dict({"session_id": "SID-DEAD"}, **payload))
+    assert r.returncode == 2, (payload, r.returncode, r.stdout)
+    assert "block" in "".join(log_rows(world))
+
+
+@needs_birthtime
+@pytest.mark.parametrize("stamp", ["{ not json", "[]", '"2026-09-10"', '{"installed_at": "soon"}',
+                                   '{"installed_at": null}', '{"installed_at": true}', '{"iso": "x"}'])
+def test_a_stamp_it_cannot_read_blocks(world, stamp):
+    t = transcript(world)
+    write_stamp(world, stamp)
+    assert check(world, {"session_id": "SID-DEAD", "transcript_path": str(t)}).returncode == 2, stamp
+
+
+@needs_birthtime
+def test_the_happy_path_is_untouched_by_the_exemption(world):
+    """Artifact present: exit 0, nothing printed, nothing logged — even with a stamp and an old
+    transcript sitting right there. The one stat stays one stat."""
+    session_start(world, "SID-OK")
+    t = transcript(world)
+    write_stamp(world, birth(t) + 10)
+    r = check(world, {"session_id": "SID-OK", "transcript_path": str(t)})
+    assert (r.returncode, r.stdout, r.stderr) == (0, "", "")
+    assert log_rows(world) == []
+
+
+@needs_birthtime
+def test_message_mode_is_untouched(world):
+    """The downgrade path never consults the stamp: it warns, as it did before."""
+    write_config(world, outage_check="message")
+    t = transcript(world)
+    write_stamp(world, birth(t) + 10)
+    r = check(world, {"session_id": "SID-DEAD", "transcript_path": str(t)})
+    assert r.returncode == 0
+    rows = log_rows(world)
+    assert len(rows) == 1 and "message\tsid=SID-DEAD" in rows[0], rows
 
 
 # -------------------------------------------------------- negative control ----
@@ -431,3 +568,95 @@ def test_dry_run_writes_no_settings(world):
     assert p.returncode == 0, p.stderr
     assert not settings_path(world).exists()
     assert "would update" in p.stdout or "would create" in p.stdout
+
+
+# ------------------------------------------------------- the install stamp ----
+def stamp_path(w) -> Path:
+    return w["state"] / STAMP
+
+
+def stamp(w) -> dict:
+    return json.loads(stamp_path(w).read_text(encoding="utf-8"))
+
+
+def test_init_writes_the_stamp_once_and_never_rewrites_it(world):
+    """Its value is the moment the check FIRST began guarding; a rewrite would re-lock out every
+    session older than the rewrite — which is the whole bug."""
+    p = run_init(world, "--repo", str(world["repo"]), "--yes")
+    assert p.returncode == 0, p.stderr
+    assert isinstance(stamp(world)["installed_at"], float), stamp(world)
+    assert stamp(world)["iso"][:2] == "20"
+    first = stamp_path(world).read_bytes()
+    p = run_init(world, "--repo", str(world["repo"]), "--yes")
+    assert p.returncode == 0, p.stderr
+    assert stamp_path(world).read_bytes() == first, "the second run rewrote the install stamp"
+
+
+def test_a_kept_install_with_no_stamp_gets_one(world):
+    """The live situation on 2026-09-10: the hook was installed, and nothing recorded when."""
+    run_init(world, "--repo", str(world["repo"]), "--yes")
+    stamp_path(world).unlink()
+    p = run_init(world, "--repo", str(world["repo"]), "--yes")
+    assert p.returncode == 0, p.stderr
+    assert "already runs the plugin-outage check" in p.stdout, p.stdout
+    assert stamp_path(world).is_file(), p.stdout
+
+
+def test_install_outage_check_alone_writes_the_stamp_and_a_second_run_keeps_it(world):
+    p = run_init(world, "--install-outage-check")
+    assert p.returncode == 0, p.stderr
+    first = stamp_path(world).read_bytes()
+    p = run_init(world, "--install-outage-check")
+    assert p.returncode == 0 and "already runs" in p.stdout
+    assert stamp_path(world).read_bytes() == first
+
+
+def test_install_outage_check_alone_stamps_an_install_that_predates_the_stamp(world):
+    run_init(world, "--install-outage-check")
+    stamp_path(world).unlink()
+    p = run_init(world, "--install-outage-check")
+    assert p.returncode == 0 and stamp_path(world).is_file(), p.stdout
+
+
+def test_removal_removes_the_stamp(world):
+    run_init(world, "--install-outage-check")
+    assert stamp_path(world).is_file()
+    p = run_init(world, "--remove-outage-check")
+    assert p.returncode == 0, p.stderr
+    assert not stamp_path(world).exists()
+    assert run_init(world, "--remove-outage-check").returncode == 0      # still idempotent
+
+
+@pytest.mark.parametrize("args", [("--repo", "REPO", "--yes", "--dry-run"),
+                                  ("--install-outage-check", "--dry-run")])
+def test_dry_run_writes_no_stamp(world, args):
+    args = tuple(str(world["repo"]) if a == "REPO" else a for a in args)
+    p = run_init(world, *args)
+    assert p.returncode == 0, p.stderr
+    assert not stamp_path(world).exists()
+
+
+def test_no_outage_check_writes_no_stamp(world):
+    p = run_init(world, "--repo", str(world["repo"]), "--yes", "--no-outage-check")
+    assert p.returncode == 0, p.stderr
+    assert not stamp_path(world).exists()
+
+
+def test_a_settings_file_it_cannot_parse_leaves_no_stamp(world):
+    """The check was NOT installed, so nothing began guarding and there is nothing to stamp."""
+    settings_path(world).write_text("{ this is not json\n", encoding="utf-8")
+    p = run_init(world, "--repo", str(world["repo"]), "--yes")
+    assert p.returncode == 0, p.stderr
+    assert not stamp_path(world).exists()
+
+
+@needs_birthtime
+def test_end_to_end_the_installer_and_the_check_agree_on_the_stamp(world):
+    """The writer and the reader, joined: init writes the stamp, and a transcript created AFTER
+    that write blocks while one created before it is exempt. Neither side guesses the path."""
+    old = transcript(world, "old.jsonl")
+    run_init(world, "--install-outage-check")
+    new = transcript(world, "new.jsonl")
+    assert stamp(world)["installed_at"] > birth(old)
+    assert check(world, {"session_id": "SID-OLD", "transcript_path": str(old)}).returncode == 0
+    assert check(world, {"session_id": "SID-NEW", "transcript_path": str(new)}).returncode == 2

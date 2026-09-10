@@ -33,7 +33,7 @@ a promise about the next version.
 - **The outage check bites:** the scratch plugin carrying the exact 2026-09-09 defect is rejected by
   the real validator (`claude plugin validate`, `agents: Invalid input`) and the first prompt of a
   session with no SessionStart record is refused, exit 2; the shipped manifest validates and the
-  same check is silent (`tests/test_outage_check.py`, 33 cases).
+  same check is silent (`tests/test_outage_check.py`, 62 cases).
 - **The log-and-views shadow, day 0:** the vault's 1,229 entries across 72 role files were imported
   into an append-only log and regenerated as views; 72 of 72 views came back byte-identical to
   the live file. This is the first of seven checkpoints (days 0, 1, 2, 4, 7, 14, 30) for the
@@ -163,7 +163,14 @@ load, that a rejected manifest is the likely cause (`claude plugin list` shows t
 permanently, `"outage_check": "message"` to keep the warning without the refusal, or
 `python3 init.py --remove-outage-check` to uninstall it. If the hook input carries no session id at
 all — a schema change rather than an outage — it never blocks: it exits 0 and appends one row to
-`~/.claude/gedaechtnis/outage-check.log`, where every block and every warning is also recorded. It
+`~/.claude/gedaechtnis/outage-check.log`, where every block and every warning is also recorded. The
+install also writes `~/.claude/gedaechtnis/outage-check-installed.json`, saying when the check first
+began guarding — written once and never rewritten, since every session older than that moment is
+exempted by it. That exemption exists because a hook in the user settings is read on *every* prompt,
+not only in sessions started after it was installed: on 2026-09-10 the install refused the
+installing session's own next eight prompts, and a running session cannot restart itself, so a
+session whose transcript was created before the stamp is now told so in one line and allowed to
+proceed, while everything else blocks exactly as before. The install
 is settings.json surgery, so it merges into whatever is already there, never duplicates itself, and
 leaves a file it cannot parse untouched and says so. `--no-outage-check` skips the install, and
 `python3 init.py --install-outage-check` adds it on its own, writing nothing else — which is the
