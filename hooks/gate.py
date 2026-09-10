@@ -311,7 +311,53 @@ def rule_artifact_not_file(cmd: str, cwd: str | None) -> str | None:
     return None
 
 
+# --------------------------------------------------- the `# GENERATED` door (council 2 §1) ----
+# A view under `.gedaechtnis/views/` is rebuilt from the log every time it is generated, so an edit
+# made IN the view is gone at the next generation with no error anywhere — the exact silent-loss
+# shape the log-and-views design exists to remove. The door turns that edit into a row instead.
+#
+# It is keyed on the FILE'S OWN FIRST LINE, never on a directory: a generated file says so about
+# itself, so the rule needs no allowlist and cannot go stale when the views move (their final home
+# is a later ruling). During the shadow nothing outside `.gedaechtnis/views/` carries the line, so
+# nothing outside it can be bitten — which is what makes an additive shadow additive.
+#
+# Balthasar's sign-off names this door the most likely thing to be reverted; the signal he asked for
+# is more than 3 refusals in the shadow's first week. Every refusal is logged as `generated-view`.
+
+GENERATED_PREFIX = "# GENERATED"
+
+
+def is_generated(p: Path) -> bool:
+    """True when the file exists and its FIRST LINE marks it as machine-written."""
+    try:
+        with open(p, "r", encoding="utf-8", errors="replace") as fh:
+            return fh.readline().startswith(GENERATED_PREFIX)
+    except OSError:
+        return False
+
+
+def generated_refusal(rel: str, how: str) -> str:
+    return (f"`{rel}` is a GENERATED view: its first line is `{GENERATED_PREFIX} sha256:…`, and it is rebuilt from the "
+            f"memory log every time `gedaechtnis/views.py` runs — this {how} would be gone at the next generation, with "
+            "no error anywhere. Append a row instead:\n"
+            "    python3 gedaechtnis/logstore.py append --region <Region> --kind <decision|lesson|state|question|note> "
+            "--stem <Canon|Errata|Patterns|Position|Aporia> --heading '## …' --body '…'\n"
+            "then re-run `python3 gedaechtnis/views.py`. To change an entry the log already carries, append the corrected "
+            "row — the log is append-only and the newer row wins. (Council 2 closure §1: a hand edit becomes a row, never "
+            "a lost edit.)")
+
+
 _WRITE_VERBS = {"tee", "cp", "mv", "rm", "touch", "truncate", "install"}
+_CLOBBER = {"redirect": "shell redirect", "redirect-append": "shell append", "sed-i": "`sed -i`",
+            "tee": "`tee`", "cp": "`cp` over it", "mv": "`mv` over it", "install": "`install` over it",
+            "truncate": "`truncate`"}
+
+
+def rule_generated_view_bash(cmd: str, cwd: str | None) -> str | None:
+    for p, how in bash_write_targets(cmd, cwd):
+        if how in _CLOBBER and is_generated(p):
+            return generated_refusal(vault_rel(p) or str(p), _CLOBBER[how])
+    return None
 
 
 def bash_write_targets(cmd: str, cwd: str | None) -> list[tuple[Path, str]]:
@@ -425,6 +471,7 @@ def do_bash(inp: dict) -> None:
         return
     for fn in (lambda: rule_vault_git(cmd, cwd), lambda: rule_launch_model(cmd),
                lambda: rule_data_integrity(cmd), lambda: rule_artifact_not_file(cmd, cwd),
+               lambda: rule_generated_view_bash(cmd, cwd),
                lambda: rule_bash_partition(cmd, inp)):
         r = fn()
         if r:
@@ -567,6 +614,12 @@ def do_write(inp: dict) -> None:
         deny(EV, (f"Concilium STEM RULE: no file under ~/Atlas/Concilium/ may carry a vault role stem (`{p.stem}`) — it would "
                   "leak into kernel_freshness, the Lustrum arm and umbrella discovery. Use the Concilium-native names "
                   "(Fundamentum · Positio · Quaestiones · Vitia · Verba · Lex · Index). (Speculum/Kernel 'Standing constraints')"))
+        return
+    # the `# GENERATED` door — deterministic, so it refuses in every partition mode, like the stem rule
+    if is_generated(p):
+        log("deny", f"write\tgenerated-view\t{rel}\tsession={inp.get('session_id', '-')}")
+        clear_pre_exists(p)                      # a refused write leaves no record of itself
+        deny(EV, generated_refusal(rel, f"`{inp.get('tool_name') or 'Edit'}`"))
         return
     r = rule_display_name_filename(p)
     if r:
