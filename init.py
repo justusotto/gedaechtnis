@@ -32,8 +32,9 @@ Defaults, when no flag says otherwise:
   lane    the repo's basename upper-cased, non-alphanumerics -> `-`   (my_project -> MY-PROJECT)
           — or, when the repo already has a `.atlas-lane` marker, the lane that marker declares
   region  the repo's basename, VERBATIM                                (my_project -> my_project)
-  vault   what hooks/config.py resolves: ~/Gedaechtnis, or an existing ~/Atlas, or the vault
-          named in ~/.claude/gedaechtnis/config.json
+  vault   what hooks/config.py resolves: ~/Gedaechtnis, or ~/Atlas when that directory is an
+          Atlas VAULT (it carries Global/fleet-roster.md — a directory that merely has the name
+          is not adopted), or the vault named in ~/.claude/gedaechtnis/config.json
 
 What it creates (each line of the report names one of these):
 

@@ -129,8 +129,9 @@ and writes nothing else; `--offer-declined` lists the declined ones again, untic
 the declined list for one run; `--dry-run` shows the plan and writes nothing; `--yes`, like a
 non-terminal stdin, takes the default without asking.
 
-For each chosen project it creates: a vault at `~/Gedaechtnis` (or uses `~/Atlas` if that directory
-already exists), `git init`-ed; a folder for the project in the vault, named after the repo folder
+For each chosen project it creates: a vault at `~/Gedaechtnis` (or uses `~/Atlas` when that
+directory is already an Atlas vault — what proves it is the file `~/Atlas/Global/fleet-roster.md`,
+not the folder's name), `git init`-ed; a folder for the project in the vault, named after the repo folder
 **verbatim**, with six starter files — `Map.md`, `Position.md`, `Canon.md`, `Patterns.md`,
 `Errata.md`, `Aporia.md`, shown to you and to the model as Index, Status, Decisions, Patterns,
 Mistakes, Open questions (every other file is born on its first write); a *lane* — the writer
@@ -275,7 +276,7 @@ Precedence, per setting: environment variable → `~/.claude/gedaechtnis/config.
 
 | JSON key | environment variable | default |
 |---|---|---|
-| `vault` | `GEDAECHTNIS_VAULT` | `~/Gedaechtnis`, or `~/Atlas` if it exists |
+| `vault` | `GEDAECHTNIS_VAULT` | `~/Gedaechtnis`, or `~/Atlas` when it is a vault — i.e. `~/Atlas/Global/fleet-roster.md` is a file |
 | `roots` | `GEDAECHTNIS_ROOTS` (colon-separated) | `~/Projects`, `~/projects`, `~/src`, `~/code`, `~/dev`, `~/repos`, `~/Developer`, `~/IdeaProjects`, `~/AndroidStudioProjects`, `~/Documents/GitHub`, `~/go/src` — looked under two levels deep, and nowhere else |
 | `declined` | — | none; appended by `init.py --decline`, and nothing else writes it |
 | `state_dir` | `GEDAECHTNIS_STATE_DIR` | `~/.claude/gedaechtnis` |
