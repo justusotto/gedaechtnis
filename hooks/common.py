@@ -59,6 +59,15 @@ def context(event: str, text: str) -> None:
     print(json.dumps({"hookSpecificOutput": {"hookEventName": event, "additionalContext": text}}))
 
 
+def allow(event: str, text: str) -> None:
+    """PreToolUse ALLOW with a note attached — never a wall. Used by non-blocking notices (context
+    economy) that want the model to see something in its next turn without touching the permission
+    flow at all: `permissionDecision: "allow"` is explicit so nothing downstream reads the bare
+    presence of `additionalContext` as ambiguous."""
+    print(json.dumps({"hookSpecificOutput": {"hookEventName": event, "permissionDecision": "allow",
+                                             "additionalContext": text}}))
+
+
 def expand(p: str, cwd: str | None = None) -> Path:
     """Expand ~, $HOME, ${HOME}; make relative paths absolute against cwd."""
     s = p.strip().strip('"').strip("'")
