@@ -52,6 +52,21 @@ HEADING = re.compile(r"^##(#)? ")
 BULLET = re.compile(r"^- ")
 LINK = re.compile(r"\[\[[^\]\n]+\]\]")
 BINDING = re.compile(r"\bNEVER\b|\bALWAYS\b")
+FENCE_BLOCK = re.compile(r"^(?:\s*)(`{3,}|~{3,}).*?(?:\n(?:\s*)\1|\Z)", re.S | re.M)
+INLINE_CODE = re.compile(r"`[^`\n]*`")
+
+
+def strip_code(text: str) -> str:
+    """Blank out fenced blocks and inline code spans, PRESERVING length so nothing else shifts.
+
+    A `[[…]]` inside backticks is not a wikilink: this vault writes bash `[[ -f x ]]` tests and
+    `[[File#heading]]` TEMPLATES in prose, and both the pointer test and the checkpoint's link check
+    read them as links otherwise. Repaired in the EXTRACTOR rather than silenced with a skip list —
+    checkpoint 0 produced exactly three "unresolved links" and all three were code.
+    """
+    def blank(m):
+        return re.sub(r"[^\n]", " ", m.group(0))
+    return INLINE_CODE.sub(blank, FENCE_BLOCK.sub(blank, text))
 
 
 def regions(vault: Path = None) -> list:
@@ -151,9 +166,10 @@ def is_pointer(heading: str, body: str) -> bool:
     one-line pointer byte-identical is satisfiable by construction and proves nothing about whether
     the shadow can carry an argument.
     """
-    if not LINK.search(body):
+    text = strip_code(body)                      # a `[[…]]` inside backticks is not a link
+    if not LINK.search(text):
         return False
-    rest = LINK.sub(" ", body)
+    rest = LINK.sub(" ", text)
     rest = re.sub(r"[#*_>`\-–—:;.,()\[\]|]", " ", rest)
     return len(re.sub(r"\s+", " ", rest).strip()) < 40
 

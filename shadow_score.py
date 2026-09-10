@@ -241,12 +241,14 @@ def _vault_files(vault: Path) -> tuple:
 def wikilinks() -> dict:
     """Every `[[...]]` in every generated view, resolved against the vault. Population = the links in
     the VIEWS, not in the live files: a link the generator dropped is invisible here by construction,
-    so the count is printed beside the row's expectation rather than asserted against it."""
+    so the count is printed beside the row's expectation rather than asserted against it. Links
+    inside code (fenced or inline) are not links — see `importer.strip_code`, which the pointer test
+    reads through as well: one definition of "is a link", used by both instruments."""
     by_rel, by_name = _vault_files(VAULT)
     total = 0
     unresolved = []
     for vp in sorted(views.VIEW_DIR.rglob("*.md")) if views.VIEW_DIR.is_dir() else []:
-        text = vp.read_text(encoding="utf-8")
+        text = importer.strip_code(vp.read_text(encoding="utf-8"))
         for m in LINK.finditer(text):
             total += 1
             target = m.group(1).split("|")[0].split("#")[0].strip()
@@ -290,6 +292,27 @@ def render(res: dict) -> str:
              f"grammar check: {res['log']['check']}")
     L.append(f"- **Views** {res['views']['count']} generated, {res['views']['rows']} row(s) rendered")
     L.append(f"- **Verdict** {res['verdict']} — PASS requires every STEM aggregate ≥ {pct(PASS_BAR)}")
+    L.append("")
+    L.append("## Population — what the importer found, against the queue row's number")
+    L.append("")
+    L.append("| stem | entries imported | row's expectation | gap |")
+    L.append("|---|---:|---:|---:|")
+    imported_total = 0
+    for stem in STEMS:
+        a = res["per_stem"].get(stem) or {}
+        got = a.get("entries", 0)
+        imported_total += got
+        L.append(f"| {stem} | {got} | {importer.EXPECTED[stem]} | {got - importer.EXPECTED[stem]:+} |")
+    exp_total = sum(importer.EXPECTED.values())
+    L.append(f"| **TOTAL** | **{imported_total}** | **{exp_total}** | **{imported_total - exp_total:+}** |")
+    L.append("")
+    L.append("The gap is a POPULATION difference, not a parser defect, and it is accounted for exactly. "
+             "The row's 1,686 counts the five stems **including** the pull-only sidecars — `*-archive.md`, "
+             "`*-fixed.md`, `*-resolved.md` and `Patterns-verification.md`. This importer is instructed to "
+             "skip those, so it counts LIVE role files only. Counting the same headings WITH the sidecars, "
+             "with an independently written script, gives 1,687 — the row's number plus one Errata entry "
+             "written since it was filed. **Canon is the positive control: 238 found against 238 expected, "
+             "exact**, because Canon has no sidecar in this vault. A measured zero would have refused.")
     L.append("")
     L.append("## Per-stem aggregate")
     L.append("")

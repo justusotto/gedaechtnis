@@ -42,8 +42,8 @@ def mini(tmp_path):
           "## Two\n\nSee [[Global/Map]] for the index.\n\n"
           "### Three\n\nA sub-heading is an entry too.\n")
     write(v / "Alpha" / "Errata.md",
-          "# Errata\n\n## A bug\n\nfenced below:\n\n```\n## not a heading\n```\n\ndone.\n\n"
-          "## Another bug\n\nbody.\n")
+          "# Errata\n\n## A bug\n\nfenced below:\n\n```\n## not a heading\n[[also-not-a-link]]\n```\n\ndone.\n\n"
+          "## Another bug\n\nA template written inline: `[[File#heading]]`, and a bash test `[[ -f x ]]`.\n")
     write(v / "Alpha" / "Position.md", "# Position\n\n- state one\n  continued\n- state two\n")
     write(v / "Global" / "Aporia.md", "# Aporia\n\n## An open question\n\nunanswered.\n")
     # a folder with NO Map.md is not a region, and a skipped top-level folder is not walked
@@ -327,3 +327,36 @@ def test_the_shadow_start_pin_is_written_once_and_never_rewritten(mini):
     score(mini)
     assert pin.read_text(encoding="utf-8") == first
     assert json.loads(first)["checkpoints"] == [0, 1, 2, 4, 7, 14, 30]
+
+
+def test_a_wikilink_inside_code_is_not_a_wikilink(mini):
+    """POSITIVE control on the EXTRACTOR repair. The mini-vault's Errata carries three shapes that
+    look like links and are not: one in a fenced block, one `[[File#heading]]` template in
+    backticks, one bash `[[ -f x ]]` test. All three would resolve to nothing and be reported as
+    broken links at every checkpoint — a check nobody reads by day 7."""
+    run("importer.py", env=mini["env"])
+    run("views.py", env=mini["env"])
+    res = score(mini)
+    assert res["links"]["unresolved"] == 0, res["links"]["examples"]
+
+
+def test_a_real_wikilink_IS_counted_and_resolved(mini):
+    """NEGATIVE control on the same repair — the half that proves `strip_code` blanks code and not
+    the document. `Alpha/Canon.md` links `[[Global/Map]]`, which exists."""
+    run("importer.py", env=mini["env"])
+    run("views.py", env=mini["env"])
+    res = score(mini)
+    assert res["links"]["links"] >= 1
+    assert res["links"]["unresolved"] == 0
+
+
+def test_a_wikilink_to_a_file_that_does_not_exist_IS_reported(mini):
+    """POSITIVE control that the link check still BITES after the repair — otherwise the fix for
+    three false positives would have been a fix for the check itself."""
+    (mini["vault"] / "Alpha" / "Aporia.md").write_text(
+        "# Aporia\n\n## Where does it go\n\nSee [[No/Such/File]].\n", encoding="utf-8")
+    run("importer.py", env=mini["env"])
+    run("views.py", env=mini["env"])
+    res = score(mini)
+    assert res["links"]["unresolved"] == 1
+    assert res["links"]["examples"][0]["link"] == "No/Such/File"
