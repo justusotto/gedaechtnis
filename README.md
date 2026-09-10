@@ -64,6 +64,13 @@ a promise about the next version.
   directions, and is retracted. Limits: one model, one effort, the plugin loaded through staged
   project settings rather than the install path, and the file arm is not Claude Code's own memory
   loader. Details in `eval/memory_eval/` and the run's report; nothing here is a percentage.
+- **The install path itself, first run (q:CU-2026-09-10-FRESHHOME-1):** a completely fresh `HOME` →
+  `init.py --yes --repo` → one pinned `claude -p --setting-sources user,project` — the gap the
+  memory-eval bullet above names. The fresh `HOME` cannot authenticate (no Keychain fallback once
+  `HOME` is overridden: `"Not logged in · Please run /login"`, `$0`), but `session.log` gains its
+  row anyway — Claude Code runs SessionStart/UserPromptSubmit locally before the API auth check —
+  so the plugin is proven to load through the real `~/.claude/skills/gedaechtnis` symlink, at zero
+  cost, authenticated or not (`eval/fresh_home/`, `tests/test_fresh_home_eval.py`).
 - **In real use on one machine:** 12 denies, 10 session starts and 9 partition warnings in the
   live logs since 2026-09-08, from ordinary sessions, none of them staged.
 
