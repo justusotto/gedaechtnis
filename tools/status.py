@@ -23,6 +23,7 @@ import config                      # noqa: E402
 import common                      # noqa: E402
 import commit as commit_hook       # noqa: E402
 import session_start               # noqa: E402
+import context_economy             # noqa: E402
 
 
 def sh(args, timeout=10):
@@ -89,6 +90,9 @@ def main(argv=None) -> int:
                 pass
 
     if a.session_id:
+        ce = context_economy.counts(a.session_id)
+        out.append(f"context economy: {ce['reread_notices']} re-read notice(s), "
+                   f"{ce['bigread_notices']} big-read notice(s) this session")
         touched = common.touched_paths(a.session_id)
         inside = [p for p in touched if lane and common.path_in_partition(p, prefixes)]
         will = [p for p in inside if commit_hook.is_dirty(p, dirty)]
