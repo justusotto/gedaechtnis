@@ -78,3 +78,33 @@ views duplicate every imported entry and outrank the live copy in 28 of 30 quest
 over the same live content without those 72 files scores 15 of 30 at 14,169 B), and
 `COMMON_TERM_SHARE` was picked after seeing this question set. The bar above is not re-read in the
 light of either; a decision about the shadow copies would be a NEW dated entry below this one.
+
+## 2026-09-10 22:20 — the shadow's views excluded from recall by default, re-run pre-registered (`q:CU-2026-09-10-RECALL-VIEWS-1`)
+
+Implements the ruling recorded on `Speculum/Ledger-decide-and-record.md` under "Recall: the
+shadow's generated views are EXCLUDED from recall by default, under a NEW dated pre-registration
+entry, re-run before any index arm" (2026-09-10 22:20, handed to the seat by Justus). **Product
+change, built and reviewed separately from this measurement:** `.gedaechtnis/` — the log-and-views
+shadow's byte-identical `# GENERATED` mirror of every imported entry — joins `Pharos/` and
+`Channels/` in `recall.py`'s excluded-by-default set (`GENERATED_DIRS`, a set distinct from
+`NON_MEMORY_DIRS`: queues restate the vault's vocabulary without answering anything, the shadow
+answers correctly but only by duplicating an entry already found elsewhere). A new
+`--include-generated` flag restores it, exactly as `--include-queues` restores `Pharos/`/`Channels/`;
+the two flags are independent of each other and of `--rank`.
+
+**Corpus:** the whole vault (`~/Atlas`), the SAME 30 questions (`questions-30.json`), with
+`.gedaechtnis/`, `Pharos/` and `Channels/` all excluded — i.e. `recall.py`'s plain default, no
+flags. **Rank:** `a-prime`, as built by RECALL-RANK-1 (the shipped default — the same rank the a′
+entry above measured, unchanged here). **Bar: the SAME bar as the a′ entry — recall@3 ≥ 15 of 30
+at mean bytes-to-answer ≤ 20 KB.** ONE run (plus its byte-identical repeat control for the noise
+floor, per this file's own convention; `recall.py` is deterministic so that floor is expected to be
+0, not evidence of a vacuous check). **Clause, unchanged from a′: if this run does not clear the
+bar, exclusion is not the fix either, and arm (b) index-first is built next** — the same clause the
+a′ entry used, now applied to the corrected corpus rather than re-applied to the a′ table.
+
+**Caveat, carried forward and binding on how a pass here is read.** `COMMON_TERM_SHARE` = 0.05 was
+chosen after seeing this exact 30-question set (a′ entry, "two residuals" §i). A pass on this run is
+evidence the corrected corpus clears the bar **with the constant as measured**, not a claim that the
+rank generalizes — that needs a fresh, held-out question set the constant was never tuned against.
+A pass here licenses drawing a fresh 30-question entry next, never a claim of the ≥15/30 bar as a
+settled property of the ranking.
