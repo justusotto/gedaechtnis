@@ -386,7 +386,7 @@ def do_bash(inp: dict) -> None:
         return
     freed = []
     for p, how in bash_write_targets(cmd, inp.get("cwd")):
-        if how in ("redirect", "redirect-append", "sed-i", "tee") and p.suffix == ".md":
+        if how in ("redirect", "redirect-append", "sed-i", "tee", "tee-append") and p.suffix == ".md":
             if release_filelock(p, sid):
                 freed.append(vault_rel(p) or str(p))
     if freed:
