@@ -117,3 +117,136 @@ def test_a_missing_vault_refuses_rather_than_reporting_nothing_found(vault, tmp_
     memory when it is a fact about the path."""
     rc, out, err = recall(tmp_path / "nowhere", "apostrophe regime")
     assert rc == 2 and "no vault at" in err and out.strip() == ""
+
+
+# --------------------------------------------------------------------- arm (a′) ----
+# The length-aware rank and the queue exclusion, built 2026-09-10 after the recall bench
+# scored the old rank 0 of 30 on the real vault. Every property below has a control that
+# fails: the ranking is checked by flipping ONE flag and watching the order reverse, so a
+# green here cannot be produced by some other edit made the same day.
+
+FILLER = "This paragraph is routine status text with no query words in it whatsoever. " * 4
+
+
+@pytest.fixture
+def bulk_vault(tmp_path):
+    """A short entry that ANSWERS the question and a bulky one that merely mentions it thirty
+    times, both covering the same three terms — plus a queue file and a notice outbox."""
+    v = tmp_path / "bulk"
+    (v / "Notes").mkdir(parents=True)
+    (v / "Pharos" / "queues").mkdir(parents=True)
+    (v / "Channels" / "LANE").mkdir(parents=True)
+    (v / "Notes" / "Canon.md").write_text(
+        "# Canon\n\n## The ingest converts the apostrophe at the boundary\n\n"
+        "The upstream layer normalises the apostrophe to U+02BC; the ingest converts it at "
+        "the boundary.\n", encoding="utf-8")
+    (v / "Notes" / "Position.md").write_text(
+        "# Position\n\n## Running status, week by week\n\n"
+        + ("The ingest boundary apostrophe work continued. " + FILLER) * 30 + "\n",
+        encoding="utf-8")
+    (v / "Pharos" / "queues" / "notes.md").write_text(
+        "# Queue\n\n## Open rows\n\n- [ ] a row about the apostrophe telemetry backfill\n",
+        encoding="utf-8")
+    (v / "Channels" / "LANE" / "notice.md").write_text(
+        "# Notices\n\n## Notice: the apostrophe telemetry backfill shipped\n\nBody.\n",
+        encoding="utf-8")
+    return v
+
+
+def first_hit(out: str) -> str:
+    return out.split("──")[1]
+
+
+def test_a_bulky_section_does_not_win_on_bulk(bulk_vault):
+    """POSITIVE control for the length normalisation. Both entries cover all three terms; the
+    bulky one repeats them thirty times over 10 KB. The one-paragraph answer must come first."""
+    rc, out, err = recall(bulk_vault, "ingest boundary apostrophe")
+    assert rc == 0, err
+    assert "Notes/Canon.md" in first_hit(out), out[:400]
+    assert "U+02BC" in first_hit(out)
+
+
+def test_with_the_length_penalty_off_the_bulky_section_wins(bulk_vault):
+    """NEGATIVE control, and the whole point of keeping `--rank flat`: with the normalisation
+    off — one flag, nothing else changed — the order reverses and the 10 KB status section is
+    first again. That is what makes the test above evidence about the RANK."""
+    rc, out, err = recall(bulk_vault, "ingest boundary apostrophe", "--rank", "flat")
+    assert rc == 0, err
+    assert "Notes/Position.md" in first_hit(out), out[:400]
+
+
+def test_queues_and_outboxes_are_excluded_by_default(bulk_vault):
+    """`Pharos/` and `Channels/` are operational surfaces, not memory. The question names terms
+    that appear NOWHERE else, so a hit from them would be the top of the list if searched."""
+    rc, out, err = recall(bulk_vault, "apostrophe telemetry backfill")
+    assert rc == 0, err
+    assert "Pharos/" not in out and "Channels/" not in out, out[:400]
+
+
+def test_include_queues_searches_them(bulk_vault):
+    """The other half of the flag: asked for, they come back — and they are the best hits, which
+    is what proves the default excluded them rather than merely ranking them low."""
+    rc, out, err = recall(bulk_vault, "apostrophe telemetry backfill", "--include-queues")
+    assert rc == 0, err
+    assert "Pharos/queues/notes.md" in out and "Channels/LANE/notice.md" in out, out[:600]
+
+
+@pytest.fixture
+def common_terms_vault(tmp_path):
+    """Sixty routine entries between them making `commit`, `files` and `later` ordinary words in
+    this corpus, one long status section that says all three many times, and one short entry that
+    says `multipath` — the shape the bench found on the real vault, where the long section covered
+    MORE of a question's terms simply by being long."""
+    v = tmp_path / "common"
+    (v / "Filler").mkdir(parents=True)
+    (v / "Global").mkdir()
+    ordinary = ["a commit landed", "several files moved", "it was reviewed later"]
+    (v / "Filler" / "Notes.md").write_text(
+        "# Notes\n\n" + "".join(
+            f"## Routine note {i}\n\nNothing of consequence: {ordinary[i % 3]}.\n\n"
+            for i in range(60)), encoding="utf-8")
+    (v / "Global" / "Position.md").write_text(
+        "# Position\n\n## Running status of the release train\n\n"
+        + ("A commit landed, files moved, and it was reviewed later. " + FILLER) * 20 + "\n",
+        encoding="utf-8")
+    (v / "Global" / "Errata.md").write_text(
+        "# Errata\n\n## A multipath add stages nothing\n\n"
+        "A multipath commit still succeeds and claims what it does not carry.\n",
+        encoding="utf-8")
+    return v
+
+
+def test_a_common_term_does_not_buy_coverage(common_terms_vault):
+    """POSITIVE control for the measured stoplist. `commit`, `files` and `later` are in almost
+    every matched entry, so they say nothing about which entry answers the question; `multipath`
+    is in one. The short entry covering the rare term must beat the long one covering three
+    common ones."""
+    rc, out, err = recall(common_terms_vault, "commit files later multipath")
+    assert rc == 0, err
+    assert "Global/Errata.md" in first_hit(out), out[:400]
+
+
+def test_without_the_measured_stoplist_the_broad_section_wins(common_terms_vault):
+    """NEGATIVE control for that half specifically: `--rank length-only` keeps the length
+    normalisation and drops only the stoplist, and the long section — which covers three of the
+    four terms against the answer's two — takes rank 1 again."""
+    rc, out, err = recall(common_terms_vault, "commit files later multipath",
+                          "--rank", "length-only")
+    assert rc == 0, err
+    assert "Global/Position.md" in first_hit(out), out[:400]
+
+
+def test_a_tiny_corpus_falls_back_to_plain_coverage(bulk_vault):
+    """In a corpus of a handful of entries every term is "common" — one occurrence in six hits is
+    17% — so the measured stoplist would rank every hit at zero coverage. It falls back instead,
+    and the entry that covers three terms still beats one that covers a single term."""
+    rc, out, err = recall(bulk_vault, "ingest boundary apostrophe upstream")
+    assert rc == 0, err
+    assert "Notes/Canon.md" in first_hit(out), out[:400]
+
+
+def test_an_unknown_ranking_is_refused(bulk_vault):
+    """A typo in an arm name must not silently score the default ranking under another arm's
+    name — the same rule `recall_bench/run.py` follows for its unbuilt arms."""
+    rc, out, err = recall(bulk_vault, "apostrophe", "--rank", "densityy")
+    assert rc != 0 and "densityy" in err

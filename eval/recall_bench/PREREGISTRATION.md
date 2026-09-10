@@ -63,3 +63,18 @@ thresholds has been altered.)
 Arm (a) was run on a real 30-question held-out set (drawn by a separate model session, not the builder) against a real vault of 988 files: **recall@3 = 0 of 30**, mean bytes-to-answer 1.23 MB. The expected entry was in the hit list every time, at median rank 30. Cause, measured by varying the corpus: coverage-first ranking is won by the largest sections (a 665 KB queue section covers every term); on role files alone recall@3 is 5 of 30 and the winners become 14–34 KB state sections. The 2026-09-09 claim above is unchanged.
 
 **New arm (a′), grep length-aware**, pre-registered today, before it is built: same term extraction, coverage that a section cannot win on bulk alone, non-role surfaces excluded by default. **Claim:** on the same 30 questions and the same vault, (a′) reaches recall@3 ≥ 15 of 30 at mean bytes-to-answer ≤ 20 KB. If it does not, ranking is not the fix and arm (b) index-first is built first. Arm (b)'s ≥30% claim is then measured against (a′), the stronger control, never against the 0-of-30 baseline.
+
+**Result (a′), 2026-09-10 18:05 — the bar FAILS on its hit half, passes its byte half.** Built and
+measured the same day (`q:CU-2026-09-10-RECALL-RANK-1`; runs, table and confounds in
+`.orchestration/review/recallbench-2026-09-10/RESULT.md`, addendum of 18:05). On the same 30
+questions and the same vault (988 files, `.gedaechtnis/` included, as searched): **recall@3 = 11 of
+30 at 16,192 B mean bytes-to-answer**, median rank of the expected entry 6 — against the bar of ≥ 15
+of 30 at ≤ 20 KB. Neither half of a′ carries it alone (rank with the queues still in: 1 of 30;
+exclusion with the old rank: 1 of 30), and on the row corpus a′ reaches 18 of 30 at 7,013 B where
+the OLD rank already reached 15 of 30 at 30,808 B — so the ENTRY UNIT buys the hits and the RANK
+buys the bytes. Per this entry's own clause, **arm (b) index-first is next**. Two measured items
+that do NOT change this verdict and are recorded so they are not rediscovered: the vault's shadow
+views duplicate every imported entry and outrank the live copy in 28 of 30 questions (the same rank
+over the same live content without those 72 files scores 15 of 30 at 14,169 B), and
+`COMMON_TERM_SHARE` was picked after seeing this question set. The bar above is not re-read in the
+light of either; a decision about the shadow copies would be a NEW dated entry below this one.
