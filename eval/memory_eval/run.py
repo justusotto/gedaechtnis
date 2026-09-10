@@ -214,6 +214,25 @@ class CeilingReached(Exception):
     """--ceiling-usd hit: the NEXT call is refused. Not an error — the run stops and reports."""
 
 
+# The ONLY failure this harness tolerates, and only on the day-1 step.
+TOLERATED_DAY1_SUBTYPE = "error_max_turns"
+
+
+def tolerable_day1_failure(day: str, result: dict) -> bool:
+    """Whether a non-zero `claude` exit may be absorbed instead of ending the run.
+
+    True for exactly one case: the DAY-1 step ran out of turns. Day 1's answer is never read —
+    every arm's memory substrate is written by this harness, deliberately (module docstring) — so a
+    day-1 step that exhausts its turn budget has not damaged the cell it precedes; the day-N step
+    that follows sees precisely the same substrate either way. A model asked to "decide and record"
+    with read-only tools sometimes keeps looking for somewhere to write, and killing a whole priced
+    run over a formality's turn count is the wrong trade.
+
+    Everything else still refuses, day N above all: THAT answer is the measurement, and a truncated
+    or errored one scored as a FAIL would silently understate an arm."""
+    return day == "day1" and (result or {}).get("subtype") == TOLERATED_DAY1_SUBTYPE
+
+
 # ------------------------------------------------------------------- tasks ----
 TASK_KEYS = ("task_id", "day1_prompt", "memory_sentence", "canon_heading", "fact",
              "day_n_prompt", "checker_file", "checker_must_contain", "checker_must_match", "swap")
@@ -649,6 +668,7 @@ class LiveCaller:
         self.ceiling_usd, self.answers_path = ceiling_usd, answers_path
         self.timeout, self.claude_home = timeout, claude_home
         self.calls: list[dict] = []
+        self.tolerated: list[dict] = []   # day-1 turn exhaustions, absorbed and REPORTED
         self.spent = 0.0
         self.out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -668,6 +688,12 @@ class LiveCaller:
             e.setdefault("GEDAECHTNIS_WORKTREES", str(fixture_home / ".claude" / "worktrees"))
         if self.answers_path:
             e["GEDAECHTNIS_STUB_ANSWERS"] = str(self.answers_path)
+        # `sub_env` strips every GEDAECHTNIS_* variable to isolate the fixture, so the stub's own
+        # test-only switches are re-added here by name, the same way the answers path is. A real
+        # `claude` ignores a variable it has never heard of.
+        fail_on = os.environ.get("GEDAECHTNIS_STUB_FAIL_ON")
+        if fail_on:
+            e["GEDAECHTNIS_STUB_FAIL_ON"] = fail_on
         return e
 
     # -- one call ---------------------------------------------------------
@@ -722,8 +748,17 @@ class LiveCaller:
               f"cr={cost['tokens']['cache_read']}  running=${self.spent:.4f}"
               + (f"/{self.ceiling_usd:.2f}" if self.ceiling_usd is not None else ""), flush=True)
         if proc.returncode != 0:
-            raise LiveRefusal(f"claude exited {proc.returncode} on {arm}/{task['task_id']}/{day} — "
-                              f"record kept at {usage_path}; stderr: {proc.stderr.strip()[:800]}")
+            if not tolerable_day1_failure(day, result):
+                raise LiveRefusal(f"claude exited {proc.returncode} on {arm}/{task['task_id']}/{day} — "
+                                  f"record kept at {usage_path}; stderr: {proc.stderr.strip()[:800]}")
+            self.tolerated.append({"arm": arm, "task_id": task["task_id"], "day": day,
+                                   "subtype": result.get("subtype"), "num_turns": result.get("num_turns"),
+                                   "usage_file": str(usage_path)})
+            print(f"      TOLERATED: {arm}/{task['task_id']}/{day} ended "
+                  f"{result.get('subtype')} after {result.get('num_turns')} turns; day 1's answer "
+                  "is never read, so the cell is unaffected — recorded in the live summary",
+                  flush=True)
+            return "", 0, usage_path
         sess = result.get("usage") or {}
         tokens = int(sess.get("input_tokens") or 0) + int(sess.get("output_tokens") or 0)
         return (result.get("result") or ""), tokens, usage_path
@@ -875,6 +910,7 @@ def write_live_summary(path: Path, caller: LiveCaller, planned: int, stopped: st
         "usd_total": round(caller.spent, 6),
         "usd_cli_total": round(sum(c["usd_cli"] or 0.0 for c in caller.calls), 6),
         "stopped_early": stopped, "calls": caller.calls,
+        "tolerated_day1_failures": caller.tolerated,
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(summary, indent=2, default=str) + "\n", encoding="utf-8")

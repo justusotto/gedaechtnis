@@ -177,6 +177,20 @@ def main(argv=None) -> int:
     answers = load_answers(a.answers or os.environ.get("GEDAECHTNIS_STUB_ANSWERS"))
     answer = pick_answer(prompt, answers)
 
+    # `GEDAECHTNIS_STUB_FAIL_ON=<substring>` makes the stub reproduce a real `claude -p` failure —
+    # exit 1 with `subtype: error_max_turns`, `result: null` — for any prompt containing that
+    # substring. It exists so a harness's failure branch has a POSITIVE control: a live run really
+    # did die this way (a day-1 "decide and record" step kept looking for somewhere to write and
+    # burned its turn budget), and a refusal path that has never been exercised is not a path.
+    fail_on = os.environ.get("GEDAECHTNIS_STUB_FAIL_ON")
+    if fail_on and fail_on in prompt and a.output_format == "json":
+        usage = {"model": a.model, "input_tokens": approx_tokens(prompt), "output_tokens": 1}
+        obj = result_object(a, prompt, "", usage, stdin_extra)
+        obj.update({"subtype": "error_max_turns", "is_error": True, "result": None,
+                    "num_turns": int(a.max_turns or 0) + 1})
+        print(json.dumps(obj, indent=2))
+        return 1
+
     usage = {
         "model": a.model,
         "input_tokens": approx_tokens(prompt),

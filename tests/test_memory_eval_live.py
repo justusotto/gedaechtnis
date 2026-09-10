@@ -62,16 +62,23 @@ def one_task_dir(root: Path) -> Path:
     return d
 
 
-def run_eval(tmp: Path, *args, stdin_text: str | None = None, timeout: int = 300):
-    """Run the harness in its own throwaway world and return (proc, out_dir, base_dir)."""
+def run_eval(tmp: Path, *args, stdin_text: str | None = None, timeout: int = 300,
+             fail_on: str | None = None):
+    """Run the harness in its own throwaway world and return (proc, out_dir, base_dir).
+
+    `fail_on` arms the stub to reproduce a real `claude -p` turn exhaustion (exit 1, subtype
+    `error_max_turns`) for any prompt containing that substring."""
     out = tmp / "out"
     base = tmp / "base"
     home = tmp / "home"
     home.mkdir(parents=True, exist_ok=True)
     cmd = [sys.executable, str(MEMORY_EVAL_RUN), "--out", str(out), "--base", str(base),
            "--tasks-dir", str(one_task_dir(tmp)), *args]
+    env = _env(home)
+    if fail_on is not None:
+        env["GEDAECHTNIS_STUB_FAIL_ON"] = fail_on
     kw = {"input": stdin_text} if stdin_text is not None else {"stdin": subprocess.DEVNULL}
-    p = subprocess.run(cmd, capture_output=True, text=True, env=_env(home), timeout=timeout, **kw)
+    p = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=timeout, **kw)
     return p, out, base
 
 
@@ -337,6 +344,51 @@ def test_the_vault_arms_stage_the_plugin_via_project_settings(live_run, arm):
     shipped = json.loads((PLUGIN / "hooks" / "hooks.json").read_text(encoding="utf-8"))
     assert set(doc["hooks"]) == set(shipped["hooks"]), "the staged hook set is the shipped one"
     assert str(PLUGIN) in doc["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+
+
+# ------------------------------------------------ a day-1 step that runs out of turns ----
+# This happened for real, mid-run, on the second live eval: a day-1 "decide and record" step with
+# read-only tools kept looking for somewhere to write and hit `--max-turns`, exit 1,
+# `subtype: error_max_turns`. The run died with four arms' work unpriced. Day 1's answer is never
+# read — the substrate is written by the harness — so the case is absorbed and REPORTED, and only
+# on day 1. The pair below is the positive and negative control for exactly that boundary.
+DAY1_MARKER = "Decide and record"          # appears in the day-1 prompt only
+DAY_N_MARKER = "What database did we"      # appears in the day-N prompt only
+
+
+@pricing_required
+def test_a_day1_turn_exhaustion_is_absorbed_and_reported(tmp_path):
+    p, out, _base = run_eval(tmp_path, *live_args(ceiling="10"), fail_on=DAY1_MARKER)
+    assert p.returncode == 0, p.stdout + p.stderr
+    assert "TOLERATED" in p.stdout
+    rows = [json.loads(l) for l in (out / "results.jsonl").read_text(encoding="utf-8").splitlines() if l.strip()]
+    assert len(rows) == 4, "every cell still ran"
+    summary = json.loads((out / "live-summary.json").read_text(encoding="utf-8"))
+    tol = summary["tolerated_day1_failures"]
+    assert len(tol) == 4 and all(t["day"] == "day1" for t in tol), tol
+    assert all(t["subtype"] == "error_max_turns" for t in tol)
+    assert summary["usd_total"] > 0, "the failed call is still priced — it spent real tokens"
+
+
+@pricing_required
+def test_a_day_n_turn_exhaustion_still_refuses(tmp_path):
+    """Negative control for the test above, and the one that matters: day N's answer IS the
+    measurement. Absorbing a truncated one would silently score the cell as a FAIL."""
+    p, out, _base = run_eval(tmp_path, *live_args(ceiling="10"), fail_on=DAY_N_MARKER)
+    assert p.returncode == 2, p.stdout
+    assert "claude exited 1" in p.stderr
+    assert "TOLERATED" not in p.stdout
+    summary = json.loads((out / "live-summary.json").read_text(encoding="utf-8"))
+    assert summary["tolerated_day1_failures"] == []
+
+
+def test_the_stub_fail_switch_is_off_by_default(live_run):
+    """Negative control for the two above: without the switch the same fixture completes clean, so
+    neither result is an artefact of the stub being broken."""
+    p, out, _base = live_run
+    assert p.returncode == 0 and "TOLERATED" not in p.stdout
+    summary = json.loads((out / "live-summary.json").read_text(encoding="utf-8"))
+    assert summary["tolerated_day1_failures"] == []
 
 
 @pricing_required
