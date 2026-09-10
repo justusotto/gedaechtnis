@@ -19,9 +19,30 @@ five characters or more) as prefixes, so `commit` finds `commits` and `committed
 embedding model and no network call: this must work on a laptop with no key configured, and a
 grep that finds four of five entries is worth more than a semantic search that is not installed.
 
-**Ranked by COVERAGE first.** An entry that mentions three of the question's terms beats one that
-mentions a single term thirty times — a file that merely repeats one common word is the classic
-false first hit. Ties break on weighted frequency, with a term in the heading counting triple.
+**Ranked by COVERAGE first — of the terms that DISCRIMINATE — and no entry wins on BULK.** An
+entry that mentions three of the question's terms beats one that mentions a single term thirty
+times; a file that merely repeats one common word is the classic false first hit. Two corrections,
+both measured on the recall bench against a real vault on 2026-09-10 (`eval/recall_bench/`):
+
+1. *Coverage is itself a bulk signal.* A long section contains more of a question's incidental
+   words — `add`, `look`, `files`, `once` — so it covers MORE distinct terms than the entry that
+   actually answers the question, and wins before size is ever consulted. A 665 KB queue section
+   covers every question completely; that ranking scored **0 of 30** with the right entry in the
+   hit list every time. So a term that appears in more than `COMMON_TERM_SHARE` of the entries
+   that matched at all does not count toward coverage: the stoplist is MEASURED from the corpus
+   per question, not read from a fixed list of English function words.
+2. *Frequency is a bulk signal too.* The tie-break at equal coverage is weighted frequency
+   divided by the entry's size relative to the mean matched entry (`LENGTH_NORM_B`), so the entry
+   that says it in one paragraph beats the chapter that says it in forty.
+
+`--rank flat` restores the pre-2026-09-10 order (plain coverage, raw frequency) and `--rank
+length-only` applies the size normalisation without the measured stoplist — the two controls the
+bench uses to attribute a change in the numbers to one half or the other.
+
+**Queues and outboxes are not memory.** `Pharos/` (work queues, roadmaps) and `Channels/` (lane
+notice outboxes) are excluded by default — they are append-heavy operational surfaces that restate
+the whole vault's vocabulary and answer no question about what was decided or what went wrong.
+`--include-queues` searches them anyway, for the caller who is actually asking about a queue.
 
 **Archives are searched.** A `-archive`, `-fixed` or `-resolved` sibling holds the narrative that
 the live file compressed away; excluding it would hide exactly the reasoning the caller is asking
@@ -40,7 +61,30 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
 import config  # noqa: E402  (every path is resolved there)
 
 SKIP_DIRS = {".git", "__pycache__", "node_modules", ".obsidian", ".trash"}
+# Not memory: work queues and lane notice outboxes, at any depth. Excluded unless asked for.
+NON_MEMORY_DIRS = frozenset({"Pharos", "Channels"})
 MAX_FILE_BYTES = 2_000_000
+
+# BM25's length normalisation, and the one number that tunes it: a hit's weighted frequency is
+# divided by `(1 - b) + b * size / pivot`, where `pivot` is the mean size of the entries that
+# matched. At b = 1 the division is FULL — the tie-break is term density, which is what the bench
+# measured against the failure mode (a section winning because it is long), so full is what ships;
+# 0.75 is BM25's textbook value and leaves a long section able to win on bulk. This is the constant
+# to move if the ranking is ever retuned.
+LENGTH_NORM_B = 1.0
+# Below this many characters an entry stops being "more precise" and is just short — a bare
+# heading with a subsection under it is not a better answer than the paragraph that answers the
+# question, so length stops buying rank here. Applied to each entry AND to the pivot.
+MIN_ENTRY_CHARS = 200
+# A query term found in more than this SHARE of the entries that matched anything is common in
+# this corpus, for this question, and does not count toward coverage. 0.05 is deliberately harsh:
+# on the bench, 0.05 through 0.20 all scored the same recall@3 (18 of 30 on the row corpus), and
+# the lower the threshold the fewer bytes the caller reads before the answer. The share is
+# measured over the MATCHED entries, so it needs no index and no second pass over the vault.
+COMMON_TERM_SHARE = 0.05
+# The rankings `search()` will apply. `a-prime` is the shipped one; the other two exist so a
+# measurement can attribute a change to one half of it — see the module docstring.
+RANKINGS = ("a-prime", "length-only", "flat")
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.*\S)\s*$")
 ARCHIVE_RE = re.compile(r"-(archive|fixed|resolved)$", re.I)
 
@@ -63,9 +107,10 @@ def terms(question: str) -> list[str]:
     return out
 
 
-def md_files(vault: Path):
+def md_files(vault: Path, include_queues: bool = False):
     for dirpath, dirnames, filenames in os.walk(vault):
-        dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS and not d.startswith(".git"))
+        dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS and not d.startswith(".git")
+                             and (include_queues or d not in NON_MEMORY_DIRS))
         for name in sorted(filenames):
             if name.endswith(".md"):
                 p = Path(dirpath) / name
@@ -94,27 +139,38 @@ def entries(path: Path, text: str):
         yield lines[start].strip(), "\n".join(lines[start:end]).rstrip()
 
 
-def score(heading: str, body: str, want: list[str]) -> tuple[int, int]:
-    """(distinct terms matched, weighted frequency). Coverage first — see the module docstring."""
+def patterns(want: list[str]) -> list:
+    """One compiled pattern per term, built ONCE per question rather than once per entry: whole
+    word, and a prefix for terms of five characters or more, so `commit` finds `committed`."""
+    return [re.compile(r"\b" + re.escape(t) + (r"\w*" if len(t) >= 5 else r"\b")) for t in want]
+
+
+def score(heading: str, body: str, pats: list) -> list[int]:
+    """Weighted frequency PER TERM, in the question's own term order — a term in the heading
+    counts triple. Per term, not summed, because the rank needs to know WHICH terms an entry
+    matched: how common a term is across the corpus decides whether it counts toward coverage."""
     hay, head = body.lower(), heading.lower()
-    covered = weight = 0
-    for t in want:
-        pat = re.compile(r"\b" + re.escape(t) + (r"\w*" if len(t) >= 5 else r"\b"))
-        n_body, n_head = len(pat.findall(hay)), len(pat.findall(head))
-        if n_body or n_head:
-            covered += 1
-            weight += n_body + 3 * n_head
-    return covered, weight
+    return [len(p.findall(hay)) + 3 * len(p.findall(head)) for p in pats]
 
 
-def search(vault: Path, question: str) -> tuple[list[dict], list[str]]:
+def search(vault: Path, question: str, include_queues: bool = False,
+           ranking: str = "a-prime") -> tuple[list[dict], list[str]]:
     """Every matching entry, best first. The caller decides how many to print — the count of
-    what was NOT printed is part of the answer, so it is never truncated here."""
+    what was NOT printed is part of the answer, so it is never truncated here.
+
+    `ranking="flat"` is the pre-2026-09-10 order (plain coverage, raw weighted frequency) and
+    `"length-only"` is that order with the size normalisation but without the measured stoplist.
+    Both are kept as CONTROLS: with `flat`, the bulky section that merely repeats the question's
+    terms wins again, which is what proves the new rank is what changed the order rather than some
+    other edit made the same day."""
+    if ranking not in RANKINGS:
+        raise ValueError(f"unknown ranking {ranking!r}: expected one of {', '.join(RANKINGS)}")
     want = terms(question)
     hits: list[dict] = []
     if not want:
         return hits, want
-    for path in md_files(vault):
+    pats = patterns(want)
+    for path in md_files(vault, include_queues=include_queues):
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
@@ -122,17 +178,51 @@ def search(vault: Path, question: str) -> tuple[list[dict], list[str]]:
         rel = str(path.relative_to(vault))
         archived = bool(ARCHIVE_RE.search(path.stem))
         for heading, body in entries(path, text):
-            covered, weight = score(heading, body, want)
-            if not covered:
+            tfs = score(heading, body, pats)
+            if not any(tfs):
                 continue
             hits.append({"path": rel, "heading": heading, "body": body, "archive": archived,
+                         "size": max(MIN_ENTRY_CHARS, len(body)), "tfs": tfs,
                          # An archive entry loses a hair of weight, never coverage: it should
                          # surface, but the live file is the authority when both match equally.
-                         "rank": (covered, weight - (1 if archived else 0))})
-    # Coverage, then weight, then the SHORTER entry (a precise section beats the chapter that
-    # contains it), then the path, so the order is total and the same on every machine.
+                         "weight": sum(tfs) - (1 if archived else 0)})
+    rank(hits, ranking)
+    # Coverage, then length-normalised weight, then the SHORTER entry (a precise section beats the
+    # chapter that contains it), then the path, so the order is total and the same on every machine.
     hits.sort(key=lambda h: (-h["rank"][0], -h["rank"][1], len(h["body"]), h["path"]))
     return hits, want
+
+
+def rank(hits: list[dict], ranking: str = "a-prime") -> list[dict]:
+    """Give every hit its `rank` key `(coverage, length-normalised weight)`, in place.
+
+    The pivot is the matched entries' own mean size, so the rank adapts to the corpus instead of
+    to a number chosen against one vault: in a vault of short Errata entries a 4 KB section is
+    bulky, in a vault of long Position sections it is not. The common-term share is measured the
+    same way, over the same set, for the same reason.
+
+    **The fallback matters.** In a small corpus every term is "common" — with six matched entries,
+    one occurrence is already 17% — so when NO term clears `COMMON_TERM_SHARE` for any entry, the
+    coverage term falls back to plain coverage rather than ranking every hit at zero. A corpus
+    statistic needs a corpus; below that size this behaves exactly like the old rule plus the size
+    normalisation."""
+    if not hits:
+        return hits
+    n = len(hits)
+    n_terms = len(hits[0]["tfs"])
+    pivot = max(MIN_ENTRY_CHARS, sum(h["size"] for h in hits) / n)
+    df = [sum(1 for h in hits if h["tfs"][i]) for i in range(n_terms)]
+    # `0 < d` matters: a term NO entry matched has df 0, and a rarity test that called it rare
+    # would leave every hit at zero coverage and hand the ranking to the tie-break alone.
+    rare = [0 < d <= COMMON_TERM_SHARE * n for d in df]
+    if ranking != "a-prime" or not any(rare):
+        rare = [True] * n_terms
+    for h in hits:
+        covered = sum(1 for i, tf in enumerate(h["tfs"]) if tf and rare[i])
+        norm = 1.0 if ranking == "flat" else (
+            (1 - LENGTH_NORM_B) + LENGTH_NORM_B * (h["size"] / pivot))
+        h["rank"] = (covered, h["weight"] / norm)
+    return hits
 
 
 def render(hits: list[dict], want: list[str], question: str, max_bytes: int, total: int) -> str:
@@ -166,13 +256,20 @@ def main(argv=None) -> int:
     ap.add_argument("--limit", type=int, default=6, help="entries to print (default 6)")
     ap.add_argument("--max-bytes", type=int, default=6000, help="output cap (default 6000)")
     ap.add_argument("--vault", default=None, help="search this directory instead of the configured vault")
+    ap.add_argument("--include-queues", action="store_true",
+                    help="also search Pharos/ and Channels/ (excluded by default: queues and notice "
+                         "outboxes are operational surfaces, not memory)")
+    ap.add_argument("--rank", choices=RANKINGS, default="a-prime",
+                    help="`flat` is the pre-2026-09-10 order (plain coverage, raw frequency) and "
+                         "`length-only` adds the size normalisation without the measured stoplist. "
+                         "Controls for the bench; `flat` makes the biggest section win again.")
     a = ap.parse_args(argv)
     vault = Path(os.path.expanduser(a.vault)).resolve() if a.vault else config.VAULT
     if not vault.is_dir():
         print(f"recall: no vault at {vault} — run init.py to create one.", file=sys.stderr)
         return 2
     question = " ".join(a.question)
-    hits, want = search(vault, question)
+    hits, want = search(vault, question, include_queues=a.include_queues, ranking=a.rank)
     print(render(hits[: max(1, a.limit)], want, question, max(500, a.max_bytes), len(hits)))
     return 0
 
