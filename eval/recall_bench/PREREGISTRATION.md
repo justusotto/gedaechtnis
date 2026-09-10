@@ -108,3 +108,9 @@ evidence the corrected corpus clears the bar **with the constant as measured**, 
 rank generalizes — that needs a fresh, held-out question set the constant was never tuned against.
 A pass here licenses drawing a fresh 30-question entry next, never a claim of the ≥15/30 bar as a
 settled property of the ranking.
+
+**Result, 2026-09-10 22:15 — PASSES.** recall@3 = **15 of 30** at mean bytes-to-answer **14,169.3
+B**, median rank of the expected entry 4, noise floor 0 on every metric. Full table and reading:
+`.orchestration/review/recallbench-2026-09-10/RESULT.md`, addendum of 22:15; run directory
+`.orchestration/review/recallbench-2026-09-10/run-b0-noviews-vault/`. Arm (b) index-first is NOT
+built as a consequence of this run.

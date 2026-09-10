@@ -50,7 +50,12 @@ a promise about the next version.
   is common in the corpus and divides frequency by entry size, and skips queue and notice surfaces;
   on the same 30 questions it reaches **11 of 30 at 16 KB read before the answer** (was 0 of 30 at
   1.23 MB) — the pre-registered bar was 15 of 30 at ≤ 20 KB, so it fails on hits and the index arm
-  is next; on the same entries served as one-entry-per-row files it reaches 18 of 30 at 7 KB.
+  is next; on the same entries served as one-entry-per-row files it reaches 18 of 30 at 7 KB. The
+  cause was found to be the vault's own generated log-and-views shadow (a byte-identical copy of
+  every entry, outranking the live one 28 of 30 times); excluding it by default and re-running the
+  same 30 questions under a new pre-registration entry **clears the bar: 15 of 30 at 14.2 KB**
+  (`eval/recall_bench/PREREGISTRATION.md`, 2026-09-10 22:15). Arm (b) index-first is not built as a
+  consequence.
 - **Memory eval, second live run — a negative result on the comparison that matters:** 12
   cross-session tasks (10 written by two model sessions that did not build the plugin, drawn from
   10 regions of a real vault), 4 arms, 3 samples per cell, Sonnet 5 at low effort, 192 real
