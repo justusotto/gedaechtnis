@@ -1,0 +1,1182 @@
+[
+  {
+    "id": "adv-a01-add-a",
+    "kind": "bash",
+    "command": "git -C {VAULT} add -A && git -C {VAULT} commit -m 'x' -- Global/Map.md",
+    "expect": "deny",
+    "why": "a broad `git add -A` sweeps another lane's in-flight work into your commit",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "rule": "never `git add -A`"
+  },
+  {
+    "id": "twin-a01-add-path",
+    "kind": "bash",
+    "command": "git -C {VAULT} add -- Global/Map.md && git -C {VAULT} commit -m 'x' -- Global/Map.md",
+    "expect": "allow",
+    "why": "the same intent, staged path-limited",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "twin_of": "adv-a01-add-a"
+  },
+  {
+    "id": "adv-a02-commit-dot",
+    "kind": "bash",
+    "command": "git -C {VAULT} commit -m 'x' .",
+    "expect": "deny",
+    "why": "`commit … .` is every tracked change, the exact breadth `add .` is refused for",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "rule": "breadth"
+  },
+  {
+    "id": "twin-a02-commit-path",
+    "kind": "bash",
+    "command": "git -C {VAULT} commit -m 'x' -- Global/Map.md",
+    "expect": "allow",
+    "why": "path-limited to one file",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "twin_of": "adv-a02-commit-dot"
+  },
+  {
+    "id": "adv-a03-commit-a",
+    "kind": "bash",
+    "command": "git -C {VAULT} commit -a -m 'x'",
+    "expect": "deny",
+    "why": "`-a` stages and commits every tracked change with no pathspec",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "rule": "never `git commit -a`"
+  },
+  {
+    "id": "twin-a03-commit-path",
+    "kind": "bash",
+    "command": "git -C {VAULT} commit -m 'x' -- Global/Map.md",
+    "expect": "allow",
+    "why": "path-limited",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "twin_of": "adv-a03-commit-a"
+  },
+  {
+    "id": "adv-a04-amend",
+    "kind": "bash",
+    "command": "git -C {VAULT} commit --amend --no-edit -- Global/Map.md",
+    "expect": "deny",
+    "why": "amending an Atlas commit is vault law; forward-fix with a new commit",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "rule": "NO-AMEND"
+  },
+  {
+    "id": "twin-a04-new-commit",
+    "kind": "bash",
+    "command": "git -C {VAULT} commit -m 'forward-fix' -- Global/Map.md",
+    "expect": "allow",
+    "why": "a new commit instead of rewriting history",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "twin_of": "adv-a04-amend"
+  },
+  {
+    "id": "adv-a05-backtick-dq",
+    "kind": "bash",
+    "command": "git -C {VAULT} commit -m \"fix `verdict` field\" -- Global/Map.md",
+    "expect": "deny",
+    "why": "a backtick inside a DOUBLE-quoted -m is command-substituted and silently vanishes",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "rule": "command-substituted"
+  },
+  {
+    "id": "twin-a05-backtick-sq",
+    "kind": "bash",
+    "command": "git -C {VAULT} commit -m 'fix `verdict` field' -- Global/Map.md",
+    "expect": "allow",
+    "why": "single quotes do not command-substitute",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "twin_of": "adv-a05-backtick-dq"
+  },
+  {
+    "id": "adv-a06-bare-commit",
+    "kind": "bash",
+    "command": "git -C {VAULT} commit -m 'bare commit'",
+    "expect": "deny",
+    "why": "no pathspec at all — the guarantee is missing",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "rule": "never a bare `git commit`"
+  },
+  {
+    "id": "twin-a06-pathspec-commit",
+    "kind": "bash",
+    "command": "git -C {VAULT} commit -m 'bare commit' -- Global/Map.md",
+    "expect": "allow",
+    "why": "the same message, path-limited",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "twin_of": "adv-a06-bare-commit"
+  },
+  {
+    "id": "adv-a07-dashF-no-pathspec",
+    "kind": "bash",
+    "command": "git -C {VAULT} commit -F /tmp/msgfile",
+    "expect": "deny",
+    "why": "-F does not exempt a commit from the pathspec rule",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "rule": "still needs the pathspec"
+  },
+  {
+    "id": "twin-a07-dashF-pathspec",
+    "kind": "bash",
+    "command": "git -C {VAULT} commit -F /tmp/msgfile -- Global/Map.md",
+    "expect": "allow",
+    "why": "-F with a trailing pathspec",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "twin_of": "adv-a07-dashF-no-pathspec"
+  },
+  {
+    "id": "adv-a08-rm-no-cached",
+    "kind": "bash",
+    "command": "git -C {VAULT} rm -- Global/Map.md",
+    "expect": "ask",
+    "why": "`git rm` without --cached removes the file from the working tree with no Trash",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "rule": "Defaults never delete"
+  },
+  {
+    "id": "twin-a08-rm-cached",
+    "kind": "bash",
+    "command": "git -C {VAULT} rm --cached -- Global/Map.md",
+    "expect": "allow",
+    "why": "--cached only untracks; the file stays on disk",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "twin_of": "adv-a08-rm-no-cached"
+  },
+  {
+    "id": "adv-a09-push-origin",
+    "kind": "bash",
+    "command": "git -C {VAULT} push origin main",
+    "expect": "deny",
+    "why": "only the bare `backup` remote is allowed",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "rule": "cross-machine SYNC remote"
+  },
+  {
+    "id": "twin-a09-push-backup",
+    "kind": "bash",
+    "command": "git -C {VAULT} push backup",
+    "expect": "allow",
+    "why": "the one sanctioned backup remote",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "twin_of": "adv-a09-push-origin"
+  },
+  {
+    "id": "adv-a10-reset-hard-vault",
+    "kind": "bash",
+    "command": "git -C {VAULT} reset --hard HEAD~1",
+    "expect": "deny",
+    "why": "reset --hard in the vault can destroy a sibling session's in-flight edits",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "rule": "destroys another live session's uncommitted work"
+  },
+  {
+    "id": "twin-a10-reset-hard-outside",
+    "kind": "bash",
+    "command": "git -C {OUTSIDE} reset --hard HEAD~1",
+    "expect": "allow",
+    "why": "vault law does not bind an unrelated repo",
+    "cwd": "{OUTSIDE}",
+    "session_id": "A",
+    "twin_of": "adv-a10-reset-hard-vault"
+  },
+  {
+    "id": "adv-a11-clean-f",
+    "kind": "bash",
+    "command": "git -C {VAULT} clean -f",
+    "expect": "deny",
+    "why": "clean -f can delete a sibling session's untracked work-in-progress",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "rule": "deletes untracked files another session may be writing"
+  },
+  {
+    "id": "twin-a11-status",
+    "kind": "bash",
+    "command": "git -C {VAULT} status",
+    "expect": "allow",
+    "why": "read-only, never refused",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "twin_of": "adv-a11-clean-f"
+  },
+  {
+    "id": "adv-a12-rm-cached-then-pathspec-drop",
+    "kind": "bash",
+    "command": "git -C {VAULT} rm --cached -- Global/Map.md && git -C {VAULT} commit -m x -- Global/Map.md",
+    "expect": "deny",
+    "why": "a pathspec commit after `rm --cached` re-reads the working tree and drops the staged deletion",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "rule": "DISCARDS the staged deletion"
+  },
+  {
+    "id": "twin-a12-assert-form",
+    "kind": "bash",
+    "command": "git -C {VAULT} rm --cached -- Global/Map.md; S=$(git -C {VAULT} diff --cached --name-only | sort | tr '\\n' '|'); [ \"$S\" = 'Global/Map.md|' ] || exit 9; git -C {VAULT} commit -F /tmp/m",
+    "expect": "allow",
+    "why": "the stage -> ASSERT -> commit-with-no-pathspec idiom",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "twin_of": "adv-a12-rm-cached-then-pathspec-drop"
+  },
+  {
+    "id": "adv-b01-cache-protect-on",
+    "kind": "bash",
+    "command": "rm ~/src/miner/whisper_cache.json",
+    "expect": "ask",
+    "why": "*_cache.json is user data — real money and time — when protect_everywhere is armed",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "rule": "mining caches",
+    "env": {
+      "GEDAECHTNIS_PROTECT_EVERYWHERE": "1"
+    }
+  },
+  {
+    "id": "twin-b01-cache-protect-off",
+    "kind": "bash",
+    "command": "rm ~/src/miner/whisper_cache.json",
+    "expect": "allow",
+    "why": "the same command, outside the vault, with the owner-only flag off",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "twin_of": "adv-b01-cache-protect-on"
+  },
+  {
+    "id": "adv-b02-pictures-protect-on",
+    "kind": "bash",
+    "command": "rm -rf ~/Pictures/holiday-cull",
+    "expect": "ask",
+    "why": "~/Pictures is protected when protect_everywhere is armed",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "rule": "his photographs",
+    "env": {
+      "GEDAECHTNIS_PROTECT_EVERYWHERE": "1"
+    }
+  },
+  {
+    "id": "twin-b02-pictures-protect-off",
+    "kind": "bash",
+    "command": "rm -rf ~/Pictures/holiday-cull",
+    "expect": "allow",
+    "why": "the same command, protect_everywhere off, not a vault path",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "twin_of": "adv-b02-pictures-protect-on"
+  },
+  {
+    "id": "adv-b03-trash-star",
+    "kind": "bash",
+    "command": "rm -rf ~/.Trash/*",
+    "expect": "ask",
+    "why": "the Trash is the permanent restore net and is protected regardless of any flag",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "rule": "the Trash is NEVER emptied"
+  },
+  {
+    "id": "twin-b03-trash-list",
+    "kind": "bash",
+    "command": "ls ~/.Trash",
+    "expect": "allow",
+    "why": "listing is not destructive",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "twin_of": "adv-b03-trash-star"
+  },
+  {
+    "id": "adv-b04-osascript-empty",
+    "kind": "bash",
+    "command": "osascript -e 'tell application \"Finder\" to empty the trash'",
+    "expect": "ask",
+    "why": "the AppleScript form of emptying the Trash",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "rule": "never emptied"
+  },
+  {
+    "id": "twin-b04-osascript-reveal",
+    "kind": "bash",
+    "command": "osascript -e 'tell application \"Finder\" to reveal (path to trash)'",
+    "expect": "allow",
+    "why": "reveals the Trash without touching its contents",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "twin_of": "adv-b04-osascript-empty"
+  },
+  {
+    "id": "adv-b05-rm-vault",
+    "kind": "bash",
+    "command": "rm -rf {VAULT}",
+    "expect": "ask",
+    "why": "the vault itself is always protected, with or without protect_everywhere",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "rule": "the vault and its history"
+  },
+  {
+    "id": "twin-b05-rm-outside",
+    "kind": "bash",
+    "command": "rm -rf {OUTSIDE}/dist",
+    "expect": "allow",
+    "why": "a build artifact outside the vault",
+    "cwd": "{OUTSIDE}",
+    "session_id": "A",
+    "twin_of": "adv-b05-rm-vault"
+  },
+  {
+    "id": "adv-b06-sql-drop",
+    "kind": "bash",
+    "command": "sqlite3 anki_mining.db 'DROP TABLE cards'",
+    "expect": "ask",
+    "why": "DROP/DELETE/TRUNCATE against the mining database is refused outright",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "rule": "Destructive SQL"
+  },
+  {
+    "id": "twin-b06-sql-select",
+    "kind": "bash",
+    "command": "sqlite3 anki_mining.db 'SELECT count(*) FROM cards'",
+    "expect": "allow",
+    "why": "a read-only query",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "twin_of": "adv-b06-sql-drop"
+  },
+  {
+    "id": "adv-b07-media-vault",
+    "kind": "bash",
+    "command": "rm -rf {VAULT}/Mnemosyne/UkrainianCard/media/",
+    "expect": "ask",
+    "why": "a media/ directory under the vault holds mined clips — user data",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "rule": "mined clips"
+  },
+  {
+    "id": "twin-b07-media-outside",
+    "kind": "bash",
+    "command": "rm -rf {OUTSIDE}/build/media/",
+    "expect": "allow",
+    "why": "a media/ directory outside the vault is the stranger's own to delete",
+    "cwd": "{OUTSIDE}",
+    "session_id": "A",
+    "twin_of": "adv-b07-media-vault"
+  },
+  {
+    "id": "adv-b08-anki-db-vault",
+    "kind": "bash",
+    "command": "rm {VAULT}/Mnemosyne/UkrainianCard/anki_mining.db",
+    "expect": "ask",
+    "why": "anki_mining.db under the vault is protected via the vault-path match",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "rule": "mining database"
+  },
+  {
+    "id": "twin-b08-other-db-outside",
+    "kind": "bash",
+    "command": "rm {OUTSIDE}/scratch/other.db",
+    "expect": "allow",
+    "why": "an unrelated database file outside the vault",
+    "cwd": "{OUTSIDE}",
+    "session_id": "A",
+    "twin_of": "adv-b08-anki-db-vault"
+  },
+  {
+    "id": "adv-b09-find-delete-vault",
+    "kind": "bash",
+    "command": "find {VAULT}/Speculum -name '*.md' -delete",
+    "expect": "ask",
+    "why": "any destructive command whose target names a vault path is protected, whatever the file type",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "rule": "the vault and its history"
+  },
+  {
+    "id": "twin-b09-find-delete-outside",
+    "kind": "bash",
+    "command": "find {OUTSIDE}/tmp -name '*.md' -delete",
+    "expect": "allow",
+    "why": "the same find -delete, outside the vault",
+    "cwd": "{OUTSIDE}",
+    "session_id": "A",
+    "twin_of": "adv-b09-find-delete-vault"
+  },
+  {
+    "id": "adv-c01-open-judge-html",
+    "kind": "bash",
+    "command": "open {SCRATCH}/judge.html",
+    "expect": "deny",
+    "why": "a claude.use(\"db\")-backed judge page opened as file:// strands the answer",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "rule": "keeps its answers in the ARTIFACT's own store",
+    "setup": [
+      {
+        "op": "write",
+        "path": "{SCRATCH}/judge.html",
+        "content": "<title>x</title><script>const db = await claude.use(\"db\")</script>"
+      }
+    ]
+  },
+  {
+    "id": "twin-c01-open-plain-html",
+    "kind": "bash",
+    "command": "open {SCRATCH}/plain.html",
+    "expect": "allow",
+    "why": "an ordinary page has no store to strand an answer in",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "setup": [
+      {
+        "op": "write",
+        "path": "{SCRATCH}/plain.html",
+        "content": "<title>x</title><p>hi</p>"
+      }
+    ],
+    "twin_of": "adv-c01-open-judge-html"
+  },
+  {
+    "id": "adv-c02-open-file-url",
+    "kind": "bash",
+    "command": "open file://{SCRATCH}/judge2.html",
+    "expect": "deny",
+    "why": "the file:// spelling is caught the same way as a bare path",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "rule": "keeps its answers in the ARTIFACT's own store",
+    "setup": [
+      {
+        "op": "write",
+        "path": "{SCRATCH}/judge2.html",
+        "content": "<title>x</title><div data-answer-store></div>"
+      }
+    ]
+  },
+  {
+    "id": "twin-c02-open-markdown",
+    "kind": "bash",
+    "command": "open {SCRATCH}/judge2.md",
+    "expect": "allow",
+    "why": "only .html is inspected for the answer-store marker",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "setup": [
+      {
+        "op": "write",
+        "path": "{SCRATCH}/judge2.md",
+        "content": "data-answer-store, but this is not html"
+      }
+    ],
+    "twin_of": "adv-c02-open-file-url"
+  },
+  {
+    "id": "adv-d01-mv-out",
+    "kind": "bash",
+    "command": "mv {VAULT}/Global/Patterns.md /tmp/",
+    "expect": "ask",
+    "why": "a plain `mv` whose source is in the vault is always flagged as a deletion-in-disguise",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "rule": "OUT of its place"
+  },
+  {
+    "id": "twin-d01-git-mv",
+    "kind": "bash",
+    "command": "git -C {VAULT} mv Global/Patterns.md Global/Patterns-renamed.md",
+    "expect": "allow",
+    "why": "git mv is the move-within-the-vault the rule recommends",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "twin_of": "adv-d01-mv-out"
+  },
+  {
+    "id": "adv-d02-redirect-foreign-region",
+    "kind": "bash",
+    "command": "echo x > {VAULT}/Mnemosyne/UkrainianVocab/Errata.md",
+    "expect": "deny",
+    "why": "CARD truncating VOCAB's own region file via a bash redirect",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "rule": "outside lane"
+  },
+  {
+    "id": "twin-d02-append-own-inbox",
+    "kind": "bash",
+    "command": "echo '- 2026-01-01 CARD did x' >> {VAULT}/Mnemosyne/UkrainianCard/Inbox.md",
+    "expect": "allow",
+    "why": "an append inside CARD's own declared partition",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "twin_of": "adv-d02-redirect-foreign-region"
+  },
+  {
+    "id": "adv-d03-bash-append-shared-foreign",
+    "kind": "bash",
+    "command": "echo '- 2026-01-01 CARD note' >> {VAULT}/Mnemosyne/UkrainianVocab/Inbox.md",
+    "expect": "deny",
+    "why": "a bash >> to a shared surface outside the writer's own partition is never checked or committed",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "rule": "not checked against its row grammar"
+  },
+  {
+    "id": "twin-d03-bash-append-own-file",
+    "kind": "bash",
+    "command": "echo x >> {VAULT}/Mnemosyne/UkrainianCard/Position.md",
+    "expect": "allow",
+    "why": "a bash append to a file inside the writer's own partition",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "twin_of": "adv-d03-bash-append-shared-foreign"
+  },
+  {
+    "id": "adv-d04-tee-foreign",
+    "kind": "bash",
+    "command": "echo hi | tee {VAULT}/Mnemosyne/UkrainianVocab/scratch.md",
+    "expect": "deny",
+    "why": "tee into another lane's region",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "rule": "outside lane"
+  },
+  {
+    "id": "twin-d04-tee-own",
+    "kind": "bash",
+    "command": "echo hi | tee {VAULT}/Mnemosyne/UkrainianCard/scratch.md",
+    "expect": "allow",
+    "why": "tee into the writer's own region",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "twin_of": "adv-d04-tee-foreign"
+  },
+  {
+    "id": "adv-d05-cp-foreign",
+    "kind": "bash",
+    "command": "cp {OUTSIDE}/file.txt {VAULT}/Mnemosyne/UkrainianVocab/copied.md",
+    "expect": "deny",
+    "why": "copying a file into another lane's region",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "rule": "outside lane"
+  },
+  {
+    "id": "twin-d05-cp-own",
+    "kind": "bash",
+    "command": "cp {OUTSIDE}/file.txt {VAULT}/Mnemosyne/UkrainianCard/copied.md",
+    "expect": "allow",
+    "why": "copying a file into the writer's own region",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "twin_of": "adv-d05-cp-foreign"
+  },
+  {
+    "id": "adv-e01-foreign-region",
+    "kind": "edit",
+    "tool_name": "Edit",
+    "file_path": "{VAULT}/Speculum/Position.md",
+    "old_string": "foreign state",
+    "new_string": "foreign state\n- CARD edited this",
+    "expect": "deny",
+    "why": "CARD editing Speculum, which it never declared",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "rule": "outside lane"
+  },
+  {
+    "id": "twin-e01-own-region",
+    "kind": "edit",
+    "tool_name": "Edit",
+    "file_path": "{VAULT}/Mnemosyne/UkrainianCard/Errata.md",
+    "old_string": "- an entry",
+    "new_string": "- an entry\n- one more",
+    "expect": "allow",
+    "why": "CARD editing its own declared region",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "twin_of": "adv-e01-foreign-region"
+  },
+  {
+    "id": "adv-e02-unknown-lane",
+    "kind": "edit",
+    "tool_name": "Edit",
+    "file_path": "{VAULT}/Global/Map.md",
+    "old_string": "# Map",
+    "new_string": "# Map\nedited",
+    "expect": "deny",
+    "why": "a session with no resolvable lane, in deny mode",
+    "cwd": "{NOLANE}",
+    "session_id": "A",
+    "rule": "NO `.atlas-lane` marker"
+  },
+  {
+    "id": "twin-e02-known-lane",
+    "kind": "edit",
+    "tool_name": "Edit",
+    "file_path": "{VAULT}/Global/Map.md",
+    "old_string": "# Map",
+    "new_string": "# Map\nedited",
+    "expect": "allow",
+    "why": "the same edit from a session whose repo declares a lane",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "twin_of": "adv-e02-unknown-lane"
+  },
+  {
+    "id": "adv-e03-not-an-append",
+    "kind": "edit",
+    "tool_name": "Edit",
+    "file_path": "{VAULT}/Pharos/queues/regions/ukrainian-vocab.md",
+    "old_string": "- [ ] `q:VO-2026-01-01-SEED-1` seed row\n",
+    "new_string": "- [ ] `q:VO-2026-01-01-CHANGED-1` replaced row\n",
+    "expect": "deny",
+    "why": "CARD replacing VOCAB's queue row in place instead of appending a new one",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "rule": "not a pure append"
+  },
+  {
+    "id": "twin-e03-valid-append",
+    "kind": "edit",
+    "tool_name": "Edit",
+    "file_path": "{VAULT}/Pharos/queues/regions/ukrainian-vocab.md",
+    "old_string": "- [ ] `q:VO-2026-01-01-SEED-1` seed row\n",
+    "new_string": "- [ ] `q:VO-2026-01-01-SEED-1` seed row\n- [ ] `q:VO-2026-01-01-NEW-1` new row\n",
+    "expect": "allow",
+    "why": "a well-formed row appended after the existing tail",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "twin_of": "adv-e03-not-an-append"
+  },
+  {
+    "id": "adv-e04-malformed-append",
+    "kind": "edit",
+    "tool_name": "Edit",
+    "file_path": "{VAULT}/Pharos/queues/regions/ukrainian-vocab.md",
+    "old_string": "- [ ] `q:VO-2026-01-01-SEED-1` seed row\n",
+    "new_string": "- [ ] `q:VO-2026-01-01-SEED-1` seed row\nnot a checkbox row at all\n",
+    "expect": "deny",
+    "why": "the appended line does not match the queue row grammar",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "rule": "not a well-formed queue row"
+  },
+  {
+    "id": "twin-e04-well-formed-append",
+    "kind": "edit",
+    "tool_name": "Edit",
+    "file_path": "{VAULT}/Pharos/queues/regions/ukrainian-vocab.md",
+    "old_string": "- [ ] `q:VO-2026-01-01-SEED-1` seed row\n",
+    "new_string": "- [ ] `q:VO-2026-01-01-SEED-1` seed row\n- [ ] `q:VO-2026-01-01-GOOD-1` good row\n",
+    "expect": "allow",
+    "why": "a checkbox-shaped row appended instead",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "twin_of": "adv-e04-malformed-append"
+  },
+  {
+    "id": "adv-e05-roster-foreign-block",
+    "kind": "edit",
+    "tool_name": "Edit",
+    "file_path": "{VAULT}/Global/fleet-roster.md",
+    "old_string": "repo: repo-vocab",
+    "new_string": "repo: repo-vocab\npath: Mnemosyne/UkrainianVocab/extra",
+    "expect": "deny",
+    "why": "CARD inserting a row inside VOCAB's roster block",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "rule": "own block"
+  },
+  {
+    "id": "twin-e05-roster-own-block",
+    "kind": "edit",
+    "tool_name": "Edit",
+    "file_path": "{VAULT}/Global/fleet-roster.md",
+    "old_string": "repo: repo-card",
+    "new_string": "repo: repo-card\npath: Mnemosyne/UkrainianCard/extra",
+    "expect": "allow",
+    "why": "CARD inserting a row inside its own roster block",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "twin_of": "adv-e05-roster-foreign-block"
+  },
+  {
+    "id": "adv-e06-umbrella-shared-overwrite",
+    "kind": "edit",
+    "tool_name": "Edit",
+    "file_path": "{VAULT}/Mnemosyne/Canon.md",
+    "old_string": "- a shared decision",
+    "new_string": "completely different content, not extending the tail",
+    "expect": "deny",
+    "why": "CARD replacing the umbrella-shared Canon.md instead of appending",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "rule": "not a pure append"
+  },
+  {
+    "id": "twin-e06-umbrella-shared-append",
+    "kind": "edit",
+    "tool_name": "Edit",
+    "file_path": "{VAULT}/Mnemosyne/Canon.md",
+    "old_string": "- a shared decision\n",
+    "new_string": "- a shared decision\n- one more shared decision\n",
+    "expect": "allow",
+    "why": "a genuine append to the umbrella-shared file",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "twin_of": "adv-e06-umbrella-shared-overwrite"
+  },
+  {
+    "id": "adv-f01-concilium-stem",
+    "kind": "write",
+    "tool_name": "Write",
+    "file_path": "{VAULT}/Concilium/Melchior/Position.md",
+    "content": "whatever",
+    "expect": "deny",
+    "why": "a vault role stem under Concilium leaks into fleet machinery",
+    "cwd": "{VAULT}",
+    "session_id": "A",
+    "rule": "STEM RULE"
+  },
+  {
+    "id": "twin-f01-concilium-native",
+    "kind": "write",
+    "tool_name": "Write",
+    "file_path": "{VAULT}/Concilium/Melchior/Positio.md",
+    "content": "whatever",
+    "expect": "allow",
+    "why": "the Concilium-native name for the same content",
+    "cwd": "{VAULT}",
+    "session_id": "A",
+    "twin_of": "adv-f01-concilium-stem"
+  },
+  {
+    "id": "adv-f02-concilium-stem-canon",
+    "kind": "write",
+    "tool_name": "Write",
+    "file_path": "{VAULT}/Concilium/Melchior/Canon.md",
+    "content": "whatever",
+    "expect": "deny",
+    "why": "Canon is a vault role stem",
+    "cwd": "{VAULT}",
+    "session_id": "A",
+    "rule": "STEM RULE"
+  },
+  {
+    "id": "twin-f02-concilium-native-lex",
+    "kind": "write",
+    "tool_name": "Write",
+    "file_path": "{VAULT}/Concilium/Melchior/Lex.md",
+    "content": "whatever",
+    "expect": "allow",
+    "why": "the Concilium-native name",
+    "cwd": "{VAULT}",
+    "session_id": "A",
+    "twin_of": "adv-f02-concilium-stem-canon"
+  },
+  {
+    "id": "adv-g01-decisions-filename",
+    "kind": "write",
+    "tool_name": "Write",
+    "file_path": "{VAULT}/Mnemosyne/UkrainianCard/Decisions.md",
+    "content": "whatever",
+    "expect": "deny",
+    "why": "\"Decisions\" is Canon's English display name",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "rule": "display names are never file names"
+  },
+  {
+    "id": "twin-g01-canon-filename",
+    "kind": "write",
+    "tool_name": "Write",
+    "file_path": "{VAULT}/Mnemosyne/UkrainianCard/Canon.md",
+    "content": "whatever",
+    "expect": "allow",
+    "why": "the real stem, a new file, inside the writer's own partition",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "twin_of": "adv-g01-decisions-filename"
+  },
+  {
+    "id": "adv-g02-fehler-filename",
+    "kind": "write",
+    "tool_name": "Write",
+    "file_path": "{VAULT}/Mnemosyne/UkrainianCard/Fehler.md",
+    "content": "whatever",
+    "expect": "deny",
+    "why": "\"Fehler\" is Errata's German display name, checked regardless of the active language",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "rule": "display names are never file names"
+  },
+  {
+    "id": "twin-g02-aporia-filename",
+    "kind": "write",
+    "tool_name": "Write",
+    "file_path": "{VAULT}/Mnemosyne/UkrainianCard/Aporia.md",
+    "content": "whatever",
+    "expect": "allow",
+    "why": "the real stem for a different role, a new file",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "twin_of": "adv-g02-fehler-filename"
+  },
+  {
+    "id": "adv-g03-status-filename",
+    "kind": "write",
+    "tool_name": "Write",
+    "file_path": "{VAULT}/Mnemosyne/UkrainianCard/Status.md",
+    "content": "whatever",
+    "expect": "deny",
+    "why": "\"Status\" is Position's English display name",
+    "cwd": "{VAULT}",
+    "session_id": "A",
+    "rule": "display names are never file names"
+  },
+  {
+    "id": "twin-g03-position-edit",
+    "kind": "edit",
+    "tool_name": "Edit",
+    "file_path": "{VAULT}/Speculum/Position.md",
+    "old_string": "- foreign state",
+    "new_string": "- foreign state\n- edited",
+    "expect": "allow",
+    "why": "editing the real stem is untouched by the naming door",
+    "cwd": "{VAULT}",
+    "session_id": "A",
+    "twin_of": "adv-g03-status-filename"
+  },
+  {
+    "id": "adv-h01-whole-write-own",
+    "kind": "write",
+    "tool_name": "Write",
+    "file_path": "{VAULT}/Mnemosyne/UkrainianCard/Errata.md",
+    "content": "whole file replacement\n",
+    "expect": "deny",
+    "why": "a whole-file Write over an existing, non-empty role file, even one's own",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "rule": "another session may have changed this file"
+  },
+  {
+    "id": "twin-h01-edit-own",
+    "kind": "edit",
+    "tool_name": "Edit",
+    "file_path": "{VAULT}/Mnemosyne/UkrainianCard/Errata.md",
+    "old_string": "- an entry",
+    "new_string": "- an entry\n- appended by Edit",
+    "expect": "allow",
+    "why": "Edit is anchored and re-checked against the live file",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "twin_of": "adv-h01-whole-write-own"
+  },
+  {
+    "id": "adv-h02-whole-write-foreign",
+    "kind": "write",
+    "tool_name": "Write",
+    "file_path": "{VAULT}/Mnemosyne/UkrainianVocab/Errata.md",
+    "content": "whole file replacement\n",
+    "expect": "deny",
+    "why": "D1 fires before the partition check even runs",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "rule": "another session may have changed this file"
+  },
+  {
+    "id": "twin-h02-whole-write-new-file",
+    "kind": "write",
+    "tool_name": "Write",
+    "file_path": "{VAULT}/Mnemosyne/UkrainianCard/Praxis.md",
+    "content": "whole file replacement\n",
+    "expect": "allow",
+    "why": "D1 exempts a file that does not exist yet",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "twin_of": "adv-h02-whole-write-foreign"
+  },
+  {
+    "id": "adv-h03-whole-write-queue-non-append",
+    "kind": "write",
+    "tool_name": "Write",
+    "file_path": "{VAULT}/Pharos/queues/regions/ukrainian-card.md",
+    "content": "totally unrelated content, not extending the seed row\n",
+    "expect": "deny",
+    "why": "a whole-file Write to a shared queue file whose content does not extend the current tail",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "rule": "another session may have changed this file"
+  },
+  {
+    "id": "twin-h03-whole-write-queue-append",
+    "kind": "write",
+    "tool_name": "Write",
+    "file_path": "{VAULT}/Pharos/queues/regions/ukrainian-card.md",
+    "content": "- [ ] `q:CA-2026-01-01-SEED-1` seed row\n- [ ] `q:CA-2026-01-01-NEW-1` new row\n",
+    "expect": "allow",
+    "why": "a whole-file Write whose content is the old content plus a new well-formed row",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "twin_of": "adv-h03-whole-write-queue-non-append"
+  },
+  {
+    "id": "adv-i01-fresh-foreign-lock",
+    "kind": "edit",
+    "tool_name": "Edit",
+    "file_path": "{VAULT}/Mnemosyne/UkrainianCard/Errata.md",
+    "old_string": "- an entry",
+    "new_string": "- an entry\n- x",
+    "expect": "deny",
+    "why": "a fresh lock held by another session",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "rule": "retry the same edit",
+    "setup": [
+      {
+        "op": "plant_lock",
+        "path": "{VAULT}/Mnemosyne/UkrainianCard/Errata.md",
+        "session_id": "OTHER",
+        "age_s": 1
+      }
+    ]
+  },
+  {
+    "id": "twin-i01-own-fresh-lock",
+    "kind": "edit",
+    "tool_name": "Edit",
+    "file_path": "{VAULT}/Mnemosyne/UkrainianCard/Errata.md",
+    "old_string": "- an entry",
+    "new_string": "- an entry\n- x",
+    "expect": "allow",
+    "why": "a fresh lock held by THIS session is never a blocker",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "setup": [
+      {
+        "op": "plant_lock",
+        "path": "{VAULT}/Mnemosyne/UkrainianCard/Errata.md",
+        "session_id": "A",
+        "age_s": 1
+      }
+    ],
+    "twin_of": "adv-i01-fresh-foreign-lock"
+  },
+  {
+    "id": "adv-i02-fresh-foreign-lock-2",
+    "kind": "edit",
+    "tool_name": "Edit",
+    "file_path": "{VAULT}/Mnemosyne/UkrainianCard/Inbox.md",
+    "old_string": "# Inbox",
+    "new_string": "# Inbox\nx",
+    "expect": "deny",
+    "why": "a second file, same mechanism",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "rule": "retry the same edit",
+    "setup": [
+      {
+        "op": "plant_lock",
+        "path": "{VAULT}/Mnemosyne/UkrainianCard/Inbox.md",
+        "session_id": "OTHER",
+        "age_s": 2
+      }
+    ]
+  },
+  {
+    "id": "twin-i02-stale-foreign-lock-takeover",
+    "kind": "edit",
+    "tool_name": "Edit",
+    "file_path": "{VAULT}/Mnemosyne/UkrainianCard/Inbox.md",
+    "old_string": "# Inbox",
+    "new_string": "# Inbox\nx",
+    "expect": "allow",
+    "why": "a lock older than the 10s TTL is taken over, not honoured",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "setup": [
+      {
+        "op": "plant_lock",
+        "path": "{VAULT}/Mnemosyne/UkrainianCard/Inbox.md",
+        "session_id": "OTHER",
+        "age_s": 11
+      }
+    ],
+    "twin_of": "adv-i02-fresh-foreign-lock-2"
+  },
+  {
+    "id": "adv-i03-bash-redirect-locked",
+    "kind": "bash",
+    "command": "echo x >> {VAULT}/Mnemosyne/UkrainianCard/Position.md",
+    "expect": "deny",
+    "why": "a bash redirect is bound by the same per-file mutex as Edit",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "rule": "Design",
+    "setup": [
+      {
+        "op": "plant_lock",
+        "path": "{VAULT}/Mnemosyne/UkrainianCard/Position.md",
+        "session_id": "OTHER",
+        "age_s": 1
+      }
+    ]
+  },
+  {
+    "id": "twin-i03-bash-redirect-unlocked",
+    "kind": "bash",
+    "command": "echo x >> {VAULT}/Mnemosyne/UkrainianCard/Errata.md",
+    "expect": "allow",
+    "why": "a different, unlocked file is untouched by the mutex",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "twin_of": "adv-i03-bash-redirect-locked"
+  },
+  {
+    "id": "adv-j01-ledger-malformed",
+    "kind": "edit",
+    "tool_name": "Edit",
+    "file_path": "{VAULT}/Channels/ledger/2026-01.tsv",
+    "old_string": "N-2026-01-01-0001\t2026-01-01T00:00:00\tCARD\t*\tfact\t-\tseed row\n",
+    "new_string": "N-2026-01-01-0001\t2026-01-01T00:00:00\tCARD\t*\tfact\t-\tseed row\nno sequence id, just text\n",
+    "expect": "deny",
+    "why": "the appended line skips the N-YYYY-MM-DD-#### sequence id",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "rule": "not a well-formed ledger row"
+  },
+  {
+    "id": "twin-j01-ledger-well-formed",
+    "kind": "edit",
+    "tool_name": "Edit",
+    "file_path": "{VAULT}/Channels/ledger/2026-01.tsv",
+    "old_string": "N-2026-01-01-0001\t2026-01-01T00:00:00\tCARD\t*\tfact\t-\tseed row\n",
+    "new_string": "N-2026-01-01-0001\t2026-01-01T00:00:00\tCARD\t*\tfact\t-\tseed row\nN-2026-01-01-0002\t2026-01-01T00:05:00\tCARD\tVOCAB\tnotice\t-\thello\n",
+    "expect": "allow",
+    "why": "a correctly keyed, tab-separated ledger row",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "twin_of": "adv-j01-ledger-malformed"
+  },
+  {
+    "id": "adv-j02-inbox-malformed",
+    "kind": "edit",
+    "tool_name": "Edit",
+    "file_path": "{VAULT}/Mnemosyne/UkrainianVocab/Inbox.md",
+    "old_string": "# Inbox",
+    "new_string": "# Inbox\njust a note, no date or lane prefix",
+    "expect": "deny",
+    "why": "an inbox append missing the `- YYYY-MM-DD LANE` prefix",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "rule": "not a well-formed inbox row"
+  },
+  {
+    "id": "twin-j02-inbox-well-formed",
+    "kind": "edit",
+    "tool_name": "Edit",
+    "file_path": "{VAULT}/Mnemosyne/UkrainianVocab/Inbox.md",
+    "old_string": "# Inbox",
+    "new_string": "# Inbox\n- 2026-01-01 CARD did x",
+    "expect": "allow",
+    "why": "a correctly prefixed inbox row appended cross-lane",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "twin_of": "adv-j02-inbox-malformed"
+  },
+  {
+    "id": "adv-j03-artifacts-index-malformed",
+    "kind": "edit",
+    "tool_name": "Edit",
+    "file_path": "{VAULT}/Pharos/artifacts-index.md",
+    "old_string": "Prefix every id with the publish date.\n",
+    "new_string": "Prefix every id with the publish date.\nnot a table row\n",
+    "expect": "deny",
+    "why": "the appended line is not the pipe-table row shape",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "rule": "not a well-formed artifacts-index row"
+  },
+  {
+    "id": "twin-j03-artifacts-index-well-formed",
+    "kind": "edit",
+    "tool_name": "Edit",
+    "file_path": "{VAULT}/Pharos/artifacts-index.md",
+    "old_string": "Prefix every id with the publish date.\n",
+    "new_string": "Prefix every id with the publish date.\n| 2026-01-01 | A title | `12345678-1234-1234-1234-123456789012` |\n",
+    "expect": "allow",
+    "why": "a correctly shaped artifacts-index table row",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "twin_of": "adv-j03-artifacts-index-malformed"
+  },
+  {
+    "id": "adv-j04-roster-malformed",
+    "kind": "edit",
+    "tool_name": "Edit",
+    "file_path": "{VAULT}/Global/fleet-roster.md",
+    "old_string": "repo: repo-card",
+    "new_string": "repo: repo-card\nthis is not a roster row",
+    "expect": "deny",
+    "why": "the appended line is neither a comment nor a lane/repo/path line",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "rule": "not a well-formed roster row"
+  },
+  {
+    "id": "twin-j04-roster-well-formed",
+    "kind": "edit",
+    "tool_name": "Edit",
+    "file_path": "{VAULT}/Global/fleet-roster.md",
+    "old_string": "repo: repo-card",
+    "new_string": "repo: repo-card\npath: Mnemosyne/UkrainianCard/x",
+    "expect": "allow",
+    "why": "a well-formed `path:` row inside the writer's own block",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "twin_of": "adv-j04-roster-malformed"
+  },
+  {
+    "id": "adv-j05-ledger-bash-append",
+    "kind": "bash",
+    "command": "echo 'no sequence id, just plain text' >> {VAULT}/Channels/ledger/2026-01.tsv",
+    "expect": "deny",
+    "why": "any bash >> to the ledger is refused, even content that would otherwise be well-formed",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "rule": "not checked against its row grammar"
+  },
+  {
+    "id": "twin-j05-ledger-py-sanctioned",
+    "kind": "bash",
+    "command": "python3 {TOOLROOT}/ledger.py append --from CARD --to '*' --kind fact 'hello'",
+    "expect": "allow",
+    "why": "the sanctioned path: gate.py cannot see a vault write inside this subprocess call",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "twin_of": "adv-j05-ledger-bash-append"
+  }
+]
