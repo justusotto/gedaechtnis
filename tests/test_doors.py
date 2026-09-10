@@ -413,3 +413,97 @@ def test_hooks_json_is_valid_and_every_command_file_it_names_exists(world):
                 assert (HOOKS / script).is_file(), f"{event}: {script} does not exist"
                 named.append((event, entry.get("matcher"), script))
     assert ("PostToolUse", "Bash", "chore.py") in named, "the Bash release chore is not wired"
+
+
+# ================================================ the `# GENERATED` door (council 2 closure §1) ==
+# The shadow's generated views are rebuilt from the memory log on every run, so an edit made IN a
+# view is gone at the next generation with no error anywhere. The door turns it into a row instead.
+# Keyed on the FILE'S OWN FIRST LINE, never on a directory — so every test below writes the marker
+# into the file rather than relying on where it sits.
+
+GEN = "# GENERATED sha256:0123456789abcdef\n"
+
+
+def test_generated_view_refuses_an_edit_and_says_to_append_a_row(world):
+    """POSITIVE control. PROVES the door fires on the shape that loses work, and that the deny is
+    ACTIONABLE: a refusal a model cannot act on just costs the turn."""
+    f = world["vault"] / ".gedaechtnis" / "views" / "Mnemosyne" / "UkrainianCard" / "Canon.md"
+    f.parent.mkdir(parents=True)
+    f.write_text(GEN + "\n## A locked decision\n\nbody\n")
+    res = gate_write(world, f, tool="Edit", old="body", new="edited body")
+    assert decision(res) == "deny"
+    r = reason(res)
+    assert "is a GENERATED view" in r
+    assert "logstore.py append" in r and "views.py" in r
+
+
+def test_generated_view_refuses_a_whole_file_write_too(world):
+    """POSITIVE control, second tool. D1 already refuses most whole-file Writes, so this asserts the
+    GENERATED reason specifically — otherwise a green here would prove only that D1 still works."""
+    f = world["vault"] / ".gedaechtnis" / "views" / "Global" / "Errata.md"
+    f.parent.mkdir(parents=True)
+    f.write_text(GEN + "\n## A lesson\n\nbody\n")
+    res = gate_write(world, f, tool="Write", content="whatever\n")
+    assert decision(res) == "deny"
+    assert "is a GENERATED view" in reason(res)
+
+
+def test_generated_view_refuses_a_bash_redirect(world):
+    """POSITIVE control, Bash half. A shell redirect clobbers the file without ever touching the
+    Edit/Write path, so the door has to exist twice or it does not exist."""
+    f = world["vault"] / ".gedaechtnis" / "views" / "Global" / "Patterns.md"
+    f.parent.mkdir(parents=True)
+    f.write_text(GEN + "\n## A pattern\n\nbody\n")
+    res = bash(world, f"echo hi > {f}")
+    assert decision(res) == "deny"
+    assert "is a GENERATED view" in reason(res)
+
+
+def test_generated_view_refuses_sed_i(world):
+    """POSITIVE control, the in-place-edit spelling — the one that leaves no shell redirect to see."""
+    f = world["vault"] / ".gedaechtnis" / "views" / "Global" / "Position.md"
+    f.parent.mkdir(parents=True)
+    f.write_text(GEN + "\n## State\n\nbody\n")
+    res = bash(world, f"sed -i '' s/body/other/ {f}")
+    assert decision(res) == "deny"
+    assert "is a GENERATED view" in reason(res)
+
+
+def test_a_plain_vault_file_in_the_lane_is_still_allowed(world):
+    """NEGATIVE control — the half that proves the door reads the first LINE and not the vault. A
+    live role file inside the lane's own partition must edit exactly as before; a door that fired
+    here would stop the shadow being additive."""
+    f = region(world) / "Canon.md"
+    f.write_text("---\ntype: canon\n---\n\n## A locked decision\n\nbody\n")
+    res = gate_write(world, f, tool="Edit", old="body", new="edited body")
+    assert res is None, reason(res)
+
+
+def test_a_file_under_views_WITHOUT_the_marker_is_allowed(world):
+    """NEGATIVE control, the sharper one: same directory, no first line. If this were refused the
+    rule would really be "anything under .gedaechtnis/", which goes stale the moment the views move
+    — and the council left their final home to a later ruling."""
+    f = world["vault"] / ".gedaechtnis" / "views" / "notes.md"
+    f.parent.mkdir(parents=True)
+    f.write_text("# just a file\n\nbody\n")
+    res = gate_write(world, f, tool="Edit", old="body", new="edited body")
+    assert res is None, reason(res)
+
+
+def test_a_file_that_merely_MENTIONS_generated_later_is_allowed(world):
+    """NEGATIVE control against the sloppy implementation — a substring search over the whole file
+    would refuse every Errata entry that quotes the marker while explaining the door."""
+    f = region(world) / "Errata.md"
+    f.write_text("# Errata\n\n## The GENERATED door\n\nA view starts with `# GENERATED sha256:…`.\n")
+    res = gate_write(world, f, tool="Edit", old="A view", new="Such a view")
+    assert res is None, reason(res)
+
+
+def test_reading_a_generated_view_is_never_touched(world):
+    """NEGATIVE control on the VERB: the door refuses writes, and a `cat` of the same file must pass
+    — a refusal on reads would make the views unusable as the evidence they exist to be."""
+    f = world["vault"] / ".gedaechtnis" / "views" / "Global" / "Errata.md"
+    f.parent.mkdir(parents=True)
+    f.write_text(GEN + "\n## A lesson\n\nbody\n")
+    res = bash(world, f"cat {f}")
+    assert res is None, reason(res)
