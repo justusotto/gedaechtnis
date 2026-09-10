@@ -55,6 +55,13 @@ Recognised JSON keys, all optional:
                       stem itself, unchanged. The disk keeps the stem either way (`Canon.md`
                       never becomes `Decisions.md`) — this only changes what a session CALLS
                       the file. env GEDAECHTNIS_LANGUAGE wins.
+  context_economy     non-blocking PreToolUse notices (see hooks/context_economy.py): re-reading
+                      a file whose content has not changed since this session last read it, and
+                      reading a large file whole without offset/limit. Both always ALLOW — the
+                      notice rides `additionalContext`, nothing is ever refused (default true).
+                      env GEDAECHTNIS_CONTEXT_ECONOMY.
+  big_read_kb         the size, in KB, above which a whole-file read (no offset/limit) gets the
+                      big-read notice (default 24). env GEDAECHTNIS_BIG_READ_KB.
 
 Example ~/.claude/gedaechtnis/config.json:
 
@@ -224,6 +231,23 @@ def flag(key: str, default: bool = False) -> bool:
         return env.strip() not in ("", "0", "false", "no")
     v = _load().get(key)
     return bool(v) if v is not None else default
+
+
+def big_read_kb() -> int:
+    """KB threshold above which a whole-file Read/cat with no offset/limit gets the BIG-READ
+    notice (hooks/context_economy.py). Re-read from disk on every call, same reasoning as
+    `declined()`/`language()`. GEDAECHTNIS_BIG_READ_KB wins; default 24."""
+    env = os.environ.get("GEDAECHTNIS_BIG_READ_KB")
+    if env is not None and env.strip():
+        try:
+            return int(env.strip())
+        except ValueError:
+            pass
+    v = _load().get("big_read_kb")
+    try:
+        return int(v) if v is not None else 24
+    except (TypeError, ValueError):
+        return 24
 
 
 def language() -> str:

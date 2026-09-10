@@ -18,13 +18,14 @@ from __future__ import annotations
 import re, sys, os
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import (read_input, deny, ask, log, expand, under, vault_rel, lane_for, path_in_partition,
+from common import (read_input, deny, ask, allow, log, expand, under, vault_rel, lane_for, path_in_partition,
                     VAULT, HOME, STATE, ROLE_STEMS, guarded, shared_surface, pure_append,
                     note_pre_exists, clear_pre_exists, created_paths, take_filelock, release_filelock)
 import fnmatch
 import shlex
 import config as _cfg
 import names
+import context_economy
 
 EV = "PreToolUse"
 
@@ -553,6 +554,11 @@ def do_bash(inp: dict) -> None:
             else:
                 deny(EV, r)
             return
+    # No door fired: a non-blocking context-economy notice, if this command reads a single file
+    # via cat/head/tail/sed -n (context_economy.py). Always ALLOW — see that module's docstring.
+    note = context_economy.bash_notice(inp)
+    if note:
+        allow(EV, note)
 
 
 # ------------------------------------------------- the display-name-as-filename door (§6.3) ----
@@ -805,10 +811,23 @@ def do_agent(inp: dict) -> None:
               "\"haiku\"` per the task→model table (judge-class = sonnet medium; build = opus medium). (Global/Map §Models)"))
 
 
+def do_read(inp: dict) -> None:
+    """PreToolUse Read: a non-blocking context-economy notice, or nothing (context_economy.py)."""
+    ti = inp.get("tool_input") or {}
+    fp = ti.get("file_path") or ""
+    if not fp:
+        return
+    p = expand(fp, inp.get("cwd"))
+    partial = ti.get("offset") is not None or ti.get("limit") is not None
+    note = context_economy.check_read(inp.get("session_id", "-"), p, partial=partial)
+    if note:
+        allow(EV, note)
+
+
 def main() -> None:
     which = sys.argv[1] if len(sys.argv) > 1 else ""
     inp = read_input()
-    {"bash": do_bash, "write": do_write, "agent": do_agent}.get(which, lambda _i: None)(inp)
+    {"bash": do_bash, "write": do_write, "agent": do_agent, "read": do_read}.get(which, lambda _i: None)(inp)
 
 
 if __name__ == "__main__":
