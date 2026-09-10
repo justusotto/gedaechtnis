@@ -42,6 +42,14 @@ a promise about the next version.
   files only (5 of 30). A length-aware ranking is pre-registered as arm (a′) in
   `eval/recall_bench/PREREGISTRATION.md` with its bar stated before it is built. The number is
   bad and it is the point of having the bench.
+- **Memory eval, first live run:** three cross-session tasks, three arms, Sonnet 5 at low
+  effort, 18 real sessions, $0.55 in total. Sessions with the plugin answered **3 of 3** day-N
+  tasks from what day 1 had recorded; a plain prior-decisions file in the prompt answered 2 of 3;
+  no memory answered 1 of 3, and that one was a checker weakness, not a memory result. The
+  no-memory arm failed the positive-control task, as it must. One sample per cell, tasks written
+  by the plugin's own builders, and the middle arm is not Claude Code's own memory loader, which
+  cannot be pointed at a fixture. Details and limits in `eval/memory_eval/` and the run's
+  report; nothing here is a percentage.
 - **In real use on one machine:** 12 denies, 10 session starts and 9 partition warnings in the
   live logs since 2026-09-08, from ordinary sessions, none of them staged.
 
@@ -55,8 +63,9 @@ a promise about the next version.
 
 **Not yet measured**
 
-- Whether the plugin makes a session better at a cross-session task than no memory, or than
-  Claude Code's own auto-memory (`eval/memory_eval/`, three arms, tasks written, not run).
+- Whether the plugin beats Claude Code's own auto-memory: the live eval's middle arm cannot load
+  it, so that comparison is still open. And whether 3 of 3 holds at more than one sample per
+  cell, on tasks not written by the builders.
 - Whether the entry index finds the right answer in fewer bytes than the grep recall
   (`eval/recall_bench/`, pre-registered, not run).
 - The write-partition door is in WARN, not DENY, until the partition log has been read over a
