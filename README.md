@@ -39,6 +39,11 @@ a promise about the next version.
   the live file. This is the first of seven checkpoints (days 0, 1, 2, 4, 7, 14, 30) for the
   design that may replace hand-edited role files with a log and generated views. It runs beside
   the vault and writes nothing into it.
+- **The shadow's COLD build, on a clone of the vault (2026-09-10):** with all 74 live role files
+  physically moved out of the vault, **71 of 72 views rebuilt from the log alone came back
+  byte-identical**; the one that differs is the one orphan row (a heading the live file has since
+  dropped), and it is counted rather than hidden. Session-written rows are **0 of 9** against hand
+  edits in the same window — the writer landed the same day, so that ratio measures nothing yet.
 - **Recall bench, grep arm, first real run:** 30 held-out questions drawn by a separate model
   session from a real vault of 988 files. **recall@3 was 0 of 30**, and the expected entry sat
   at median rank 30 while sections of 665 KB took the top places. The cause is the ranking rule
