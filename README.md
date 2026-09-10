@@ -42,6 +42,11 @@ a promise about the next version.
   files only (5 of 30). A length-aware ranking is pre-registered as arm (a′) in
   `eval/recall_bench/PREREGISTRATION.md` with its bar stated before it is built. The number is
   bad and it is the point of having the bench.
+- **Recall bench, arm (a′), the length-aware rank, same day:** the ranking now discounts a term that
+  is common in the corpus and divides frequency by entry size, and skips queue and notice surfaces;
+  on the same 30 questions it reaches **11 of 30 at 16 KB read before the answer** (was 0 of 30 at
+  1.23 MB) — the pre-registered bar was 15 of 30 at ≤ 20 KB, so it fails on hits and the index arm
+  is next; on the same entries served as one-entry-per-row files it reaches 18 of 30 at 7 KB.
 - **Memory eval, first live run:** three cross-session tasks, three arms, Sonnet 5 at low
   effort, 18 real sessions, $0.55 in total. Sessions with the plugin answered **3 of 3** day-N
   tasks from what day 1 had recorded; a plain prior-decisions file in the prompt answered 2 of 3;
