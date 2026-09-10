@@ -190,6 +190,56 @@ def entry_flags(heading: str, body: str, ordinal: int) -> list:
     return flags
 
 
+def entries_of_file(region: str, stem: str, path: Path) -> tuple:
+    """-> ([entry dict], [(rel, why)]) for ONE role file: the per-file half of `scan`.
+
+    Split out so the session writer (hooks/chore.py) can log the entries of the single file a
+    session just edited without walking the vault — one parser, one definition of "an entry",
+    used by the sweep and by the live writer alike. Two spellings of that would make the src
+    column measure the difference between two parsers instead of the difference between two
+    writers.
+    """
+    unparsed = []
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as e:
+        return [], [(str(path), f"unreadable: {e}")]
+    pre, blocks = split_entries(text)
+    if not blocks and text.strip():
+        unparsed.append((str(path), "no `##`/`###` heading and no top-level `- ` bullet"))
+    elif joined(pre, blocks) != text:
+        unparsed.append((str(path), "entries do not re-join byte-identical (missing final newline?)"))
+    out = []
+    for n, (heading, body) in enumerate(blocks):
+        out.append({"region": region, "stem": stem, "kind": KIND_OF_STEM[stem],
+                    "heading": heading, "body": body,
+                    "flags": entry_flags(heading, body, n), "path": str(path)})
+    return out, unparsed
+
+
+def log_one_file(region: str, stem: str, path: Path, src: str = "session") -> dict:
+    """Append a row for every entry of ONE live role file the log does not already carry.
+
+    This is the SESSION WRITE PATH (council 3, K-3): `hooks/chore.py` calls it the moment a session's
+    Edit or Write to a role file lands, so the edit becomes a row in the same act rather than
+    waiting for the next importer sweep. Rows are stamped `src=session`, and because `src` is not
+    part of the identity hash, an entry the importer already swept is a no-op here — the column
+    counts who got there FIRST, which is exactly the cut-over numerator.
+
+    -> {'entries', 'appended': [row ids], 'unparsed'}. Reads the file, appends rows; it never
+    writes a vault role file, same as every other function in this module.
+    """
+    found, bad = entries_of_file(region, stem, path)
+    known = logstore._index(logstore.all_rows())
+    appended = []
+    for e in found:
+        rid, wrote = logstore.append(e["region"], e["kind"], e["stem"], e["heading"], e["body"],
+                                     e["flags"], known=known, src=src)
+        if wrote:
+            appended.append(rid)
+    return {"entries": len(found), "appended": appended, "unparsed": bad}
+
+
 def scan(vault: Path = None) -> dict:
     """-> {'entries': [...], 'per_stem': {...}, 'unparsed': [...]} — a pure read of the vault."""
     vault = vault or VAULT
@@ -198,27 +248,15 @@ def scan(vault: Path = None) -> dict:
     unparsed = []
     for region, d in regions(vault):
         for stem, p in role_files(d):
-            try:
-                text = p.read_text(encoding="utf-8")
-            except (OSError, UnicodeDecodeError) as e:
-                unparsed.append((str(p.relative_to(vault)), f"unreadable: {e}"))
-                continue
-            pre, blocks = split_entries(text)
-            if not blocks and text.strip():
-                # not an error by itself — a stub role file has no entries — but say so out loud
-                unparsed.append((str(p.relative_to(vault)),
-                                 "no `##`/`###` heading and no top-level `- ` bullet"))
-            elif joined(pre, blocks) != text:
-                # LOUD, never normalised: the only shape that reaches here is a file whose last line
-                # is a heading with no terminating newline, and a shadow that silently added that
-                # byte would be reporting its own formatter as fidelity.
-                unparsed.append((str(p.relative_to(vault)),
-                                 "entries do not re-join byte-identical (missing final newline?)"))
-            for n, (heading, body) in enumerate(blocks):
-                entries.append({"region": region, "stem": stem, "kind": KIND_OF_STEM[stem],
-                                "heading": heading, "body": body,
-                                "flags": entry_flags(heading, body, n),
-                                "path": str(p.relative_to(vault))})
+            # `unparsed` is LOUD, never normalised: the shape that reaches it is a file whose last
+            # line is a heading with no terminating newline, and a shadow that silently added that
+            # byte would be reporting its own formatter as fidelity.
+            found, bad = entries_of_file(region, stem, p)
+            for _path, why in bad:
+                unparsed.append((str(p.relative_to(vault)), why))
+            for e in found:
+                e["path"] = str(p.relative_to(vault))
+                entries.append(e)
                 per_stem[stem] += 1
     return {"entries": entries, "per_stem": per_stem, "unparsed": unparsed}
 
@@ -231,7 +269,8 @@ def run(dry_run: bool = False, vault: Path = None) -> dict:
         known = logstore._index(logstore.all_rows())
         for e in found["entries"]:
             _rid, wrote = logstore.append(e["region"], e["kind"], e["stem"], e["heading"],
-                                          e["body"], e["flags"], known=known)
+                                          e["body"], e["flags"], known=known,
+                                          src="importer")
             if wrote:
                 appended += 1
             else:

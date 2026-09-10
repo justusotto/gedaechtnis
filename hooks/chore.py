@@ -2,8 +2,9 @@
 """chore.py — PostToolUse doors that DO the chore the rule was asking for.
 
     python3 chore.py artifact   # after an Artifact publish: index row in Pharos/artifacts-index.md, committed
-    python3 chore.py write      # after Edit/Write in the vault: RECORD THE TOUCH · queue trailing
-                                #   newline · SHA tokens resolve? · change-everywhere lookup
+    python3 chore.py write      # after Edit/Write in the vault: RECORD THE TOUCH · APPEND THE
+                                #   MEMORY-LOG ROW (src=session) · queue trailing newline ·
+                                #   SHA tokens resolve? · change-everywhere lookup
 
 A chore never denies (the act already happened). It repairs what is mechanically repairable and
 reports the rest as `additionalContext` — factual statements, never orders.
@@ -12,6 +13,7 @@ from __future__ import annotations
 import fcntl, json, os, re, subprocess, sys, time
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))   # logstore/importer, imported LAZILY below
 from common import (read_input, context, log, expand, under, vault_rel, fleet_repos, VAULT, STATE, guarded,
                     lane_for, path_in_partition, region_of_repo, repo_root_of, shared_surface,
                     record_touched, was_created, record_created, release_filelock, ROLE_STEMS)
@@ -163,6 +165,77 @@ def map_row_for(p: Path, rel: str) -> str | None:
             + (f", committed {sha}." if sha else "."))
 
 
+# ---- the SESSION WRITE PATH: an edit to a live role file becomes a log row in the same act ----
+# Council 3 (K-3, 2026-09-10) closed 5–0 on the diagnosis that the shadow's day-0 number measured
+# the IMPORTER's round trip and nothing else, because "the session write path is unbuilt". This is
+# that path. It is a PostToolUse chore rather than a CLI or a Stop-time sweep for the reason
+# commit.py already states about committing: a memory that has to be recorded by hand is a memory
+# that is half-written. A CLI would need a session to remember it; a Stop sweep would record the
+# edit long after the turn that made it, and would miss the file a later edit in the same session
+# rewrote. The chore fires on the write itself, with the file on disk and the parser that the
+# importer uses.
+#
+# TWO REFUSALS, stated because both are load-bearing:
+#   * it appends NOTHING when the log does not already exist — the writer follows the importer and
+#     never precedes it, so a machine with no shadow does not grow one out of a role-file edit;
+#   * it only ever APPENDS. It cannot rewrite or remove a row, so a session that deletes an entry
+#     leaves an ORPHAN row, which `views.py` renders and counts rather than hiding.
+#
+# THE RESIDUAL, named: a role file written by something other than Edit/Write — a shell redirect, a
+# script the session ran — has no PostToolUse Edit hook and is not recorded here. It is picked up
+# by the next importer sweep as `src=importer`, so it is not lost; it is only not attributed.
+
+def role_log_target(rel: str) -> tuple[str | None, str | None]:
+    """(region, stem) when this vault-relative path is a LIVE role file the log covers, else (None, None).
+
+    Same admission rule as `importer.regions()`/`role_files()` — a Map.md beside it, no hidden part,
+    not one of the skipped top-level folders, not a `-archive`/`-fixed`/`-resolved` sidecar — but
+    decided from the ONE path rather than by walking the vault, because this runs on every write."""
+    p = Path(rel)
+    if p.suffix != ".md":
+        return None, None
+    stem = p.stem
+    try:
+        import logstore                                  # noqa: PLC0415 — lazy: see the note above
+    except ImportError:
+        return None, None
+    if stem not in logstore.STEMS:
+        return None, None
+    parts = p.parts
+    if any(x.startswith(".") for x in parts):
+        return None, None                                # `.gedaechtnis/views/…/Position.md` is not live
+    if parts and parts[0] in ("Concilium", "Pharos", "Channels", "Workflows", "Limen"):
+        return None, None
+    d = VAULT / p.parent
+    if not (d / "Map.md").is_file():
+        return None, None                                # a folder with no Map is not a region
+    region = str(p.parent) if str(p.parent) != "." else "."
+    return region, stem
+
+
+def log_session_edit(rel: str, p: Path) -> str | None:
+    """Append `src=session` rows for the entries of a role file this session just wrote."""
+    region, stem = role_log_target(rel)
+    if not region:
+        return None
+    try:
+        import logstore, importer                        # noqa: PLC0415,E401 — lazy, see above
+        if not logstore.log_files():
+            return None                                  # no shadow on this machine: nothing to do
+        res = importer.log_one_file(region, stem, p, src="session")
+    except Exception as e:                               # a chore never takes a session down
+        log("chore", f"session-row\t{rel}\tFAILED {type(e).__name__}: {e}")
+        return None
+    n = len(res["appended"])
+    log("chore", f"session-row\t{rel}\tentries={res['entries']}\tappended={n}")
+    if not n:
+        return None
+    return (f"Memory log: {n} row(s) appended from {rel}, stamped `src=session` "
+            f"({res['entries']} entr{'y' if res['entries'] == 1 else 'ies'} in the file; the rest "
+            "were already in the log). The log is append-only — a heading you removed or renamed "
+            "stays as an ORPHAN row and is counted by `gedaechtnis/views.py`.")
+
+
 HEX = re.compile(r"`([0-9a-f]{7,12})`")
 
 
@@ -206,6 +279,9 @@ def do_write(inp: dict) -> None:
     # half-written file, which is the one collision class actually measured in this vault.
     record_touched(sid, rel)
     notes = []
+    row_note = log_session_edit(rel, p)
+    if row_note:
+        notes.append(row_note)
     if was_created(p):                           # consumes the gate's marker either way
         # The CREATED SET, on the same evidence and in the same breath as the Map row: a file this
         # session made has no sibling's content in it, so D1 lets this session Write it whole.

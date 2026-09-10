@@ -274,10 +274,25 @@ def live_counter(start: dict) -> dict:
             else:
                 hand.append({k: cur[k] for k in ("sha", "author", "subject")})
     rows_since = [x for x in logstore.all_rows() if x["ts"][:10] >= since]
+    session_rows = [x for x in rows_since if x["src"] == "session"]
+    # THE CUT-OVER RATIO, exactly as council 3 wrote it (K-3): session-written rows ÷ (those + hand
+    # edits). Its two halves are DIFFERENT UNITS — the numerator counts log ROWS, the denominator
+    # adds vault COMMITS — and that is said here rather than quietly aggregated, because a share
+    # whose denominator nobody can name is how this fleet has been misled before. One commit can
+    # carry several edited entries and one edited entry can span several commits; the ratio is a
+    # direction of travel, never a measurement of coverage.
+    denom = len(session_rows) + len(hand)
     return {"since": since, "range": rng or f"--since={since}",
             "commits_in_window": in_window,
             "hand_edit_commits": len(hand), "automated_commits_excluded": automated,
             "rows_appended": len(rows_since), "hand_edits": hand[:20], "error": err,
+            "session_rows": len(session_rows),
+            "session_share": (len(session_rows) / denom) if denom else 0.0,
+            "session_share_denominator": denom,
+            "session_share_population": (
+                f"{len(session_rows)} log row(s) stamped src=session in the window ÷ (those + "
+                f"{len(hand)} vault COMMIT(s) in the window touching a live role file). Two "
+                "different units, as the council's own formula is written: rows over rows+commits."),
             "population": (f"vault commits in {rng or 'since ' + since} that touch any of "
                            f"{{{','.join(STEMS)}}}.md (sidecars included), out of "
                            f"{in_window} commit(s) in the window")}
@@ -438,7 +453,10 @@ def render(res: dict) -> str:
              "(counted with no path filter — a zero on the line below is only readable against this)")
     L.append(f"- Hand-edit commits to live role files: **{c['hand_edit_commits']}** "
              f"({c['automated_commits_excluded']} automated `{AUTOMATED_COMMITTER}` commit(s) excluded)")
-    L.append(f"- Rows appended to the log in the same window: **{c['rows_appended']}**")
+    L.append(f"- Rows appended to the log in the same window: **{c['rows_appended']}**, of which "
+             f"**{c['session_rows']}** were written by a live session (`src=session`)")
+    L.append(f"- **Cut-over ratio: {pct(c['session_share'])}** "
+             f"({c['session_rows']}/{c['session_share_denominator']}) — {c['session_share_population']}")
     if c.get("error"):
         L.append(f"- NOTE: git reported `{c['error']}`")
     for h in c["hand_edits"]:

@@ -483,3 +483,235 @@ def test_a_commit_to_a_GENERATED_VIEW_is_not_a_hand_edit(mini):
     c = score(mini)["counter"]
     assert c["commits_in_window"] == 1, "the window must contain the commit"
     assert c["hand_edit_commits"] == 0, "but a generated view is not a live role file"
+
+
+# ============================================ the `src` column and the SESSION WRITE PATH =======
+# Council 3, K-3 (2026-09-10): day 0 measured the importer's round trip, because the session write
+# path did not exist. These are the controls for the path that now does.
+
+HOOKS = ROOT / "hooks"
+
+
+def chore_write(mini, path: Path, sid: str = "S1", cwd: str = None):
+    """Drive the REAL PostToolUse chore the way a session's Edit does — never a stub. A test that
+    faked the hook's input would prove the appender works and nothing about whether it is reached."""
+    p = subprocess.run([sys.executable, str(HOOKS / "chore.py"), "write"],
+                       input=json.dumps({"cwd": cwd or str(mini["tmp"]), "session_id": sid,
+                                         "tool_name": "Edit",
+                                         "tool_input": {"file_path": str(path)}}),
+                       capture_output=True, text=True, env=mini["env"], timeout=120)
+    assert p.returncode == 0, p.stderr
+    return p.stdout
+
+
+def log_rows(mini, **filt) -> list:
+    args = ["read", "--json"]
+    for k, v in filt.items():
+        args += [f"--{k}", v]
+    return json.loads(run("logstore.py", *args, env=mini["env"]))
+
+
+def test_a_row_written_before_the_src_column_reads_as_importer(mini):
+    """POSITIVE control on the backward-compatible grammar. Every row in the live log was written
+    without the ninth field; if an 8-field row stopped parsing, the shadow's whole history would
+    read as an empty log and every count would silently become a fact about the parser."""
+    sys.path.insert(0, str(ROOT))
+    import logstore                                     # noqa: E402 — pure function, no vault read
+    line = ("Alpha·2026-09-01T00:00:00·deadbeef\t2026-09-01T00:00:00\tAlpha\tdecision\tCanon"
+            "\t## One\tbody\tord=0")
+    d = logstore.parse_line(line)
+    assert d["src"] == "importer" and d["src_explicit"] is False
+    d9 = logstore.parse_line(line + "\tsession")
+    assert d9["src"] == "session" and d9["src_explicit"] is True
+    for k in ("id", "ts", "region", "kind", "stem", "heading", "body", "flags"):
+        assert d[k] == d9[k], k                          # the eight original fields do not move
+
+
+def test_the_grammar_refuses_an_unknown_src(mini):
+    """NEGATIVE control on the same boundary: `src` is a closed set, or the cut-over ratio's
+    numerator is whatever anybody felt like typing."""
+    p = subprocess.run([sys.executable, str(ROOT / "logstore.py"), "append", "--region", "Alpha",
+                        "--kind", "decision", "--stem", "Canon", "--heading", "## x",
+                        "--src", "telepathy"],
+                       capture_output=True, text=True, env=mini["env"], timeout=60)
+    assert p.returncode != 0
+    assert "invalid choice" in (p.stdout + p.stderr)
+
+
+def test_migrate_stamps_the_column_without_changing_one_row_of_content(mini):
+    """POSITIVE control on the migration's one promise. Every row's id, hash, heading, body and
+    flags must survive byte-identical — a migration that re-minted an id would break every
+    reference to it, and `check` would go green on the new ids and tell nobody."""
+    run("importer.py", env=mini["env"])
+    log = next((mini["vault"] / ".gedaechtnis" / "log").glob("*.tsv"))
+    lines = log.read_text(encoding="utf-8").splitlines()
+    original = [l for l in lines if not l.startswith("#")]
+    # strip the column back off, as if the log had been written before it existed
+    stripped = [l if l.startswith("#") else l.rsplit("\t", 1)[0] for l in lines]
+    log.write_text("\n".join(stripped) + "\n", encoding="utf-8")
+    out = run("logstore.py", "migrate", env=mini["env"])
+    assert f"stamped src=importer on {EXPECTED_ENTRIES} row(s)" in out
+    after = [l for l in log.read_text(encoding="utf-8").splitlines() if not l.startswith("#")]
+    assert after == original, "a migrated row must be the original line plus `\\timporter`"
+    assert run("logstore.py", "check", env=mini["env"]).strip().endswith(f"{EXPECTED_ENTRIES} row(s)")
+
+
+def test_migrate_is_idempotent_and_a_second_run_stamps_nothing(mini):
+    """NEGATIVE control on the same act — a migration that ran twice and appended `importer` twice
+    would corrupt every row it had already fixed, and the second run is the one nobody watches."""
+    run("importer.py", env=mini["env"])
+    log = next((mini["vault"] / ".gedaechtnis" / "log").glob("*.tsv"))
+    lines = log.read_text(encoding="utf-8").splitlines()
+    log.write_text("\n".join(l if l.startswith("#") else l.rsplit("\t", 1)[0] for l in lines) + "\n",
+                   encoding="utf-8")
+    run("logstore.py", "migrate", env=mini["env"])
+    text = log.read_text(encoding="utf-8")
+    second = run("logstore.py", "migrate", env=mini["env"])
+    assert "stamped src=importer on 0 row(s)" in second
+    assert log.read_text(encoding="utf-8") == text
+    run("logstore.py", "check", env=mini["env"])
+
+
+def test_the_migration_backup_is_not_read_back_as_log(mini):
+    """NEGATIVE control on the backup's NAME. `all_rows` globs `*.tsv`; a backup called `<x>.tsv`
+    would be parsed as a second copy of the whole log and every count would double, silently."""
+    run("importer.py", env=mini["env"])
+    log_dir = mini["vault"] / ".gedaechtnis" / "log"
+    log = next(log_dir.glob("*.tsv"))
+    lines = log.read_text(encoding="utf-8").splitlines()
+    log.write_text("\n".join(l if l.startswith("#") else l.rsplit("\t", 1)[0] for l in lines) + "\n",
+                   encoding="utf-8")
+    run("logstore.py", "migrate", env=mini["env"])
+    backups = [p for p in log_dir.iterdir() if ".pre-srccol-" in p.name]
+    assert len(backups) == 1, [p.name for p in log_dir.iterdir()]
+    assert not backups[0].name.endswith(".tsv")
+    assert len(log_rows(mini)) == EXPECTED_ENTRIES
+
+
+def test_a_session_edit_to_a_role_file_appends_a_src_session_row(mini):
+    """POSITIVE control on the whole point of K-3: an edit a SESSION makes becomes a row in the same
+    act, stamped as the session's — not waiting for the next importer sweep."""
+    run("importer.py", env=mini["env"])
+    canon = mini["vault"] / "Alpha" / "Canon.md"
+    canon.write_text(canon.read_text(encoding="utf-8") + "## Four\n\nWritten by a session.\n",
+                     encoding="utf-8")
+    chore_write(mini, canon)
+    sess = log_rows(mini, src="session")
+    assert len(sess) == 1, [r["heading"] for r in sess]
+    assert sess[0]["heading"] == "## Four" and sess[0]["region"] == "Alpha"
+    assert sess[0]["body"] == "\nWritten by a session.\n"
+    assert len(log_rows(mini, src="importer")) == EXPECTED_ENTRIES
+
+
+def test_the_session_row_wins_the_identity_so_a_later_import_does_not_re_stamp_it(mini):
+    """POSITIVE control on the reason `src` is OUT of the content hash. The importer sweeping the
+    same entry afterwards must be a NO-OP: two rows for one entry disagreeing about who wrote it is
+    exactly the ambiguity the cut-over ratio cannot survive."""
+    run("importer.py", env=mini["env"])
+    canon = mini["vault"] / "Alpha" / "Canon.md"
+    canon.write_text(canon.read_text(encoding="utf-8") + "## Four\n\nSession first.\n",
+                     encoding="utf-8")
+    chore_write(mini, canon)
+    res = import_json(mini)
+    assert res["appended"] == 0, "the importer must find nothing new to add"
+    assert len(log_rows(mini, src="session")) == 1
+    assert len(log_rows(mini, src="importer")) == EXPECTED_ENTRIES
+
+
+def test_the_writer_ignores_a_file_that_is_not_a_live_role_file(mini):
+    """NEGATIVE control, three shapes at once: a Map (not one of the five stems), a generated view
+    (under `.gedaechtnis/`, and it carries the stem name perfectly well), and a role file in a
+    folder with no Map.md (not a region). Any one of them appending a row would make the log a
+    record of file writes rather than of memory."""
+    run("importer.py", env=mini["env"])
+    run("views.py", env=mini["env"])
+    before = len(log_rows(mini))
+    for p in (mini["vault"] / "Alpha" / "Map.md",
+              mini["vault"] / ".gedaechtnis" / "views" / "Alpha" / "Canon.md",
+              mini["vault"] / "Alpha" / "notes" / "Canon.md"):
+        chore_write(mini, p)
+    assert len(log_rows(mini)) == before
+    assert log_rows(mini, src="session") == []
+
+
+def test_the_writer_appends_nothing_when_no_log_exists_yet(mini):
+    """NEGATIVE control on the ordering rule: the session writer FOLLOWS the importer and never
+    precedes it. A machine with no shadow must not grow one out of an ordinary role-file edit —
+    a first row minted by a hook would have no start pin, no counts and no owner behind it."""
+    canon = mini["vault"] / "Alpha" / "Canon.md"
+    canon.write_text(canon.read_text(encoding="utf-8") + "## Four\n\nNo log yet.\n",
+                     encoding="utf-8")
+    chore_write(mini, canon)
+    assert not (mini["vault"] / ".gedaechtnis" / "log").exists()
+
+
+# ============================================ orphan rows (M-03) ================================
+
+def views_json(mini) -> dict:
+    return json.loads(run("views.py", "--json", env=mini["env"]))
+
+
+def test_a_clean_shadow_reports_zero_orphans(mini):
+    """NEGATIVE control on the orphan count — it must be able to be ZERO, or the number is noise.
+    Every row came from a live entry, so nothing is orphaned."""
+    run("importer.py", env=mini["env"])
+    assert views_json(mini)["orphan_rows"] == 0
+
+
+def test_a_row_whose_heading_left_the_live_file_STILL_RENDERS_and_is_counted(mini):
+    """POSITIVE control on M-03, the defect council 3 named at `views.py:78`: before this, a row
+    whose heading is absent from the live file could never be drawn, so a deleted entry was carried
+    by the log and invisible in the view — and the fidelity number could not see it either."""
+    run("importer.py", env=mini["env"])
+    canon = mini["vault"] / "Alpha" / "Canon.md"
+    canon.write_text(canon.read_text(encoding="utf-8")
+                     .replace("### Three\n\nA sub-heading is an entry too.\n", ""), encoding="utf-8")
+    res = views_json(mini)
+    assert res["orphan_rows"] == 1, res["skipped"]
+    view = (mini["vault"] / ".gedaechtnis" / "views" / "Alpha" / "Canon.md").read_text(encoding="utf-8")
+    assert "A sub-heading is an entry too." in view, "the orphan row must RENDER, not vanish"
+    assert view.rstrip().endswith("A sub-heading is an entry too."), "appended at the end"
+
+
+def test_an_orphan_makes_the_view_differ_from_the_live_file_and_that_is_reported(mini):
+    """POSITIVE control on the COST of the M-03 fix, stated rather than smoothed over: a view
+    carrying an entry the live file has dropped is no longer byte-identical to it, so the whole-file
+    identity count falls by exactly one. A generator that hid the orphan to protect the number would
+    be reporting its own silence as fidelity."""
+    run("importer.py", env=mini["env"])
+    run("views.py", env=mini["env"])
+    clean = score(mini)["whole_file"]
+    canon = mini["vault"] / "Alpha" / "Canon.md"
+    canon.write_text(canon.read_text(encoding="utf-8")
+                     .replace("### Three\n\nA sub-heading is an entry too.\n", ""), encoding="utf-8")
+    run("views.py", env=mini["env"])
+    after = score(mini)["whole_file"]
+    assert after["identical"] == clean["identical"] - 1, after
+    assert after["differing"][0]["view"].endswith("Canon.md")
+
+
+def test_the_cut_over_ratio_counts_session_rows_over_rows_plus_hand_edits(mini):
+    """POSITIVE control on the number the council asked for, WITH its denominator. It is deliberately
+    two units — rows over rows-plus-commits — and the report has to say so, because a share whose
+    denominator nobody can name is how this fleet has been misled before."""
+    v = mini["vault"]
+    git(v, "init", "-q")
+    git(v, "-c", "user.name=t", "-c", "user.email=t@x", "add", "-A")
+    git(v, "-c", "user.name=t", "-c", "user.email=t@x", "commit", "-q", "-m", "seed")
+    run("importer.py", env=mini["env"])
+    run("views.py", env=mini["env"])
+    zero = score(mini)["counter"]
+    assert zero["session_rows"] == 0 and zero["session_share"] == 0.0     # the 0/… the council named
+
+    canon = v / "Alpha" / "Canon.md"
+    canon.write_text(canon.read_text(encoding="utf-8") + "## Four\n\nby a session.\n", encoding="utf-8")
+    chore_write(mini, canon)
+    git(v, "-c", "user.name=h", "-c", "user.email=human@x", "add", "--", "Alpha/Canon.md")
+    git(v, "-c", "user.name=h", "-c", "user.email=human@x", "commit", "-q", "-m", "a hand edit")
+    run("views.py", env=mini["env"])
+    c = score(mini)["counter"]
+    assert c["session_rows"] == 1
+    assert c["hand_edit_commits"] == 1
+    assert c["session_share_denominator"] == 2
+    assert c["session_share"] == pytest.approx(0.5)
+    assert "different units" in c["session_share_population"]
