@@ -53,8 +53,9 @@ limit is comfortable — only their harness skeletons are written.** That means,
 
 - Both benches run END TO END against a **stub** `claude` (`stub_claude.py`) that returns a
   deterministic canned answer for a known prompt and refuses everything else. **No model call, no
-  network, anywhere in this folder**, unless you deliberately point `--claude` at a real binary —
-  which nothing here does by default, and which is not yet a supported, tested path.
+  network, anywhere in this folder**, unless you deliberately point `--claude` at a real binary.
+  For `memory_eval` that path is now BUILT and TESTED (`--live`, below); it is never taken by
+  default and never by a test. `recall_bench` still has no live path.
 - `recall_bench`'s arm (a), grep, calls the real `recall.py` — that part is genuinely measuring
   something. Arms (b) index-first and (c) link-walk are not built; asking for them raises
   `NotImplementedError` naming exactly what is missing, rather than silently falling back to arm
@@ -104,10 +105,48 @@ answer length over 4 — the same rough heuristic used across this fleet's cost 
 real usage report). `eval/_stub_client.py` is the one place both benches parse that line, so a
 future switch to a real `--claude` needs its usage-parsing written once, not twice.
 
-## Wiring in a live arm later (not done here)
+## The live arm (`memory_eval/run.py --live`) — real `claude -p`, real money
 
-`--claude`/`--model` exist on both `run.py` scripts precisely so this does not require a rewrite:
-point `--claude` at a real launcher that accepts `--model PROMPT` and (ideally) prints its own
-`USAGE_JSON:` line in the same shape, or extend `_stub_client.call_claude`'s fallback (it already
-degrades to "answer = whole stdout, tokens unmeasured" when no such line appears, rather than
-crashing). That is a deliberate, reviewed act — not a flag flip — per R7.
+```sh
+python3 eval/memory_eval/run.py --live \
+    --claude "$(command -v claude)" \
+    --model claude-sonnet-5 --effort low \
+    --max-turns 8 --ceiling-usd 10 \
+    --out /tmp/memory-eval-live --base /tmp/memory-eval-fixtures
+```
+
+Each of the 18 steps (3 arms × 3 tasks × 2 days) is its OWN `claude -p` process, launched the way
+`scripts/concilium.py convene` launches a seat — prompt immediately after the boolean `-p` so no
+variadic flag swallows it, `stdin=DEVNULL`, `--setting-sources project` (so the launching user's
+`~/.claude` CLAUDE.md chain and user-level plugins are not loaded), `--permission-prompts none`,
+`--output-format json`, `--max-turns` pinned, never `--resume`. `--model` and `--effort` are
+required and pinned on every call; a missing one refuses.
+
+Money:
+
+- **Every call is priced** by IMPORTING `PRICE`/`price_usage` from `scripts/concilium.py`
+  (`--pricing PATH` or `$GEDAECHTNIS_PRICING_PY` to point elsewhere). An unknown model refuses
+  BEFORE the first call — an unpriceable run does not start.
+- **`--ceiling-usd` is a total across the whole run.** Once the sum of priced calls reaches it, the
+  next call is refused, the run stops and prints what it completed. It is a value checkpoint, not a
+  kill switch: re-evaluate and widen it rather than treating a stop as a verdict.
+- **Every call's whole result JSON** lands in `<out>/<arm>-<task>-<day>.usage.json` next to the
+  argv it was launched with; `<out>/live-summary.json` totals the run.
+
+**What a live run cannot isolate** (read the module docstring in full before quoting any number):
+the `automemory` arm measures *a plain prior-decisions file in the prompt*, NOT Claude Code's own
+auto-memory loader — a live session's memory directory is decided by its cwd and cannot be pointed
+at a fixture; the default `--claude-home real` keeps the user's HOME so the CLI can authenticate,
+so isolation rests on `--setting-sources project` plus the fixture's `GEDAECHTNIS_*` environment;
+the `gedaechtnis` arm's hooks are staged into the fixture repo's own `.claude/settings.json`
+(because `--setting-sources project` drops user-level plugins), which is the shipped hook set but
+not a normally-installed plugin; and there is exactly ONE sample per (arm, task).
+
+`gedaechtnis/tests/test_memory_eval_live.py` proves the whole path — pinning, DEVNULL, usage
+files, the ceiling, the unknown-model refusal, and that `--dry-run` is unchanged by any of it —
+against the stub, with a positive AND a negative control each. No test spends anything.
+
+`recall_bench` has no live path: point its `--claude` at a real launcher that accepts
+`--model PROMPT` and prints a `USAGE_JSON:` line, or extend `_stub_client.call_claude`'s fallback
+(it already degrades to "answer = whole stdout, tokens unmeasured" rather than crashing). That is a
+deliberate, reviewed act — not a flag flip — per R7.
