@@ -23,6 +23,10 @@ ROOT = Path(__file__).resolve().parents[1]
 # The mini-vault, entry by entry. 3 Canon + 2 Errata + 2 Position + 1 Aporia = EXPECTED_ENTRIES.
 EXPECTED_ENTRIES = 8
 EXPECTED_PER_STEM = {"Canon": 3, "Errata": 2, "Patterns": 0, "Position": 2, "Aporia": 1}
+# Two SHAPE rows (`# PREAMBLE` + `# ORDER`) per role file that has entries: Alpha/Canon,
+# Alpha/Errata, Alpha/Position, Global/Aporia. They are rows in the log and not entries, so every
+# count below says which of the two it means.
+EXPECTED_SHAPE_ROWS = 8
 
 
 def write(p: Path, text: str) -> None:
@@ -392,7 +396,8 @@ def test_the_superseded_row_is_still_in_the_log(mini):
     run("importer.py", env=mini["env"])
     log = next((mini["vault"] / ".gedaechtnis" / "log").glob("*.tsv")).read_text(encoding="utf-8")
     assert "NEVER do the thing." in log and "corrected." in log
-    assert run("logstore.py", "check", env=mini["env"]).strip().endswith(f"{EXPECTED_ENTRIES + 1} row(s)")
+    assert run("logstore.py", "check", env=mini["env"]).strip().endswith(
+        f"{EXPECTED_ENTRIES + 1 + EXPECTED_SHAPE_ROWS} row(s)")
 
 
 # ================================================== the live counter (git-backed) ===============
@@ -511,6 +516,14 @@ def log_rows(mini, **filt) -> list:
     return json.loads(run("logstore.py", *args, env=mini["env"]))
 
 
+def entry_rows(mini, **filt) -> list:
+    """The rows that are ENTRIES — shape rows filtered out. Kept separate everywhere, because a
+    count that silently mixed the two would make "how many memories" mean "how many memories plus
+    twice the number of files"."""
+    return [r for r in log_rows(mini, **filt)
+            if not ({"preamble", "order"} & set(r["flags"]))]
+
+
 def test_a_row_written_before_the_src_column_reads_as_importer(mini):
     """POSITIVE control on the backward-compatible grammar. Every row in the live log was written
     without the ninth field; if an 8-field row stopped parsing, the shadow's whole history would
@@ -550,10 +563,11 @@ def test_migrate_stamps_the_column_without_changing_one_row_of_content(mini):
     stripped = [l if l.startswith("#") else l.rsplit("\t", 1)[0] for l in lines]
     log.write_text("\n".join(stripped) + "\n", encoding="utf-8")
     out = run("logstore.py", "migrate", env=mini["env"])
-    assert f"stamped src=importer on {EXPECTED_ENTRIES} row(s)" in out
+    assert f"stamped src=importer on {EXPECTED_ENTRIES + EXPECTED_SHAPE_ROWS} row(s)" in out
     after = [l for l in log.read_text(encoding="utf-8").splitlines() if not l.startswith("#")]
     assert after == original, "a migrated row must be the original line plus `\\timporter`"
-    assert run("logstore.py", "check", env=mini["env"]).strip().endswith(f"{EXPECTED_ENTRIES} row(s)")
+    assert run("logstore.py", "check", env=mini["env"]).strip().endswith(
+        f"{EXPECTED_ENTRIES + EXPECTED_SHAPE_ROWS} row(s)")
 
 
 def test_migrate_is_idempotent_and_a_second_run_stamps_nothing(mini):
@@ -585,7 +599,7 @@ def test_the_migration_backup_is_not_read_back_as_log(mini):
     backups = [p for p in log_dir.iterdir() if ".pre-srccol-" in p.name]
     assert len(backups) == 1, [p.name for p in log_dir.iterdir()]
     assert not backups[0].name.endswith(".tsv")
-    assert len(log_rows(mini)) == EXPECTED_ENTRIES
+    assert len(log_rows(mini)) == EXPECTED_ENTRIES + EXPECTED_SHAPE_ROWS
 
 
 def test_a_session_edit_to_a_role_file_appends_a_src_session_row(mini):
@@ -596,11 +610,16 @@ def test_a_session_edit_to_a_role_file_appends_a_src_session_row(mini):
     canon.write_text(canon.read_text(encoding="utf-8") + "## Four\n\nWritten by a session.\n",
                      encoding="utf-8")
     chore_write(mini, canon)
-    sess = log_rows(mini, src="session")
+    sess = entry_rows(mini, src="session")
     assert len(sess) == 1, [r["heading"] for r in sess]
     assert sess[0]["heading"] == "## Four" and sess[0]["region"] == "Alpha"
     assert sess[0]["body"] == "\nWritten by a session.\n"
-    assert len(log_rows(mini, src="importer")) == EXPECTED_ENTRIES
+    assert len(entry_rows(mini, src="importer")) == EXPECTED_ENTRIES
+    # and the file's SHAPE moved with it: a new heading is a new order, so the `# ORDER` row is
+    # re-minted as the session's. A cold build reading a stale one would rebuild the file as it
+    # looked before the edit and score the difference as a fidelity miss.
+    shape = [r for r in log_rows(mini, src="session") if "order" in r["flags"]]
+    assert len(shape) == 1 and shape[0]["body"].splitlines()[-1] == "## Four"
 
 
 def test_the_session_row_wins_the_identity_so_a_later_import_does_not_re_stamp_it(mini):
@@ -614,8 +633,9 @@ def test_the_session_row_wins_the_identity_so_a_later_import_does_not_re_stamp_i
     chore_write(mini, canon)
     res = import_json(mini)
     assert res["appended"] == 0, "the importer must find nothing new to add"
-    assert len(log_rows(mini, src="session")) == 1
-    assert len(log_rows(mini, src="importer")) == EXPECTED_ENTRIES
+    assert res["shape_appended"] == 0, "nor any shape row"
+    assert len(entry_rows(mini, src="session")) == 1
+    assert len(entry_rows(mini, src="importer")) == EXPECTED_ENTRIES
 
 
 def test_the_writer_ignores_a_file_that_is_not_a_live_role_file(mini):
@@ -715,3 +735,215 @@ def test_the_cut_over_ratio_counts_session_rows_over_rows_plus_hand_edits(mini):
     assert c["session_share_denominator"] == 2
     assert c["session_share"] == pytest.approx(0.5)
     assert "different units" in c["session_share_population"]
+
+
+# ============================================ the COLD BUILD (K-3, commit 2) ====================
+# Day 0 reported "72 of 72 views byte-identical" and council 3 closed 5-0 that the number could not
+# fail on the bytes it named: `views.py` took the preamble and the heading ORDER from the very live
+# file it was then compared against (C-04). The cold build reads no live file at all.
+
+def cold_json(mini, *args, expect=0) -> dict:
+    return json.loads(run("views.py", "--cold", "--json", *args, env=mini["env"], expect=expect))
+
+
+def cold_compare(mini) -> dict:
+    return json.loads(run("views.py", "--cold", "--compare", "--json", env=mini["env"]))
+
+
+def move_live_aside(mini) -> Path:
+    """Physically move every live role file out of the vault. The cold build not READING them is a
+    property of the code; this is the check that does not depend on believing the code."""
+    aside = mini["tmp"] / "aside"
+    for p in sorted(mini["vault"].rglob("*.md")):
+        if ".gedaechtnis" in p.parts or p.stem not in ("Canon", "Errata", "Patterns",
+                                                       "Position", "Aporia"):
+            continue
+        dest = aside / p.relative_to(mini["vault"])
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        p.rename(dest)
+    return aside
+
+
+def restore_live(mini, aside: Path) -> None:
+    for p in sorted(aside.rglob("*.md")):
+        (mini["vault"] / p.relative_to(aside)).parent.mkdir(parents=True, exist_ok=True)
+        p.rename(mini["vault"] / p.relative_to(aside))
+
+
+def test_the_importer_mints_one_shape_row_pair_per_file_with_entries(mini):
+    """POSITIVE control on the cold build's inputs, counted by construction: four role files carry
+    entries, so eight shape rows and not one more. The stub-shaped files in this vault (a folder
+    with no Map, a skipped top-level folder) must contribute none, or the cold build would invent a
+    view for a file the shadow never covered."""
+    res = import_json(mini)
+    assert res["shape_rows"] == EXPECTED_SHAPE_ROWS
+    assert res["shape_appended"] == EXPECTED_SHAPE_ROWS
+    counts = json.loads(run("logstore.py", "count", env=mini["env"]))
+    assert counts["shape_rows"] == EXPECTED_SHAPE_ROWS
+    assert counts["entry_rows"] == EXPECTED_ENTRIES
+    assert counts["per_src"] == {"importer": EXPECTED_ENTRIES + EXPECTED_SHAPE_ROWS, "session": 0}
+
+
+def test_a_shape_row_is_not_an_entry_in_any_instrument_that_counts_entries(mini):
+    """NEGATIVE control on the seam the shape rows cross. They are rows, so every consumer that
+    counts ROWS sees them; not one that counts ENTRIES may. A shape row inside the escape rate's
+    denominator would be measuring how long the vault's frontmatter is, and inside the fidelity
+    denominator it would be an entry the live file does not have."""
+    run("importer.py", env=mini["env"])
+    run("views.py", env=mini["env"])
+    res = score(mini)
+    assert res["escape"]["shape_rows_excluded"] == EXPECTED_SHAPE_ROWS
+    assert res["escape"]["all"]["entries"] == EXPECTED_ENTRIES
+    assert sum(a["entries"] for a in res["per_stem"].values()) == EXPECTED_ENTRIES
+    assert res["escape"]["binding"]["entries"] + res["escape"]["narrative"]["entries"] == \
+        EXPECTED_ENTRIES
+
+
+def test_the_cold_build_reproduces_every_file_WITH_THE_LIVE_FILES_MOVED_ASIDE(mini):
+    """POSITIVE control on the day-4 falsifier's first clause, run the strong way: the live files are
+    not merely unread, they are GONE from the vault while the build runs. Byte-identical here is a
+    claim about the log; the day-0 number was a claim about a copy."""
+    run("importer.py", env=mini["env"])
+    aside = move_live_aside(mini)
+    res = cold_json(mini)
+    assert len(res["views"]) == 4, res["skipped"]
+    assert res["skipped"] == [] and res["orphan_rows"] == 0
+    restore_live(mini, aside)
+    cmp = cold_compare(mini)
+    assert cmp["identical"] == cmp["views"] == 4, cmp["differing"]
+
+
+def test_the_cold_build_never_reads_the_live_file_even_to_fail(mini):
+    """NEGATIVE control on the substitution this whole commit exists to prevent. With the log EMPTY
+    of shape rows the cold build must REFUSE the file, not fall back to reading the live one — a
+    fallback would be the old generator wearing a new flag, and its green would mean nothing."""
+    run("importer.py", env=mini["env"])
+    log = next((mini["vault"] / ".gedaechtnis" / "log").glob("*.tsv"))
+    kept = [l for l in log.read_text(encoding="utf-8").splitlines()
+            if "# PREAMBLE" not in l and "# ORDER" not in l]
+    log.write_text("\n".join(kept) + "\n", encoding="utf-8")
+    # exit 1, and that is the point: no view built is a REFUSAL, not a quiet empty run
+    res = cold_json(mini, expect=1)
+    assert res["views"] == [], "no shape row means no cold view, ever"
+    assert len(res["skipped"]) == 4
+    assert all("carries no" in why for _name, why in res["skipped"]), res["skipped"]
+
+
+def test_the_cold_build_BITES_when_a_row_is_wrong(mini):
+    """POSITIVE control that the comparison can FAIL, and by the right file. A count of identical
+    files that cannot fall is a decoration; this plants one wrong byte in one row and expects
+    exactly one file to differ, with a real diff attached."""
+    run("importer.py", env=mini["env"])
+    log = next((mini["vault"] / ".gedaechtnis" / "log").glob("*.tsv"))
+    text = log.read_text(encoding="utf-8")
+    assert "NEVER do the thing." in text
+    log.write_text(text.replace("NEVER do the thing.", "NEVER do the thing!"), encoding="utf-8")
+    run("views.py", "--cold", env=mini["env"])
+    cmp = cold_compare(mini)
+    assert cmp["identical"] == 3 and cmp["views"] == 4
+    assert cmp["differing"][0]["file"].endswith("Canon.md")
+    assert "NEVER do the thing!" in cmp["differing"][0]["diff"]
+
+
+def test_the_cold_build_takes_its_ORDER_from_the_log_and_not_from_the_file(mini):
+    """POSITIVE control on the reason `# ORDER` is a row of its own. Reorder the live file WITHOUT
+    changing any entry's text: no entry row changes (content is identity), so a build that read
+    order off `ord=` flags would emit the OLD order and be wrong. The re-minted order row is what
+    keeps the cold build current, and the live build must agree with it."""
+    run("importer.py", env=mini["env"])
+    canon = mini["vault"] / "Alpha" / "Canon.md"
+    pre, *_ = canon.read_text(encoding="utf-8").partition("## One")
+    one = "## One\n\nNEVER do the thing.\n\n"
+    two = "## Two\n\nSee [[Global/Map]] for the index.\n\n"
+    three = "### Three\n\nA sub-heading is an entry too.\n"
+    canon.write_text(pre + two + one + three, encoding="utf-8")
+    res = import_json(mini)
+    assert res["appended"] == 0, "no entry's TEXT changed, so no entry row is new"
+    assert res["shape_appended"] == 1, "but the file's order did, so the # ORDER row is re-minted"
+    aside = move_live_aside(mini)
+    cold_json(mini)
+    restore_live(mini, aside)
+    cold = (mini["vault"] / ".gedaechtnis" / "views-cold" / "Alpha" / "Canon.md").read_text(encoding="utf-8")
+    assert cold.split("\n", 1)[1] == canon.read_text(encoding="utf-8")
+    assert cold.index("## Two") < cold.index("## One")
+
+
+def test_the_cold_build_renders_an_orphan_and_counts_it(mini):
+    """POSITIVE control that M-03 is gone on the cold path too, and NEGATIVE on the identity claim:
+    an orphan is exactly what makes a cold view differ from its live file, and the count says so
+    instead of the diff being a surprise."""
+    run("importer.py", env=mini["env"])
+    canon = mini["vault"] / "Alpha" / "Canon.md"
+    canon.write_text(canon.read_text(encoding="utf-8")
+                     .replace("### Three\n\nA sub-heading is an entry too.\n", ""), encoding="utf-8")
+    run("importer.py", env=mini["env"])          # re-mints # ORDER without the dropped heading
+    res = cold_json(mini)
+    assert res["orphan_rows"] == 1, res["skipped"]
+    cmp = cold_compare(mini)
+    assert cmp["identical"] == 3 and cmp["differing"][0]["file"].endswith("Canon.md")
+    cold = (mini["vault"] / ".gedaechtnis" / "views-cold" / "Alpha" / "Canon.md").read_text(encoding="utf-8")
+    assert "A sub-heading is an entry too." in cold
+
+
+def test_the_cold_views_never_land_on_top_of_the_live_files_or_the_warm_views(mini):
+    """NEGATIVE control on placement, twice over. The shadow is ADDITIVE: a cold build that wrote
+    into a region would have ended the shadow without saying so, and one that overwrote
+    `.gedaechtnis/views/` would leave the ordinary run with nothing to be compared against."""
+    run("importer.py", env=mini["env"])
+    run("views.py", env=mini["env"])
+    warm = {p: p.read_bytes() for p in (mini["vault"] / ".gedaechtnis" / "views").rglob("*.md")}
+    live = {p: p.read_bytes() for p in sorted(mini["vault"].rglob("*.md"))
+            if ".gedaechtnis" not in p.parts}
+    run("views.py", "--cold", env=mini["env"])
+    assert {p: p.read_bytes() for p in warm} == warm
+    assert {p: p.read_bytes() for p in live} == live
+    for p in (mini["vault"] / ".gedaechtnis" / "views-cold").rglob("*.md"):
+        assert "views-cold" in p.parts
+
+
+def test_the_comparison_refuses_rather_than_reporting_a_measured_zero(mini):
+    """NEGATIVE control on the instrument itself: with nothing built, `--compare` must REFUSE, not
+    print `0/0 byte-identical`. A zero with no population behind it has sent this fleet down a wrong
+    path before, and a comparison of an empty directory is the easiest way to produce one."""
+    run("importer.py", env=mini["env"])
+    p = subprocess.run([sys.executable, str(ROOT / "views.py"), "--cold", "--compare"],
+                       capture_output=True, text=True, env=mini["env"], timeout=60)
+    assert p.returncode != 0
+    assert "REFUSED" in (p.stdout + p.stderr)
+
+
+def test_a_rewritten_entry_that_MOVED_DOWN_the_file_renders_its_current_text(mini):
+    """POSITIVE control on the row-selection bug the cold probe caught on the live vault.
+
+    Two rows share a heading — the original at `ord=0` and its rewrite at `ord=1`, because an entry
+    was inserted above it. The old rule matched the OLD row (it compared against a count of how many
+    times the heading had been seen, which is 0 for a unique heading, and only that row carried
+    `ord=0`), so the view rendered 2,317 bytes of superseded text under a heading whose live body was
+    a single newline — and scored it as an ordinary fidelity miss. Both builds must render the
+    CURRENT text.
+    """
+    run("importer.py", env=mini["env"])
+    canon = mini["vault"] / "Alpha" / "Canon.md"
+    text = canon.read_text(encoding="utf-8")
+    pre, _sep, rest = text.partition("## One")
+    moved = (pre + "## Zero\n\nInserted above, so everything below shifts down.\n\n"
+             + "## One" + rest.replace("NEVER do the thing.", "NEVER do the thing, rewritten."))
+    canon.write_text(moved, encoding="utf-8")
+    run("importer.py", env=mini["env"])
+
+    ones = [r for r in log_rows(mini, region="Alpha", stem="Canon") if r["heading"] == "## One"]
+    assert len(ones) == 2, "the premise: the original row and its rewrite both live in the log"
+    assert sorted(f for r in ones for f in r["flags"] if f.startswith("ord=")) == ["ord=0", "ord=1"]
+
+    run("views.py", env=mini["env"])
+    warm = (mini["vault"] / ".gedaechtnis" / "views" / "Alpha" / "Canon.md").read_text(encoding="utf-8")
+    assert "NEVER do the thing, rewritten." in warm
+    assert "NEVER do the thing.\n" not in warm, "the superseded row must not be rendered"
+    assert warm.split("\n", 1)[1] == moved
+
+    aside = move_live_aside(mini)
+    cold_json(mini)
+    restore_live(mini, aside)
+    cold = (mini["vault"] / ".gedaechtnis" / "views-cold" / "Alpha" / "Canon.md").read_text(encoding="utf-8")
+    assert cold.split("\n", 1)[1] == moved
+    assert cold_compare(mini)["identical"] == 4

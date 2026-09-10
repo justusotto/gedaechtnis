@@ -187,7 +187,12 @@ def per_stem(rows: list) -> dict:
 # ------------------------------------------------------------------ 2. escape rate ----
 
 def escape_rate() -> dict:
-    rows = logstore.all_rows()
+    all_rows = logstore.all_rows()
+    # SHAPE rows (`# PREAMBLE` / `# ORDER`) are excluded: they carry a file's form, not one of its
+    # entries, and an escape rate whose denominator counted them would be measuring how long this
+    # vault's frontmatter is.
+    rows = [r for r in all_rows if not logstore.is_shape(r)]
+    shape_excluded = len(all_rows) - len(rows)
     tot = {"binding": 0, "narrative": 0}
     over = {"binding": 0, "narrative": 0}
     biggest = []
@@ -206,6 +211,7 @@ def escape_rate() -> dict:
                           "rate": over["narrative"] / tot["narrative"] if tot["narrative"] else 0.0},
             "all": {"entries": len(rows), "over": over["binding"] + over["narrative"],
                     "rate": (over["binding"] + over["narrative"]) / len(rows) if rows else 0.0},
+            "shape_rows_excluded": shape_excluded,
             "largest": biggest[:5]}
 
 
@@ -274,7 +280,10 @@ def live_counter(start: dict) -> dict:
             else:
                 hand.append({k: cur[k] for k in ("sha", "author", "subject")})
     rows_since = [x for x in logstore.all_rows() if x["ts"][:10] >= since]
-    session_rows = [x for x in rows_since if x["src"] == "session"]
+    # Shape rows are excluded from the numerator: one session edit re-mints the file's `# ORDER`
+    # row as well as the entry, and counting both would inflate the ratio by the number of files
+    # touched rather than the number of memories written.
+    session_rows = [x for x in rows_since if x["src"] == "session" and not logstore.is_shape(x)]
     # THE CUT-OVER RATIO, exactly as council 3 wrote it (K-3): session-written rows ÷ (those + hand
     # edits). Its two halves are DIFFERENT UNITS — the numerator counts log ROWS, the denominator
     # adds vault COMMITS — and that is said here rather than quietly aggregated, because a share
