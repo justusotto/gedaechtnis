@@ -425,10 +425,12 @@ def test_roots_are_honoured_from_the_environment_and_from_the_config_file(home):
 # ----------------------------------------------------------- the negative control ----
 def test_a_full_run_touches_nothing_outside_the_vault_repos_config_and_state(machine):
     """NEGATIVE CONTROL: hash every file under the fake HOME before and after a full `--yes` run
-    and name every path that moved. Anything outside the four sanctioned surfaces — the vault, the
+    and name every path that moved. Anything outside the five sanctioned surfaces — the vault, the
     chosen repos' `.atlas-lane` and `CLAUDE.md`, the config file, the state dir (and the one
-    symlink that registers the plugin with Claude Code) — is a leak, and this is the only test
-    that would see it."""
+    symlink that registers the plugin with Claude Code), and `.claude/settings.json`, which carries
+    the plugin-outage check that must live OUTSIDE the plugin manifest — is a leak, and this is the
+    only test that would see it. The settings file was added to this list deliberately, in the act
+    that gave init something to write there; growing it silently is what this test exists against."""
     home, good, vault = machine["home"], machine["good"], machine["vault"]
     before = tree(home)
     rc, out, err = init(home, "--yes", cwd=good[0])
@@ -437,8 +439,11 @@ def test_a_full_run_touches_nothing_outside_the_vault_repos_config_and_state(mac
 
     changed = {k for k in set(before) | set(after) if before.get(k) != after.get(k)}
     allowed_files = {str((r / f).relative_to(home)) for r in good for f in (".atlas-lane", "CLAUDE.md")}
+    allowed_files.add(".claude/settings.json")
     allowed_prefixes = (str(vault.relative_to(home)) + "/",
                         ".claude/gedaechtnis/", "state/", ".claude/skills/gedaechtnis")
+    assert ".claude/settings.json" in changed, \
+        "the outage check was not registered — the surface is allowed here only because init uses it"
     leaks = sorted(p for p in changed
                    if p not in allowed_files and not p.startswith(allowed_prefixes))
     assert leaks == [], f"init wrote outside its own surfaces: {leaks}"
@@ -458,6 +463,7 @@ def test_the_negative_control_would_see_a_stray_write(machine, monkeypatch):
     after = tree(home)
     changed = {k for k in set(before) | set(after) if before.get(k) != after.get(k)}
     allowed_files = {str((r / f).relative_to(home)) for r in good for f in (".atlas-lane", "CLAUDE.md")}
+    allowed_files.add(".claude/settings.json")               # the plugin-outage check's home
     allowed_prefixes = ("Gedaechtnis/", ".claude/gedaechtnis/", "state/", ".claude/skills/gedaechtnis")
     leaks = sorted(p for p in changed if p not in allowed_files and not p.startswith(allowed_prefixes))
     assert leaks == ["Documents/stray.txt"]

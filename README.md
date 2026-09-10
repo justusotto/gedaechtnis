@@ -30,6 +30,10 @@ a promise about the next version.
 - **Seven hooks load** (PreToolUse, PostToolUse, SessionStart, Stop, WorktreeCreate, WorktreeRemove,
   UserPromptSubmit), confirmed by `claude plugin details`, at an always-on cost of about 330
   tokens per session.
+- **The outage check bites:** the scratch plugin carrying the exact 2026-09-09 defect is rejected by
+  the real validator (`claude plugin validate`, `agents: Invalid input`) and the first prompt of a
+  session with no SessionStart record is refused, exit 2; the shipped manifest validates and the
+  same check is silent (`tests/test_outage_check.py`, 30 cases).
 - **The log-and-views shadow, day 0:** the vault's 1,229 entries across 72 role files were imported
   into an append-only log and regenerated as views; 72 of 72 views came back byte-identical to
   the live file. This is the first of seven checkpoints (days 0, 1, 2, 4, 7, 14, 30) for the
@@ -144,6 +148,30 @@ absent and never overwrites a file: run it again and every line reports `kept`.
 Then restart Claude Code (or `/reload-plugins`) and open it in the repo: the first session prints a
 facts block naming your vault and lane. There is nothing to build and no dependency beyond Python
 3.9+ from the standard library.
+
+**The install also registers one hook outside the plugin, and this is deliberate.** A plugin whose
+manifest fails validation loads *nothing* — hooks included — and Claude Code says so nowhere: on
+2026-09-09 a single bad key cost fifteen hours in which every session ran with no doors at all, and
+it was found by an unrelated review, not by any of the tests. A check for that failure cannot live
+inside the thing that fails, so `init.py` adds one `hooks.UserPromptSubmit` entry to
+`~/.claude/settings.json` running `outage_check.py`. On every prompt it does one `stat`: if the
+plugin's own SessionStart record for this session — `~/.claude/gedaechtnis/session-start-<session
+id>.json` — is missing, the prompt is refused (exit 2) with a message saying that Gedächtnis did not
+load, that a rejected manifest is the likely cause (`claude plugin list` shows the ✘;
+`claude plugin validate <plugin dir>` names the key), and how to switch the check off:
+`GEDAECHTNIS_OUTAGE_CHECK=off claude` for one session, `"outage_check": "off"` in the config file
+permanently, `"outage_check": "message"` to keep the warning without the refusal, or
+`python3 init.py --remove-outage-check` to uninstall it. If the hook input carries no session id at
+all — a schema change rather than an outage — it never blocks: it exits 0 and appends one row to
+`~/.claude/gedaechtnis/outage-check.log`, where every block and every warning is also recorded. It
+is settings.json surgery, so it merges into whatever is already there, never duplicates itself, and
+leaves a file it cannot parse untouched and says so. `--no-outage-check` skips the install.
+**Its falsifier is written down and cheap to check:** if one *healthy* session is blocked within a
+week — the log is the count — it is downgraded to `"outage_check": "message"`. The known ways that
+could happen are the SessionStart hook timing out or crashing and a state directory pruned under a
+live session. (`tests/test_plugin_manifest.py` also pins the manifest, but it *skips* where the
+`claude` CLI is absent or the plugin is unregistered, so it is not a gate; this check is the one
+that runs on your machine, every prompt.)
 
 **A project you add later** is not forgotten and not taken silently. The first time a session starts
 in a git repo with no memory, the facts block asks you once, in one line — *"This project has no
