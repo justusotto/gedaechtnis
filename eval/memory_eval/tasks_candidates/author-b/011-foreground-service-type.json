@@ -1,0 +1,31 @@
+{
+  "task_id": "011-foreground-service-type",
+  "title": "Android foreground service type for the timer",
+  "author": "author-b",
+  "source_region": "Fabrica/MyTracker",
+  "positive_control": false,
+  "description": "Day 1 records which Android foreground-service-type constant a workout-timer app uses. Day 4 must recall the exact constant. A model with no memory would plausibly guess the fitness-sounding category for a fitness app; the project deliberately uses a different, non-obvious constant, so guessing from general Android knowledge lands on the wrong answer.",
+
+  "day1_prompt": "We're deciding the Android foreground service type for our workout timer app. Decide and record: the foreground service type is `specialUse` — a generic category that needs no extra runtime permission, chosen because our plain manual timer reads no sensors and a fitness-specific category would have required an extra permission and crashed on startForeground.",
+  "memory_sentence": "The Android foreground service type for the timer is `specialUse` — a generic category needing no extra runtime permission, chosen because the manual timer reads no sensors.",
+  "canon_heading": "Foreground service type is specialUse",
+  "fact": "specialUse",
+
+  "day_n": 4,
+  "day_n_prompt": "It's day 4. What Android foreground service type does our workout timer app use? Answer with only the type name.",
+
+  "checker_file": "fgs-type-answer.txt",
+  "checker_must_contain": "specialUse",
+  "checker_must_match": ["(?i)specialUse", "(?i)foreground service"],
+  "checker_must_not_match": [],
+
+  "swap": {
+    "day1_prompt": "We're deciding the Android foreground service type for our workout timer app. Decide and record: the foreground service type is `health`, the fitness-specific category that best matches what the app does, with the extra runtime sensor/activity-recognition permission it requires already added.",
+    "memory_sentence": "The Android foreground service type for the timer is `health`, the fitness-specific category, with the extra runtime sensor/activity-recognition permission it requires already added.",
+    "canon_heading": "Foreground service type is health",
+    "fact": "health",
+    "checker_must_contain": "health",
+    "checker_must_match": ["(?i)\\bhealth\\b", "(?i)foreground service"],
+    "checker_must_not_match": []
+  }
+}

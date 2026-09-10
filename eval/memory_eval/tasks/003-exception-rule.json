@@ -10,5 +10,22 @@
   "day_n": 4,
   "day_n_prompt": "Day 4: before writing new error-handling code, state the exception-handling rule this project follows, in one sentence.",
   "checker_file": "exception-rule-answer.txt",
-  "checker_must_contain": "bare except"
+  "checker_must_contain": "bare except",
+  "author": "builder (first eval, 2026-09-10)",
+  "source_region": "-",
+  "checker_must_match": [
+    "(?i)\\b(?:never|avoid|do not|don't|not)\\b[^.\\n]{0,40}\\bbare\\s+except"
+  ],
+  "checker_must_not_match": [],
+  "swap": {
+    "day1_prompt": "Day 1: we found and fixed a bug — a retry loop caught one narrow exception class and crashed on an unrelated error that escaped the handler. Decide and record the rule: always catch BaseException so nothing escapes the retry loop.",
+    "memory_sentence": "This project's rule: always catch BaseException so that nothing escapes the retry loop.",
+    "canon_heading": "Always catch BaseException",
+    "fact": "BaseException",
+    "checker_must_contain": "BaseException",
+    "checker_must_match": [
+      "(?i)\\balways\\b[^.\\n]{0,40}\\bBaseException\\b"
+    ],
+    "checker_must_not_match": []
+  }
 }

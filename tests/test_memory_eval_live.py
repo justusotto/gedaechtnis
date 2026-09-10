@@ -116,7 +116,7 @@ def test_model_and_effort_are_pinned_in_every_child_argv(live_run):
     p, out, _base = live_run
     assert p.returncode == 0, p.stderr
     recs = records(out)
-    assert len(recs) == 6, [r["day"] for r in recs]          # 3 arms x (day1 + dayN)
+    assert len(recs) == 8, [r["day"] for r in recs]          # 4 arms x (day1 + dayN)
     for r in recs:
         argv = r["argv"]
         assert flag_value(argv, "--model") == MODEL, argv
@@ -191,7 +191,7 @@ def test_every_call_writes_a_priced_usage_file(live_run):
         assert r["cost"]["prices_as_of"], "a cost figure without its price date is not an answer"
         assert r["cost"]["models"] == [MODEL]
     summary = json.loads((out / "live-summary.json").read_text(encoding="utf-8"))
-    assert summary["calls_made"] == 6 and summary["stopped_early"] is None
+    assert summary["calls_made"] == 8 and summary["stopped_early"] is None
     assert summary["usd_total"] == pytest.approx(sum(r["cost"]["usd_total"] for r in records(out)))
 
 
@@ -216,7 +216,7 @@ def test_ceiling_refuses_to_start_another_call(tmp_path):
     assert len(recs) == 1, [r["day"] for r in recs]
     summary = json.loads((out / "live-summary.json").read_text(encoding="utf-8"))
     assert summary["calls_made"] == 1
-    assert summary["calls_planned"] == 3          # 3 arms x 1 task, cells not calls
+    assert summary["calls_planned"] == 4          # 4 arms x 1 task x 1 sample, cells not calls
     assert summary["stopped_early"] and "ceiling" in summary["stopped_early"].lower()
     rows = [json.loads(l) for l in (out / "results.jsonl").read_text(encoding="utf-8").splitlines() if l.strip()]
     assert rows == [], "the interrupted cell is not reported as a completed row"
@@ -229,14 +229,15 @@ def test_a_generous_ceiling_completes_the_whole_run(live_run):
     assert p.returncode == 0, p.stderr
     assert "CEILING REACHED" not in p.stdout
     summary = json.loads((out / "live-summary.json").read_text(encoding="utf-8"))
-    assert summary["calls_made"] == 6 and summary["stopped_early"] is None
+    assert summary["calls_made"] == 8 and summary["stopped_early"] is None
     rows = [json.loads(l) for l in (out / "results.jsonl").read_text(encoding="utf-8").splitlines() if l.strip()]
-    assert len(rows) == 3
+    assert len(rows) == 4
 
 
 # ------------------------------------------------------------------ dry run ----
-DRY_RUN_ROW_KEYS = {"arm", "task_id", "positive_control", "success", "tokens", "boot_bytes",
-                    "context_bytes"}
+DRY_RUN_ROW_KEYS = {"arm", "task_id", "sample", "positive_control", "success", "tokens",
+                    "day1_tokens", "boot_bytes", "context_bytes", "byte_match_target",
+                    "memory_bytes", "verdict"}
 
 
 @pytest.fixture(scope="module")
@@ -251,7 +252,7 @@ def test_dry_run_rows_and_table_are_unchanged_by_the_live_path(dry_run):
     p, out, _base = dry_run
     assert p.returncode == 0, p.stderr
     rows = [json.loads(l) for l in (out / "results.jsonl").read_text(encoding="utf-8").splitlines() if l.strip()]
-    assert len(rows) == 3                                    # three arms x this fixture's one task
+    assert len(rows) == 4                                    # four arms x this fixture's one task
     for r in rows:
         assert set(r) == DRY_RUN_ROW_KEYS, sorted(set(r) - DRY_RUN_ROW_KEYS)
     assert "cost  " not in p.stdout and "live:" not in p.stdout and "# LIVE" not in p.stdout
@@ -290,7 +291,7 @@ def test_a_priced_model_is_accepted(live_run):
     """Negative control for the test above: the identical path with a model that IS in the table."""
     p, out, _base = live_run
     assert p.returncode == 0, p.stderr
-    assert len(usage_files(out)) == 6
+    assert len(usage_files(out)) == 8
 
 
 # --------------------------------------------------------------- the pricing ----
@@ -321,11 +322,14 @@ def test_the_price_table_is_imported_not_copied(live_run):
 
 # ------------------------------------------------- the gedaechtnis arm's plugin ----
 @pricing_required
-def test_gedaechtnis_arm_stages_the_plugin_via_project_settings(live_run):
+@pytest.mark.parametrize("arm", ["gedaechtnis", "swapped"])
+def test_the_vault_arms_stage_the_plugin_via_project_settings(live_run, arm):
     """`--setting-sources project` drops user-level plugins, so the arm's hooks must reach the
-    session through a settings file written INTO the fixture — never through the user's ~/.claude."""
+    session through a settings file written INTO the fixture — never through the user's ~/.claude.
+    Both vault arms stage it: `swapped` differs from `gedaechtnis` in the recorded SENTENCE and in
+    nothing else, which is what makes a swap-follow attributable to the memory's content."""
     _p, _out, base = live_run
-    settings = base / "gedaechtnis__001-db-choice" / "home" / "repo" / ".claude" / "settings.json"
+    settings = base / f"{arm}__001-db-choice" / "home" / "repo" / ".claude" / "settings.json"
     assert settings.is_file()
     text = settings.read_text(encoding="utf-8")
     assert "${CLAUDE_PLUGIN_ROOT}" not in text, "an unexpanded placeholder loads nothing"
@@ -337,8 +341,23 @@ def test_gedaechtnis_arm_stages_the_plugin_via_project_settings(live_run):
 
 @pricing_required
 def test_the_other_arms_get_no_plugin(live_run):
-    """Negative control for the test above: an arm that is not `gedaechtnis` must have no settings
+    """Negative control for the test above: an arm that is not a vault arm must have no settings
     file at all, or the arms would not be distinguishable."""
     _p, _out, base = live_run
     for arm in ("none", "automemory"):
         assert not (base / f"{arm}__001-db-choice" / "home" / "repo" / ".claude" / "settings.json").exists()
+
+
+@pricing_required
+def test_the_swapped_arm_records_the_swapped_sentence_not_the_true_one(live_run):
+    """The swap must reach the SUBSTRATE, not just the task file. Read the fixture vault's own
+    Canon.md back: it must carry the swap's sentence and not the true one, and the gedaechtnis
+    arm's must carry the opposite — otherwise a 'swap follow' would be unattributable."""
+    _p, _out, base = live_run
+    task = json.loads((TASKS / "001-db-choice.json").read_text(encoding="utf-8"))
+    for arm, present, absent in (("swapped", task["swap"]["fact"], task["fact"]),
+                                 ("gedaechtnis", task["fact"], task["swap"]["fact"])):
+        canon = base / f"{arm}__001-db-choice" / "home" / "vault" / "Demo" / "Canon.md"
+        text = canon.read_text(encoding="utf-8")
+        assert present in text, (arm, canon)
+        assert absent not in text, (arm, canon)

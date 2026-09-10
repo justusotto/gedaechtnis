@@ -1,0 +1,31 @@
+{
+  "task_id": "007-apostrophe-canonical-form",
+  "title": "Canonical apostrophe codepoint",
+  "author": "author-a",
+  "source_region": "Mnemosyne/UkrainianVocab",
+  "positive_control": false,
+  "description": "Day 1 records which Unicode codepoint is the project's single canonical in-word apostrophe for a non-English source language, with any other apostrophe-like character normalized to it at ingest. The choice is an arbitrary pick between two visually similar characters with no natural default, so a memory-less model cannot guess which one this project settled on from the day-N prompt or general text-processing conventions.",
+  "day1_prompt": "Day 1: our data source's in-word apostrophe (as in words like p'yat') needs a single persisted canonical form. Decide and record: this project's canonical in-word apostrophe character is Unicode U+0027, the plain straight apostrophe. Any other apostrophe-like character in incoming data gets normalized to this form at ingest.",
+  "memory_sentence": "This project's canonical in-word apostrophe character is Unicode U+0027.",
+  "canon_heading": "Canonical apostrophe is U+0027",
+  "fact": "U+0027",
+  "day_n": 4,
+  "day_n_prompt": "Day 4: a new parser is being written and needs to know which Unicode codepoint is canonical for this project's persisted in-word apostrophe, so any other apostrophe-like character can be normalized to it. Answer with only the Unicode codepoint of the canonical form.",
+  "checker_file": "apostrophe-canonical-answer.txt",
+  "checker_must_contain": "U+0027",
+  "checker_must_match": [
+    "(?i)U\\+0027"
+  ],
+  "checker_must_not_match": [],
+  "swap": {
+    "day1_prompt": "Day 1: our data source's in-word apostrophe (as in words like p'yat') needs a single persisted canonical form. Decide and record: this project's canonical in-word apostrophe character is Unicode U+02BC, the modifier-letter curly apostrophe. Any other apostrophe-like character in incoming data gets normalized to this form at ingest.",
+    "memory_sentence": "This project's canonical in-word apostrophe character is Unicode U+02BC.",
+    "canon_heading": "Canonical apostrophe is U+02BC",
+    "fact": "U+02BC",
+    "checker_must_contain": "U+02BC",
+    "checker_must_match": [
+      "(?i)U\\+02BC"
+    ],
+    "checker_must_not_match": []
+  }
+}

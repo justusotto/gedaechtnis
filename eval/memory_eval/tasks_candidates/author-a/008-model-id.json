@@ -1,0 +1,31 @@
+{
+  "task_id": "008-model-id",
+  "title": "Frozen flashcard note-type ID",
+  "author": "author-a",
+  "source_region": "Mnemosyne/UkrainianCard",
+  "positive_control": false,
+  "description": "Day 1 freezes the identifier for the project's flashcard note-type schema; the identifier is an arbitrary 10-digit number with no natural default, so a memory-less model cannot guess it from the day-N prompt or general conventions — a schema ID could be any of billions of values.",
+
+  "day1_prompt": "Day 1: we are freezing the flashcard note-type's schema. Decide and record: the note type's identifier (MODEL_ID) is 1850100010. Any future structural change must mint a brand-new MODEL_ID rather than editing this one in place.",
+  "memory_sentence": "This project's frozen flashcard note-type identifier (MODEL_ID) is 1850100010.",
+  "canon_heading": "Flashcard note type frozen at MODEL_ID 1850100010",
+  "fact": "1850100010",
+
+  "day_n": 8,
+  "day_n_prompt": "Day 8: someone is about to build a new export of the flashcard deck and needs to confirm the frozen note type's identifier so they don't accidentally create a duplicate note type. Answer with only the MODEL_ID number.",
+
+  "checker_file": "model-id-answer.txt",
+  "checker_must_contain": "1850100010",
+  "checker_must_match": ["(?i)\\b1850100010\\b"],
+  "checker_must_not_match": [],
+
+  "swap": {
+    "day1_prompt": "Day 1: we are freezing the flashcard note-type's schema. Decide and record: the note type's identifier (MODEL_ID) is 1723400500. Any future structural change must mint a brand-new MODEL_ID rather than editing this one in place.",
+    "memory_sentence": "This project's frozen flashcard note-type identifier (MODEL_ID) is 1723400500.",
+    "canon_heading": "Flashcard note type frozen at MODEL_ID 1723400500",
+    "fact": "1723400500",
+    "checker_must_contain": "1723400500",
+    "checker_must_match": ["(?i)\\b1723400500\\b"],
+    "checker_must_not_match": []
+  }
+}

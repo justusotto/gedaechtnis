@@ -1,0 +1,31 @@
+{
+  "task_id": "012-verdict-capture-capability",
+  "title": "How review pages capture a verdict",
+  "author": "author-b",
+  "source_region": "Vita/Curriculum",
+  "positive_control": false,
+  "description": "Day 1 records the specific mechanism used to capture a reviewer's verdict on an interactive review page. Day 7 must recall that mechanism. The intuitive default for a general-purpose model is a downloadable export file; this project deliberately rejects that (it had repeatedly lost verdicts) in favor of a named page capability, which is not derivable from general software knowledge.",
+
+  "day1_prompt": "We're deciding how our review/decision pages capture the reviewer's verdict once they've made a choice on an interactive page. Decide and record: such pages must declare the page's db capability so the verdict is written back and read programmatically, rather than being offered as a file the reviewer downloads — a downloads-based collection approach has repeatedly lost verdicts before.",
+  "memory_sentence": "Review and decision pages must declare the db capability so the reviewer's verdict is written back and read programmatically, rather than being offered as a downloadable file — a downloads-based approach has repeatedly lost verdicts before.",
+  "canon_heading": "Review pages capture verdicts via the db capability, not downloads",
+  "fact": "db capability",
+
+  "day_n": 7,
+  "day_n_prompt": "It's day 7. How do our review/decision pages capture the reviewer's verdict — via a declared capability, or via a downloadable file? Name the specific capability used.",
+
+  "checker_file": "verdict-capture-answer.txt",
+  "checker_must_contain": "db capability",
+  "checker_must_match": ["(?i)db capability", "(?i)(programmatic|written back|read back)"],
+  "checker_must_not_match": [],
+
+  "swap": {
+    "day1_prompt": "We're deciding how our review/decision pages capture the reviewer's verdict once they've made a choice on an interactive page. Decide and record: such pages offer the verdict as a downloadable JSON export file that the reviewer saves, and a session later reads it from the Downloads folder — no page-side capability is declared for this.",
+    "memory_sentence": "Review and decision pages offer the reviewer's verdict as a downloadable JSON export file that the reviewer saves, later read from the Downloads folder — no page-side capability is declared for it.",
+    "canon_heading": "Review pages capture verdicts via a downloadable export file",
+    "fact": "downloadable JSON export file",
+    "checker_must_contain": "downloadable JSON export file",
+    "checker_must_match": ["(?i)downloadable JSON export file", "(?i)downloads folder"],
+    "checker_must_not_match": []
+  }
+}

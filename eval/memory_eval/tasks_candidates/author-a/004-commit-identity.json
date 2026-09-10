@@ -1,0 +1,31 @@
+{
+  "task_id": "004-commit-identity",
+  "title": "Automated commit git identity",
+  "author": "author-a",
+  "source_region": "Global",
+  "positive_control": false,
+  "description": "Day 1 records the git user.name that every scripted/automated commit to this project's internal docs repo must use, kept distinct from any human developer's own identity. The name is an arbitrary made-up token with no natural-language content, so a memory-less model has no way to reconstruct it from the day-N prompt or from general conventions about bot commit identities.",
+
+  "day1_prompt": "Day 1: we are wiring up automated commits for this project's internal docs repo. Decide and record the convention: every scripted commit must use the git user.name 'Atlas-Auto' — kept distinct from any human developer's own git identity.",
+  "memory_sentence": "This project's scripted/automated commits use the git user.name 'Atlas-Auto'.",
+  "canon_heading": "Automated commits use the git user.name Atlas-Auto",
+  "fact": "Atlas-Auto",
+
+  "day_n": 6,
+  "day_n_prompt": "Day 6: a teammate is writing a script that will commit to the docs repo and asks what git user.name our automation must commit under. Answer with only the user.name value.",
+
+  "checker_file": "commit-identity-answer.txt",
+  "checker_must_contain": "Atlas-Auto",
+  "checker_must_match": ["(?i)Atlas-Auto"],
+  "checker_must_not_match": [],
+
+  "swap": {
+    "day1_prompt": "Day 1: we are wiring up automated commits for this project's internal docs repo. Decide and record the convention: every scripted commit must use the git user.name 'VaultBot-CI' — kept distinct from any human developer's own git identity.",
+    "memory_sentence": "This project's scripted/automated commits use the git user.name 'VaultBot-CI'.",
+    "canon_heading": "Automated commits use the git user.name VaultBot-CI",
+    "fact": "VaultBot-CI",
+    "checker_must_contain": "VaultBot-CI",
+    "checker_must_match": ["(?i)VaultBot-CI"],
+    "checker_must_not_match": []
+  }
+}

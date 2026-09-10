@@ -79,7 +79,47 @@ REFUSES to start another call once the priced sum reaches it, printing what was 
    path), because `--setting-sources project` deliberately drops user-level plugins. That is the
    same hook set the plugin ships, but it is not proof that a normally-installed plugin behaves
    identically. Staging happens before the day-N step only — the day-1 step of every arm runs
-   identically, which is what makes the arms comparable at day N.
+   identically, which is what makes the arms comparable at day N. Installing the plugin the
+   ordinary way into a FRESH HOME is a different, still-open test (FRESHHOME-1): a fresh HOME has
+   no credentials, so the CLI cannot authenticate there, and nothing in this harness works around
+   that. No number from this file speaks to the install path.
+
+--------------------------------------------------------------------------------------------------
+THE SECOND EVAL — four arms, samples, byte-matching, and a checker that bites
+--------------------------------------------------------------------------------------------------
+
+(No date is written into this file on purpose: `tests/test_memory_eval_live.py` asserts that the
+pricing module's `PRICE_ASOF` string appears nowhere in this source, which is how "the price table
+is imported, never copied" is checked. A date in a comment here would satisfy that grep for the
+wrong reason. The dated reports live under `.orchestration/review/memoryeval-*/`.)
+
+The first live run (its `RESULT.md` in that directory) had three weaknesses its own report named.
+Each has a mechanism here:
+
+* **A checker satisfied by a MENTION.** `checker_must_contain` alone passed a `none`-arm answer
+  that was a *question* listing "no bare excepts" as one example of a convention it did not have.
+  It also FAILED a correct answer that wrote "bare \\`except\\`" with markdown backticks. So a
+  check now runs over a NORMALISED answer (backticks and emphasis asterisks removed, whitespace
+  collapsed) and has three parts: `checker_must_contain` (case-insensitive substring — the fact is
+  present), `checker_must_match` (every regex must match — the fact is ASSERTED as the project's
+  rule/value, not merely uttered), and `checker_must_not_match` plus a shared `HEDGE_PATTERNS`
+  list (no answer that disclaims having a record, asks the user what the convention should be, or
+  offers parenthesised examples can pass, whatever words it contains).
+* **A confound: the memory arms did not carry the same number of bytes.** `automemory` reached
+  day N with 76–149 B against gedaechtnis's 2,468–3,082 B, so "more relevant context helps" was
+  inside the result. `--byte-match` computes each task's gedaechtnis context size in a no-cost
+  pre-pass (init + a real `recall.py` call, no model), then pads the prior-decisions file with
+  plausible unrelated prior decisions to that exact byte count. Both numbers are on every row.
+* **One sample per cell.** `--samples N` repeats the DAY-N step N times per (arm, task) — the
+  day-1 step is not repeated, because nothing reads its answer: the memory substrate is written by
+  this harness, so a second day-1 call would measure nothing and cost the same as one that does.
+
+A fourth arm, `swapped`, is new: the gedaechtnis mechanism carrying a memory whose fact is the
+plausible OPPOSITE of the truth (each task's `swap` block). It passes only when the day-N answer
+FOLLOWS the swap — the true fact is added to the swapped checker's `must_not_match` by
+construction. A gedaechtnis pass rate that is high while the swapped arm keeps returning the true
+answer would mean the model is guessing well, not reading the vault; this arm is what tells those
+apart.
 """
 from __future__ import annotations
 import argparse, datetime, importlib.util, json, os, re, subprocess, sys, tempfile
@@ -92,8 +132,71 @@ from _stub_client import call_claude, usage_tokens  # noqa: E402
 
 STUB = EVAL / "stub_claude.py"
 DEFAULT_TASKS_DIR = Path(__file__).resolve().parent / "tasks"
-ARMS = ("none", "automemory", "gedaechtnis")
+ARMS = ("none", "automemory", "gedaechtnis", "swapped")
+# The arms that carry a SWAPPED memory (the fact replaced by its plausible opposite). Kept as a
+# set, not a name test, so the checker/substrate code never has to string-compare an arm id twice.
+SWAPPED_ARMS = frozenset({"swapped"})
+# The arms whose substrate is the plugin itself (init.py + a real recall.py call + staged hooks).
+VAULT_ARMS = frozenset({"gedaechtnis", "swapped"})
 BOOT_RE = re.compile(r"- boot: ([\d,]+) B across (\d+) files")
+
+# ------------------------------------------------------------------ checking ----
+# Markdown a model wraps a token in, and which must not decide a pass. The first live run FAILED a
+# correct answer because it wrote "bare `except`" with backticks.
+_STRIP_CHARS = "`*"
+_WS = re.compile(r"\s+")
+
+# Shared disqualifiers, applied to EVERY task's answer on top of its own patterns. An answer that
+# disclaims having a record, asks the questioner what the convention should be, or lists
+# parenthesised examples is not an answer — however many of the right words it contains. Every
+# pattern below fires on the exact `none`-arm reply that wrongly passed task 003 in the first live
+# run (kept verbatim as a regression fixture in tests/test_memory_eval_checker.py).
+HEDGE_PATTERNS = (
+    r"(?i)\bno (?:memory|record|records|entry|entries|context) (?:exists?|is available|has been)\b",
+    r"(?i)\bno (?:recorded|prior|stored|previous|earlier) "
+    r"(?:records?|recorded|memory|decision|decisions|rule|rules|convention|information)\b",
+    r"(?i)\b(?:i|we)\s+(?:don't|do not|doesn't|have no|haven't)\b[^.\n]{0,60}"
+    r"\b(?:records?|recorded|memory|information|context|note of)\b",
+    r"(?i)\bcould you (?:tell|let|clarify|specify|confirm|remind)\b",
+    r"(?i)\bwhat (?:convention|rule|value|name|standard|setting) (?:do|would|should|did)\s+you\b",
+    r"(?i)\(\s*e\.g\.,?\s",
+    r"(?i)\bthere (?:is|are) no (?:record|prior|stored|saved)\b",
+)
+
+
+def normalise_answer(text: str) -> str:
+    """What the checker actually reads: the answer with markdown emphasis stripped and whitespace
+    collapsed. NOT case-folded — the regexes carry their own `(?i)` where they want it; the
+    substring test folds case itself."""
+    out = "".join(ch for ch in (text or "") if ch not in _STRIP_CHARS)
+    return _WS.sub(" ", out).strip()
+
+
+def checker_spec(task: dict, swapped: bool) -> dict:
+    """The three checker fields for one polarity of a task.
+
+    On the SWAPPED side the true fact is appended to `must_not_match` by construction: an answer
+    that names the truth cannot pass a cell whose memory said the opposite, and no author has to
+    remember to write that clause."""
+    src = task["swap"] if swapped else task
+    must_not = list(src.get("checker_must_not_match") or [])
+    if swapped:
+        must_not.append(r"(?i)" + re.escape(task["fact"]))
+    return {"must_contain": src["checker_must_contain"],
+            "must_match": list(src.get("checker_must_match") or []),
+            "must_not_match": must_not}
+
+
+def check_answer(task: dict, answer: str, swapped: bool = False) -> dict:
+    """Score one day-N answer. Returns the verdict AND why, so a report never has to guess which
+    clause decided a cell."""
+    spec = checker_spec(task, swapped)
+    text = normalise_answer(answer)
+    contains = spec["must_contain"].casefold() in text.casefold()
+    missing = [p for p in spec["must_match"] if not re.search(p, text)]
+    hedged = [p for p in (list(HEDGE_PATTERNS) + spec["must_not_match"]) if re.search(p, text)]
+    return {"success": bool(contains and not missing and not hedged),
+            "contains": contains, "missing_patterns": missing, "disqualified_by": hedged}
 
 USAGE_SCHEMA = "gedaechtnis-memory-eval-usage/1"
 LIVE_DEFAULT_MAX_TURNS = 8
@@ -112,28 +215,89 @@ class CeilingReached(Exception):
 
 
 # ------------------------------------------------------------------- tasks ----
+TASK_KEYS = ("task_id", "day1_prompt", "memory_sentence", "canon_heading", "fact",
+             "day_n_prompt", "checker_file", "checker_must_contain", "checker_must_match", "swap")
+SWAP_KEYS = ("day1_prompt", "memory_sentence", "canon_heading", "fact",
+             "checker_must_contain", "checker_must_match")
+
+
+def task_side(task: dict, swapped: bool) -> dict:
+    """The task's own fields, or its `swap` block's — one accessor, so no caller re-implements the
+    polarity rule and gets one field from the wrong side."""
+    return task["swap"] if swapped else task
+
+
+def validate_task(task: dict, where: str) -> None:
+    """Refuse a task that cannot MEAN anything, before a run spends money on it.
+
+    Two classes are checked. (a) *self-consistency*: the recorded sentence must itself satisfy the
+    checker for its own side — if the memory the harness writes would not pass, no arm can pass
+    honestly and a failure would be the task's, not the arm's. (b) *polarity separation*: the true
+    fact must be absent from the swap's text and vice versa, or a swapped cell's verdict is
+    ambiguous."""
+    for key in TASK_KEYS:
+        if key not in task:
+            raise ValueError(f"{where}: task is missing {key!r}")
+    if not isinstance(task["swap"], dict):
+        raise ValueError(f"{where}: 'swap' must be an object")
+    for key in SWAP_KEYS:
+        if key not in task["swap"]:
+            raise ValueError(f"{where}: task 'swap' block is missing {key!r}")
+    # Polarity separation is checked FIRST, because a leak also breaks the self-consistency check
+    # below (the swapped checker refuses the true fact by construction) and a reader who sees only
+    # "your memory_sentence fails its own checker" would go and edit the checker.
+    true_text = " ".join(str(task[k]) for k in ("day1_prompt", "memory_sentence", "canon_heading",
+                                                "fact", "day_n_prompt"))
+    swap_text = " ".join(str(task["swap"][k]) for k in SWAP_KEYS)
+    if task["fact"].casefold() in swap_text.casefold():
+        raise ValueError(f"{where}: the true fact {task['fact']!r} appears in the swap block — a "
+                         "swapped cell could then pass while naming the truth")
+    if task["swap"]["fact"].casefold() in true_text.casefold():
+        raise ValueError(f"{where}: the swap fact {task['swap']['fact']!r} appears in the true "
+                         "task's text — the true cell would be answerable from the prompt")
+    for swapped in (False, True):
+        side, label = task_side(task, swapped), "swap" if swapped else "task"
+        if not side["checker_must_contain"]:
+            raise ValueError(f"{where}: the {label}'s checker_must_contain is empty — that check "
+                             "would pass on any string at all")
+        verdict = check_answer(task, side["memory_sentence"], swapped=swapped)
+        if not verdict["success"]:
+            raise ValueError(
+                f"{where}: the {label}'s own memory_sentence does not pass its own checker "
+                f"({verdict}) — the substrate this harness writes would score FAIL, so no arm "
+                "could pass the cell honestly. Fix the sentence or the checker.")
+
+
 def load_tasks(tasks_dir: Path) -> list[dict]:
     tasks = []
     for p in sorted(tasks_dir.glob("*.json")):
         t = json.loads(p.read_text(encoding="utf-8"))
-        for key in ("task_id", "day1_prompt", "memory_sentence", "canon_heading", "fact",
-                    "day_n_prompt", "checker_file", "checker_must_contain"):
-            if key not in t:
-                raise ValueError(f"{p}: task is missing {key!r}")
+        validate_task(t, str(p))
         tasks.append(t)
     if not tasks:
         raise ValueError(f"{tasks_dir}: no task JSON files found")
     if not any(t.get("positive_control") for t in tasks):
         raise ValueError(f"{tasks_dir}: no task is flagged \"positive_control\": true — the "
                          "harness-vacuity check has nothing to assert (see the module docstring)")
+    ids = [t["task_id"] for t in tasks]
+    if len(set(ids)) != len(ids):
+        raise ValueError(f"{tasks_dir}: duplicate task_id(s) in {sorted(ids)}")
+    files = [t["checker_file"] for t in tasks]
+    if len(set(files)) != len(files):
+        raise ValueError(f"{tasks_dir}: two tasks share a checker_file — one would overwrite the "
+                         f"other's answer: {sorted(files)}")
     # Sanity: one task's fact must not accidentally leak into another task's day-N prompt, or a
-    # cross-task collision could make the "none" arm pass by ACCIDENT rather than by memory.
+    # cross-task collision could make the "none" arm pass by ACCIDENT rather than by memory. Both
+    # polarities are checked: a swap fact in a neighbour's prompt is the same hazard.
     for a in tasks:
         for b in tasks:
-            if a is not b and a["fact"] in b["day_n_prompt"]:
-                raise ValueError(f"{a['task_id']}'s fact {a['fact']!r} appears in "
-                                 f"{b['task_id']}'s day_n_prompt — this would make a 'none'-arm "
-                                 "pass ambiguous. Rewrite one of the two.")
+            if a is b:
+                continue
+            for label, fact in (("fact", a["fact"]), ("swap fact", a["swap"]["fact"])):
+                if fact.casefold() in b["day_n_prompt"].casefold():
+                    raise ValueError(f"{a['task_id']}'s {label} {fact!r} appears in "
+                                     f"{b['task_id']}'s day_n_prompt — this would make a "
+                                     "'none'-arm pass ambiguous. Rewrite one of the two.")
     return tasks
 
 
@@ -141,12 +305,24 @@ def build_answers(tasks: list[dict]) -> dict:
     """Substring -> answer, in the order `stub_claude.py` checks them: every task's FACT key
     first (so a prompt that genuinely carries the recalled fact matches it), then every task's
     plain day-N prompt as a fallback (so a prompt with NO recalled context — the `none` arm — gets
-    an honest "I don't know" instead of accidentally matching something else)."""
+    an honest "I don't know" instead of accidentally matching something else).
+
+    Both polarities get a key, the SWAP first: the swapped arm's prompt carries only the swapped
+    fact, so ordering cannot cross the wires, and `validate_task` has already refused any task
+    where one polarity's fact appears in the other's text.
+
+    The answer text is the side's own `memory_sentence` — not a phrase this file invents. That is
+    the point of the checker self-consistency rule in `validate_task`: a dry run then exercises the
+    real `check_answer`, patterns and all, instead of a string this module made pass by
+    construction."""
     answers = {}
     for t in tasks:
-        answers[t["fact"]] = f"Recorded decision: {t['fact']}."
+        answers[t["swap"]["fact"]] = t["swap"]["memory_sentence"]
     for t in tasks:
-        answers[t["day_n_prompt"]] = "I have no record of that decision from this session alone."
+        answers[t["fact"]] = t["memory_sentence"]
+    for t in tasks:
+        answers[t["day_n_prompt"]] = ("No memory exists yet, so I have no record of that decision "
+                                      "from this session alone.")
     return answers
 
 
@@ -162,11 +338,64 @@ def automemory_path(home: Path, repo: Path) -> Path:
     return home / ".claude" / "projects" / mangled / "memory" / "MEMORY.md"
 
 
-def write_automemory(home: Path, repo: Path, task: dict) -> None:
+# Plausible unrelated prior decisions, used ONLY to pad the prior-decisions file up to the
+# gedaechtnis arm's context size. They must be believable (a real memory file is full of other
+# projects' decisions) and must not answer, hint at, or collide with any task: nothing here names a
+# filename, identifier or rule that a task asks about. `validate_task`'s cross-task leak rule does
+# not cover these, so they are kept deliberately generic.
+FILLER_DECISIONS = (
+    "Release notes are written at tag time, not at merge time.",
+    "The staging environment is rebuilt from scratch every Monday morning.",
+    "Long-running migrations run behind a feature flag before they run in production.",
+    "Code review is required from one person outside the authoring team.",
+    "The changelog is generated from commit subjects, then edited by hand.",
+    "Dependency bumps land as their own commits, never inside a feature commit.",
+    "Load tests run against a copy of last quarter's traffic profile.",
+    "On-call handover happens at 09:00 local time with a written summary.",
+    "Documentation lives beside the code it documents, in the same pull request.",
+    "Third-party outages are recorded in the incident log even when nothing broke.",
+    "Feature branches older than two weeks are rebased or closed.",
+    "The build is considered broken if it takes longer than twelve minutes.",
+)
+_PAD_PREFIX = "- (padding, so this file byte-matches the other memory arm) "
+
+
+def automemory_text(task: dict, target_bytes: int | None = None) -> str:
+    """The prior-decisions file's contents: the task's own recorded sentence, plus — when a target
+    is given — enough unrelated prior decisions to reach EXACTLY that many bytes.
+
+    Byte-matching is what removes the first run's largest confound. `automemory` reached day N with
+    76–149 B against gedaechtnis's 2,468–3,082 B, so "more relevant context helps" sat inside the
+    comparison. Padding to the same size does not make the arms equal in RELEVANCE — that
+    difference is the plugin's actual mechanism — but it does mean the byte count is no longer one
+    of the differences."""
+    body = "# Memory index\n\n" + f"- {task['title']} — {task['memory_sentence']}\n"
+    if not target_bytes:
+        return body
+    i = 0
+    while True:
+        nxt = f"- {FILLER_DECISIONS[i % len(FILLER_DECISIONS)]}\n"
+        if len(body.encode("utf-8")) + len(nxt.encode("utf-8")) > target_bytes:
+            break
+        body += nxt
+        i += 1
+    # Land on the target exactly. A whole filler line rarely divides the remainder, so the last
+    # line is a declared padding line, trimmed to the byte; both numbers go on the result row, so
+    # nothing about this is hidden from the report.
+    short = target_bytes - len(body.encode("utf-8"))
+    if short >= len(_PAD_PREFIX) + 1:
+        body += _PAD_PREFIX + "." * (short - len(_PAD_PREFIX) - 1) + "\n"
+    elif short > 0:
+        body += "." * short
+    return body
+
+
+def write_automemory(home: Path, repo: Path, task: dict, target_bytes: int | None = None) -> int:
     path = automemory_path(home, repo)
     path.parent.mkdir(parents=True, exist_ok=True)
-    prior = path.read_text(encoding="utf-8") if path.is_file() else "# Memory index\n\n"
-    path.write_text(prior + f"- {task['title']} — {task['memory_sentence']}\n", encoding="utf-8")
+    text = automemory_text(task, target_bytes)
+    path.write_text(text, encoding="utf-8")
+    return len(text.encode("utf-8"))
 
 
 def read_automemory(home: Path, repo: Path) -> str:
@@ -210,11 +439,45 @@ def stage_project_settings(repo: Path) -> Path:
     return path
 
 
-def write_canon_entry(vault: Path, region: str, task: dict) -> None:
+def write_canon_entry(vault: Path, region: str, task: dict, swapped: bool = False) -> None:
+    side = task_side(task, swapped)
     canon = vault / region / "Canon.md"
     prior = canon.read_text(encoding="utf-8") if canon.is_file() else f"# {region} — Canon\n"
-    canon.write_text(prior + f"\n## {task['canon_heading']}\n\n**Decided:** eval day 1. "
-                     f"{task['memory_sentence']}\n", encoding="utf-8")
+    canon.write_text(prior + f"\n## {side['canon_heading']}\n\n**Decided:** eval day 1. "
+                     f"{side['memory_sentence']}\n", encoding="utf-8")
+
+
+def build_vault_fixture(home: Path, repo: Path, task: dict, swapped: bool) -> tuple[Path, dict]:
+    """The plugin arms' substrate: a real `init.py` vault with the day-1 decision recorded in it.
+    Shared by `gedaechtnis` and `swapped` so the two differ in the RECORDED SENTENCE and nothing
+    else — same init, same region, same recall call, same staged hooks."""
+    env = sub_env(home)
+    vault = home / "vault"
+    run_init(repo, vault, env)
+    write_canon_entry(vault, "Demo", task, swapped=swapped)
+    return vault, env
+
+
+def byte_match_targets(tasks: list[dict], base: Path) -> dict:
+    """Per task, the byte size of the context the gedaechtnis arm will reach day N with.
+
+    Computed in a PRE-PASS, before any model call, because it costs nothing: `init.py` and
+    `recall.py` are local processes. The prior-decisions arm is then padded to this number, so the
+    two memory arms differ in what their bytes SAY and not in how many there are. Doing it any
+    later would mean either running the arms out of order or guessing the size."""
+    targets = {}
+    for task in tasks:
+        # The scratch directory name is exactly as long as the real arm's (`gedaechtnis__`, 13
+        # characters), because `recall.py`'s output quotes the vault's own FILE PATHS: a shorter
+        # fixture path makes the measured context a couple of bytes smaller than the one the arm
+        # will really carry. Nothing depends on this holding — every row records the ACTUAL
+        # context bytes of both arms, so a drift shows up in the report instead of hiding.
+        scratch = base / f"_bytematched_{task['task_id']}"
+        repo = scratch / "home" / "repo"
+        repo.mkdir(parents=True, exist_ok=True)
+        vault, env = build_vault_fixture(scratch / "home", repo, task, swapped=False)
+        targets[task["task_id"]] = len(call_recall(vault, task["day_n_prompt"], env).encode("utf-8"))
+    return targets
 
 
 def call_recall(vault: Path, query: str, env: dict) -> str:
@@ -350,6 +613,10 @@ class StubCaller:
                                     effort=self.effort, env=env)
         return answer, usage_tokens(usage), None
 
+    @property
+    def calls(self):
+        return []
+
 
 class LiveCaller:
     """One real `claude -p` process per step, priced, recorded, and ceiling-bounded."""
@@ -418,6 +685,9 @@ class LiveCaller:
         ended = datetime.datetime.now().isoformat(timespec="seconds")
 
         usage_path = self.out_dir / f"{arm}-{task['task_id']}-{day}.usage.json"
+        if usage_path.exists():
+            raise LiveRefusal(f"{usage_path} already exists — two calls would share one record "
+                              "and the first would be lost. The day label must be unique per call.")
         try:
             result = json.loads(proc.stdout)
         except ValueError:
@@ -460,7 +730,16 @@ class LiveCaller:
 
 
 # --------------------------------------------------------------------- run ----
-def run_task_arm(arm: str, task: dict, base: Path, caller) -> dict:
+def run_task_arm(arm: str, task: dict, base: Path, caller, samples: int = 1,
+                 byte_match: dict | None = None) -> list[dict]:
+    """One (arm, task) cell: ONE day-1 call, then `samples` day-N calls, one row each.
+
+    **Why day 1 is not repeated.** Nothing reads its answer — the memory substrate is written by
+    this harness, deliberately (see the module docstring), so a second day-1 call would cost the
+    same as the first and measure nothing. The quantity being sampled is the day-N answer, and that
+    is what repeats. Each day-N call is a fresh `claude -p` process with no shared state, so the
+    samples are independent in the only sense available here."""
+    swapped = arm in SWAPPED_ARMS
     home = base / f"{arm}__{task['task_id']}" / "home"
     repo = home / "repo"
     repo.mkdir(parents=True, exist_ok=True)
@@ -469,75 +748,105 @@ def run_task_arm(arm: str, task: dict, base: Path, caller) -> dict:
     day_n_label = f"day{task.get('day_n', 'N')}"
     usage_files = []
 
-    day1_answer, tokens, u1 = caller(arm, task, "day1", task["day1_prompt"], repo, env)
+    _day1_answer, day1_tokens, u1 = caller(arm, task, "day1", task_side(task, swapped)["day1_prompt"],
+                                           repo, env)
     if u1:
         usage_files.append(str(u1))
 
-    vault, boot_bytes = None, None
+    boot_bytes, target, automemory_bytes = None, None, None
     if arm == "automemory":
-        write_automemory(home, repo, task)
-    elif arm == "gedaechtnis":
-        vault = home / "vault"
-        run_init(repo, vault, env)
-        write_canon_entry(vault, "Demo", task)
+        target = (byte_match or {}).get(task["task_id"])
+        automemory_bytes = write_automemory(home, repo, task, target)
+        context = read_automemory(home, repo)
+    elif arm in VAULT_ARMS:
+        vault, env = build_vault_fixture(home, repo, task, swapped)
         boot_bytes = measure_boot_bytes(repo, env)
         if live:
             stage_project_settings(repo)
-
-    if arm == "none":
-        context = ""
-    elif arm == "automemory":
-        context = read_automemory(home, repo)
-    else:
         context = call_recall(vault, task["day_n_prompt"], env)
+    else:
+        context = ""
 
     day_n_prompt = (context + "\n\n" if context else "") + task["day_n_prompt"]
-    day_n_answer, day_n_tokens, u2 = caller(arm, task, day_n_label, day_n_prompt, repo, env)
-    tokens += day_n_tokens
-    if u2:
-        usage_files.append(str(u2))
-
-    out_file = repo / task["checker_file"]
-    out_file.write_text(day_n_answer, encoding="utf-8")
-    success = task["checker_must_contain"] in out_file.read_text(encoding="utf-8")
-
-    row = {
-        "arm": arm, "task_id": task["task_id"],
-        "positive_control": bool(task.get("positive_control", False)),
-        "success": success, "tokens": tokens, "boot_bytes": boot_bytes,
-        "context_bytes": len(context.encode("utf-8")),
-    }
-    if live:
-        # Live-only keys. `render_markdown` is a pure function of the columns it names, so these
-        # extend the JSONL without touching the dry-run table's bytes.
-        row["usd"] = round(sum(c["usd"] for c in caller.calls
-                               if c["arm"] == arm and c["task_id"] == task["task_id"]), 6)
-        row["usage_files"] = usage_files
-    return row
+    rows = []
+    for sample in range(1, samples + 1):
+        label = day_n_label if samples == 1 else f"{day_n_label}-s{sample}"
+        answer, tokens, u2 = caller(arm, task, label, day_n_prompt, repo, env)
+        if u2:
+            usage_files.append(str(u2))
+        suffix = "" if samples == 1 else f".s{sample}"
+        out_file = repo / (task["checker_file"] + suffix)
+        out_file.write_text(answer, encoding="utf-8")
+        verdict = check_answer(task, out_file.read_text(encoding="utf-8"), swapped=swapped)
+        row = {
+            "arm": arm, "task_id": task["task_id"], "sample": sample,
+            "positive_control": bool(task.get("positive_control", False)),
+            "success": verdict["success"], "tokens": tokens, "day1_tokens": day1_tokens,
+            "boot_bytes": boot_bytes, "context_bytes": len(context.encode("utf-8")),
+            "byte_match_target": target, "memory_bytes": automemory_bytes,
+            "verdict": verdict,
+        }
+        if live:
+            # Live-only keys: the day-1 call's price is attributed to the FIRST sample only, so
+            # summing `usd` over rows equals the run's priced total instead of triple-counting it.
+            own = [c for c in caller.calls if c["arm"] == arm and c["task_id"] == task["task_id"]
+                   and (c["day"] == label or (sample == 1 and c["day"] == "day1"))]
+            row["usd"] = round(sum(c["usd"] for c in own), 6)
+            row["usage_files"] = [c["usage_file"] for c in own]
+        rows.append(row)
+    return rows
 
 
 # ------------------------------------------------------------------ report ----
 def render_markdown(rows: list[dict]) -> str:
     """Pure function of the rows — see recall_bench/run.py's identical discipline. A caller must
-    never hand-type this table; regenerate it from the JSONL instead."""
-    lines = ["| arm | task | positive_control | success | tokens | boot_bytes | context_bytes |",
-             "|---|---|---|---|---|---|---|"]
+    never hand-type this table; regenerate it from the JSONL instead.
+
+    Two tables, because samples give a cell a NUMERATOR: a task x arm matrix of passes-out-of-
+    samples (which is what a claim rule is read off), then the per-call detail. A cell's spread
+    across its samples IS the noise floor — a claim that two arms differ by fewer tasks than the
+    cells wobble on their own is not readable, so the spread is printed beside the totals rather
+    than left for a reader to compute."""
+    arms = [a for a in ARMS if any(r["arm"] == a for r in rows)]
+    arms += sorted({r["arm"] for r in rows} - set(arms))
+    tasks, seen = [], set()
     for r in rows:
-        lines.append(f"| {r['arm']} | {r['task_id']} | {r['positive_control']} | {r['success']} | "
-                     f"{r['tokens']} | {r['boot_bytes'] if r['boot_bytes'] is not None else '-'} | "
-                     f"{r['context_bytes']} |")
-    by_arm = {}
-    for r in rows:
-        by_arm.setdefault(r["arm"], []).append(r)
+        if r["task_id"] not in seen:
+            seen.add(r["task_id"])
+            tasks.append(r["task_id"])
+
+    def cell(arm, task):
+        rs = [r for r in rows if r["arm"] == arm and r["task_id"] == task]
+        return (sum(1 for r in rs if r["success"]), len(rs)) if rs else (0, 0)
+
+    lines = ["| task | " + " | ".join(arms) + " |", "|---|" + "---|" * len(arms)]
+    for t in tasks:
+        cells = []
+        for a in arms:
+            k, n = cell(a, t)
+            cells.append(f"{k}/{n}" if n else "-")
+        lines.append(f"| {t} | " + " | ".join(cells) + " |")
+
     lines.append("")
-    for arm in ARMS:
-        rs = by_arm.get(arm, [])
+    for arm in arms:
+        rs = [r for r in rows if r["arm"] == arm]
         if not rs:
             continue
-        rate = sum(1 for r in rs if r["success"]) / len(rs)
-        toks = sum(r["tokens"] for r in rs)
-        lines.append(f"**{arm}:** {sum(1 for r in rs if r['success'])}/{len(rs)} tasks succeeded "
-                     f"({rate:.2f}), {toks} tokens total")
+        per_task = [cell(arm, t) for t in tasks if cell(arm, t)[1]]
+        split = sum(1 for k, n in per_task if 0 < k < n)
+        passed = sum(1 for r in rs if r["success"])
+        lines.append(
+            f"**{arm}:** {sum(1 for k, n in per_task if k == n)}/{len(per_task)} tasks passed on "
+            f"EVERY sample, {passed}/{len(rs)} cell-samples passed, {split} task(s) split across "
+            f"their samples, {sum(r['tokens'] for r in rs)} day-N tokens")
+
+    lines += ["", "| arm | task | sample | success | tokens | boot_bytes | context_bytes | "
+              "byte_match_target |", "|---|---|---|---|---|---|---|---|"]
+    for r in rows:
+        lines.append(f"| {r['arm']} | {r['task_id']} | {r.get('sample', 1)} | {r['success']} | "
+                     f"{r['tokens']} | {r['boot_bytes'] if r['boot_bytes'] is not None else '-'} | "
+                     f"{r['context_bytes']} | "
+                     f"{r['byte_match_target'] if r.get('byte_match_target') is not None else '-'} |")
     return "\n".join(lines) + "\n"
 
 
@@ -553,9 +862,11 @@ def render_from_jsonl(jsonl_path: Path) -> str:
     return render_markdown(rows)
 
 
-def write_live_summary(path: Path, caller: LiveCaller, planned: int, stopped: str | None) -> None:
+def write_live_summary(path: Path, caller: LiveCaller, planned: int, stopped: str | None,
+                       arms: tuple = ARMS, samples: int = 1, byte_match: dict | None = None) -> None:
     summary = {
         "schema": "gedaechtnis-memory-eval-live-summary/1",
+        "arms": list(arms), "samples": samples, "byte_match_targets": byte_match or {},
         "model": caller.model, "effort": caller.effort,
         "claude": str(caller.claude_cmd), "home_policy": caller.claude_home,
         "max_turns": caller.max_turns, "max_budget_usd": caller.max_budget_usd,
@@ -601,6 +912,19 @@ def main(argv=None) -> int:
                          "`fixture` is fully isolated and only works if the CLI can authenticate "
                          "without the user's HOME.")
     ap.add_argument("--timeout", type=int, default=900, help="--live only: seconds per call")
+    ap.add_argument("--samples", type=int, default=1,
+                    help="day-N calls per (arm, task). The day-1 call is NOT repeated: nothing "
+                         "reads its answer, so a second one would cost the same and measure "
+                         "nothing. >1 is what gives a cell a noise floor.")
+    ap.add_argument("--arms", default=None,
+                    help="comma-separated subset of " + ",".join(ARMS) + " (default: all four). "
+                         "Running `none` alone first is the pre-flight: a task the no-memory arm "
+                         "answers is guessable and must be dropped before the other arms pay for "
+                         "it.")
+    ap.add_argument("--byte-match", action="store_true",
+                    help="pad the prior-decisions arm's memory file to the exact byte size of the "
+                         "gedaechtnis arm's day-N context for that task, measured in a no-cost "
+                         "pre-pass. Removes the first run's largest confound.")
     ap.add_argument("--render-only", default=None, metavar="JSONL",
                     help="skip every arm/task entirely: regenerate results.md from an existing JSONL "
                          "and exit — the same 'derived, never typed' exercise as recall_bench/run.py's flag")
@@ -620,6 +944,15 @@ def main(argv=None) -> int:
     if not a.dry_run and not a.live and (not a.claude or not a.model):
         ap.error("--claude and --model are required unless --dry-run (a live run also needs "
                  "--live and --effort — pass --dry-run to run the stub end-to-end).")
+
+    if a.samples < 1:
+        ap.error("--samples must be at least 1")
+    arms = ARMS
+    if a.arms:
+        arms = tuple(s.strip() for s in a.arms.split(",") if s.strip())
+        unknown = [s for s in arms if s not in ARMS]
+        if unknown:
+            ap.error(f"unknown arm(s) {unknown}: known arms are {', '.join(ARMS)}")
 
     tasks = load_tasks(Path(a.tasks_dir).expanduser().resolve())
     out = Path(a.out).expanduser().resolve() if a.out else Path(__file__).resolve().parent / "results"
@@ -647,18 +980,27 @@ def main(argv=None) -> int:
     else:
         caller = StubCaller(Path(a.claude), a.model, a.effort, answers_path)
 
-    planned = len(ARMS) * len(tasks)
+    targets = {}
+    if a.byte_match:
+        targets = byte_match_targets(tasks, base)
+        print("# byte-match targets (gedaechtnis day-N context bytes, measured with no model call):")
+        for tid, n in targets.items():
+            print(f"    {tid:<28} {n} B")
+
+    planned = len(arms) * len(tasks) * a.samples
     rows, stopped = [], None
     try:
-        for arm in ARMS:
+        for arm in arms:
             for task in tasks:
-                rows.append(run_task_arm(arm, task, base, caller))
+                rows.extend(run_task_arm(arm, task, base, caller, samples=a.samples,
+                                         byte_match=targets))
     except CeilingReached as e:
         stopped = str(e)
     except LiveRefusal as e:
         sys.stderr.write(f"memory_eval refuses: {e}\n")
         if a.live:
-            write_live_summary(out / "live-summary.json", caller, planned, f"refused: {e}")
+            write_live_summary(out / "live-summary.json", caller, planned, f"refused: {e}",
+                               arms=arms, samples=a.samples, byte_match=targets)
         return 2
 
     write_jsonl(out / "results.jsonl", rows)
@@ -666,7 +1008,8 @@ def main(argv=None) -> int:
     (out / "results.md").write_text(md, encoding="utf-8")
     print(md)
     if a.live:
-        write_live_summary(out / "live-summary.json", caller, planned, stopped)
+        write_live_summary(out / "live-summary.json", caller, planned, stopped,
+                           arms=arms, samples=a.samples, byte_match=targets)
         if stopped:
             print("*** CEILING REACHED — the run stopped before it was complete.")
             print(f"    {stopped}")

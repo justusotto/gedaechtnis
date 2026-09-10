@@ -96,17 +96,21 @@ def memory_eval_result(tmp_path_factory):
     return p, out
 
 
-def test_memory_eval_dry_run_executes_all_three_arms_and_writes_jsonl(memory_eval_result):
+def test_memory_eval_dry_run_executes_every_arm_and_writes_jsonl(memory_eval_result):
+    """The shipped task count is not pinned here — tasks are added by outside authors and pinning
+    the number would make every addition a test failure. What IS pinned is the shape: every arm
+    against every shipped task, exactly once at the default single sample."""
     p, out = memory_eval_result
     assert p.returncode == 0, p.stderr
     jsonl = out / "results.jsonl"
     assert jsonl.is_file()
     rows = [json.loads(l) for l in jsonl.read_text(encoding="utf-8").splitlines() if l.strip()]
-    arms_seen = {r["arm"] for r in rows}
-    assert arms_seen == {"none", "automemory", "gedaechtnis"}
+    assert {r["arm"] for r in rows} == {"none", "automemory", "gedaechtnis", "swapped"}
+    shipped = {p.stem for p in (EVAL / "memory_eval" / "tasks").glob("*.json")}
     task_ids = {r["task_id"] for r in rows}
-    assert len(task_ids) == 3                      # the three shipped task specs
-    assert len(rows) == 3 * 3                       # every arm x every task
+    assert task_ids == shipped, "a shipped task file did not produce rows"
+    assert len(rows) == 4 * len(shipped)             # every arm x every task, one sample each
+    assert all(r["sample"] == 1 for r in rows)
     assert (out / "results.md").is_file()
     assert "arm" in (out / "results.md").read_text(encoding="utf-8")
 
@@ -127,23 +131,45 @@ def test_positive_control_fails_under_none_arm(memory_eval_result):
         "either the day-1 fact leaked into the day-N prompt/repo, or the checker is too loose")
 
 
-def test_memory_eval_automemory_and_gedaechtnis_solve_every_task(memory_eval_result):
+def test_memory_eval_every_memory_arm_solves_every_task(memory_eval_result):
     """Not load-bearing the way the positive control is, but a sanity check that the harness's
     memory-carrying arms are not ALSO vacuous in the other direction (e.g. a context leak that
-    makes every arm pass regardless of whether memory actually reached the prompt)."""
+    makes every arm pass regardless of whether memory actually reached the prompt).
+
+    The `swapped` arm is included deliberately: under the stub it must pass by FOLLOWING the swap,
+    which is only possible if the altered memory actually reached the day-N prompt. A swapped arm
+    that failed here would mean the swap never got out of the task file."""
     p, out = memory_eval_result
     rows = [json.loads(l) for l in (out / "results.jsonl").read_text(encoding="utf-8").splitlines() if l.strip()]
-    for arm in ("automemory", "gedaechtnis"):
+    for arm in ("automemory", "gedaechtnis", "swapped"):
         arm_rows = [r for r in rows if r["arm"] == arm]
-        assert all(r["success"] for r in arm_rows), f"{arm}: {arm_rows}"
+        assert all(r["success"] for r in arm_rows), f"{arm}: {[r for r in arm_rows if not r['success']]}"
 
 
-def test_memory_eval_gedaechtnis_arm_reports_boot_bytes(memory_eval_result):
+def test_memory_eval_vault_arms_report_boot_bytes(memory_eval_result):
     p, out = memory_eval_result
     rows = [json.loads(l) for l in (out / "results.jsonl").read_text(encoding="utf-8").splitlines() if l.strip()]
-    ged_rows = [r for r in rows if r["arm"] == "gedaechtnis"]
+    ged_rows = [r for r in rows if r["arm"] in ("gedaechtnis", "swapped")]
     assert all(isinstance(r["boot_bytes"], int) and r["boot_bytes"] > 0 for r in ged_rows)
     assert all(r["boot_bytes"] is None for r in rows if r["arm"] in ("none", "automemory"))
+
+
+def test_memory_eval_unmatched_automemory_is_far_smaller_than_the_vault_context(memory_eval_result):
+    """Without `--byte-match` the prior-decisions file is the short one the FIRST live run used —
+    tens of bytes against the vault arms' thousands. This is the negative control for the
+    byte-matching tests in test_memory_eval_checker.py: it shows the confound is real and that
+    padding is what removes it, rather than something the harness did all along."""
+    p, out = memory_eval_result
+    rows = [json.loads(l) for l in (out / "results.jsonl").read_text(encoding="utf-8").splitlines() if l.strip()]
+    auto = {r["task_id"]: r["context_bytes"] for r in rows if r["arm"] == "automemory"}
+    vault = {r["task_id"]: r["context_bytes"] for r in rows if r["arm"] == "gedaechtnis"}
+    assert auto and set(auto) == set(vault)
+    # Per TASK, not across tasks: recall returns different amounts for different queries, so the
+    # smallest vault context can be smaller than the largest prior-decisions file of another task.
+    # Pairing them by task is the comparison the arms actually make.
+    for tid in auto:
+        assert auto[tid] * 3 < vault[tid], (tid, auto[tid], vault[tid])
+    assert all(r["byte_match_target"] is None for r in rows)
 
 
 def test_memory_eval_markdown_is_a_true_regeneration_of_the_jsonl(memory_eval_result, tmp_path):

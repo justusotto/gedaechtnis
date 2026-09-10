@@ -1,0 +1,31 @@
+{
+  "task_id": "009-media-cache-isolation",
+  "title": "Offline media cache isolation",
+  "author": "author-b",
+  "source_region": "Sinica/ChongjuTrainer",
+  "positive_control": false,
+  "description": "Day 1 records the exact name of a dedicated offline-media cache store and the fact that it is kept structurally separate from saved progress data. Day 5 must recall the store's literal name and its isolation property; nothing about a generic offline app implies this specific name or this specific separation choice, so a memory-less model cannot produce it.",
+
+  "day1_prompt": "We are building an offline-capable app. Decide and record: all downloaded offline media (audio clips and images) is stored in its own dedicated cache, named `media-cache-v1`, completely separate from the app's saved progress/notes data, so wiping media can never delete progress.",
+  "memory_sentence": "Downloaded offline media (audio and images) is stored in its own dedicated cache named `media-cache-v1`, completely separate from the app's progress/notes data, so wiping media can never delete progress.",
+  "canon_heading": "Offline media cache is isolated from progress data",
+  "fact": "media-cache-v1",
+
+  "day_n": 5,
+  "day_n_prompt": "It's day 5 of the project. What is the exact name of the cache store used for downloaded offline media (audio/images), and does clearing it affect saved progress? Answer in one sentence.",
+
+  "checker_file": "media-cache-answer.txt",
+  "checker_must_contain": "media-cache-v1",
+  "checker_must_match": ["(?i)media-cache-v1", "(?i)(separat|isolat|never (delete|touch|affect)|does not (affect|touch))"],
+  "checker_must_not_match": [],
+
+  "swap": {
+    "day1_prompt": "We are building an offline-capable app. Decide and record: all downloaded offline media (audio clips and images) is stored inside the SAME store as the app's saved progress/notes data, under the single name `unified-store-v1`, so wiping media also wipes progress unless it was backed up separately.",
+    "memory_sentence": "Downloaded offline media (audio and images) is stored inside the same store as progress/notes data, under the single name `unified-store-v1`, so wiping media also wipes progress unless it was backed up first.",
+    "canon_heading": "Offline media cache shares storage with progress data",
+    "fact": "unified-store-v1",
+    "checker_must_contain": "unified-store-v1",
+    "checker_must_match": ["(?i)unified-store-v1", "(?i)(same store|shared|wipes progress|wipe progress)"],
+    "checker_must_not_match": []
+  }
+}
