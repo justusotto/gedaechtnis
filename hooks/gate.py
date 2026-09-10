@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """gate.py — the PreToolUse locked doors of Das Gedächtnis.
 
-    python3 gate.py bash    # vault git law · launch pins model · data integrity · artifact-not-file
+    python3 gate.py bash    # vault git law · launch pins model · data integrity · artifact-not-file ·
+                            # no whole-file overwrite (D1's bash half + shared-surface append-only)
     python3 gate.py write   # partition (WARN or DENY per state file) · Concilium stem rule
     python3 gate.py agent   # every Agent call pins a model unless its definition does
 
@@ -311,11 +312,64 @@ def rule_artifact_not_file(cmd: str, cwd: str | None) -> str | None:
     return None
 
 
+# --------------------------------------------------- the `# GENERATED` door (council 2 §1) ----
+# A view under `.gedaechtnis/views/` is rebuilt from the log every time it is generated, so an edit
+# made IN the view is gone at the next generation with no error anywhere — the exact silent-loss
+# shape the log-and-views design exists to remove. The door turns that edit into a row instead.
+#
+# It is keyed on the FILE'S OWN FIRST LINE, never on a directory: a generated file says so about
+# itself, so the rule needs no allowlist and cannot go stale when the views move (their final home
+# is a later ruling). During the shadow nothing outside `.gedaechtnis/views/` carries the line, so
+# nothing outside it can be bitten — which is what makes an additive shadow additive.
+#
+# Balthasar's sign-off names this door the most likely thing to be reverted; the signal he asked for
+# is more than 3 refusals in the shadow's first week. Every refusal is logged as `generated-view`.
+
+GENERATED_PREFIX = "# GENERATED"
+
+
+def is_generated(p: Path) -> bool:
+    """True when the file exists and its FIRST LINE marks it as machine-written."""
+    try:
+        with open(p, "r", encoding="utf-8", errors="replace") as fh:
+            return fh.readline().startswith(GENERATED_PREFIX)
+    except OSError:
+        return False
+
+
+def generated_refusal(rel: str, how: str) -> str:
+    return (f"`{rel}` is a GENERATED view: its first line is `{GENERATED_PREFIX} sha256:…`, and it is rebuilt from the "
+            f"memory log every time `gedaechtnis/views.py` runs — this {how} would be gone at the next generation, with "
+            "no error anywhere. Append a row instead:\n"
+            "    python3 gedaechtnis/logstore.py append --region <Region> --kind <decision|lesson|state|question|note> "
+            "--stem <Canon|Errata|Patterns|Position|Aporia> --heading '## …' --body '…'\n"
+            "then re-run `python3 gedaechtnis/views.py`. To change an entry the log already carries, append the corrected "
+            "row — the log is append-only and the newer row wins. (Council 2 closure §1: a hand edit becomes a row, never "
+            "a lost edit.)")
+
+
 _WRITE_VERBS = {"tee", "cp", "mv", "rm", "touch", "truncate", "install"}
+_CLOBBER = {"redirect": "shell redirect", "redirect-append": "shell append", "sed-i": "`sed -i`",
+            "tee": "`tee`", "cp": "`cp` over it", "mv": "`mv` over it", "install": "`install` over it",
+            "truncate": "`truncate`"}
+
+
+def rule_generated_view_bash(cmd: str, cwd: str | None) -> str | None:
+    for p, how in bash_write_targets(cmd, cwd):
+        if how in _CLOBBER and is_generated(p):
+            return generated_refusal(vault_rel(p) or str(p), _CLOBBER[how])
+    return None
 
 
 def bash_write_targets(cmd: str, cwd: str | None) -> list[tuple[Path, str]]:
-    """Heuristic: vault paths a Bash command writes. (path, how) — how ∈ redirect-append · redirect · sed-i · verb."""
+    """Heuristic: vault paths a Bash command writes. (path, how) — how in redirect-append · redirect ·
+    sed-i · tee · tee-append · cp · mv · mv-out · rm · touch · truncate · install · dd.
+
+    `tee` is split into `tee`/`tee-append` here (rather than left as one "verb" bucket) because the
+    two need OPPOSITE treatment downstream: `tee -a` is a pure append like `>>`, plain `tee` truncates
+    like `>` — a caller that cannot tell them apart cannot refuse the second without also refusing
+    the first. `dd of=` is handled on its own because its target is a `key=value` argument, not a
+    trailing bare token or a `>`-spelled redirect."""
     out = []
     for seg in segments(cmd):
         try:
@@ -345,6 +399,10 @@ def bash_write_targets(cmd: str, cwd: str | None) -> list[tuple[Path, str]]:
             for x in w[j + 1:]:
                 if not x.startswith("-") and not x.startswith("s") and "/" in x:
                     out.append((expand(x, cwd), "sed-i"))
+        elif verb == "dd":
+            for x in w[j + 1:]:
+                if x.startswith("of="):
+                    out.append((expand(x[len("of="):], cwd), "dd"))
         elif verb in _WRITE_VERBS:
             args = [x for x in w[j + 1:] if not x.startswith("-")]
             if verb in ("cp", "mv", "install") and args:
@@ -352,10 +410,68 @@ def bash_write_targets(cmd: str, cwd: str | None) -> list[tuple[Path, str]]:
                 if verb == "mv":
                     for src in args[:-1]:
                         out.append((expand(src, cwd), "mv-out"))      # the SOURCE leaves its place: a deletion in disguise
-            elif verb in ("tee", "rm", "touch", "truncate"):
+            elif verb == "tee":
+                how = "tee-append" if any(x in ("-a", "--append") for x in w[j + 1:]) else "tee"
+                for x in args:
+                    out.append((expand(x, cwd), how))
+            elif verb in ("rm", "touch", "truncate"):
                 for x in args:
                     out.append((expand(x, cwd), verb))
     return [(p, how) for p, how in out if under(p, VAULT)]
+
+
+# ------------------------------------------ D1's bash half: no whole-file overwrite (WP9 gap 1) ----
+# `Write` has an anchor-free sibling in Bash: a truncating redirect (`>`, not `>>`), `tee` without
+# `-a`, `cp`/`mv`/`install` ONTO an existing target, `truncate`, and `dd of=` all replace a file's
+# entire content with NO compare-and-swap at all — worse than `Write`, which at least carries the
+# session's own belief about what it is replacing (Write still gets D1's own check; this is the
+# same guard for the shapes Write cannot reach). So this binds every vault `.md` file — own lane or
+# not — and is MODE-INDEPENDENT exactly like D1 itself (Design §5.2 D1): it is a data-loss guard,
+# not a partition rule, and `partition.mode` governs who may write WHERE, never whether a write may
+# erase what is already there. Same exemptions as D1: a file that does not exist, an empty file, a
+# non-.md file, anything under `Cleanup */`, and a file THIS session created (the identical
+# created-set D1 reads — no second bookkeeping channel).
+#
+# A shared-surface `.md` file (a region's queue, the fleet roster, an Inbox, `artifacts-index.md`,
+# the umbrella-shared Canon/Position pair) gets a DIFFERENT wording naming the append-only rule,
+# because that is what a model needs to hear even when it is the file's OWN declaring lane (WP9 gap
+# 2): `path_in_partition` says "yours", but a single-FILE partition entry among a directory-prefix
+# entry means "yours to APPEND to", not "yours to replace" — Edit/Write already draw this line via
+# `pure_append`; this is the same line for Bash, which `pure_append` never sees.
+#
+# `sed -i` is deliberately NOT in the truncating set below: unlike `>`, it does not replace the
+# whole file by construction — an ordinary `s/a/b/` or line-targeted edit leaves the rest of the
+# file untouched, and a syntactic guess at "does this script empty the file" would either miss real
+# wipes or refuse ordinary edits that happen to match the guess. `sed -i` stays covered by D2's
+# mutex only, exactly as before this rule existed — a narrower, deliberate scope call, not an
+# oversight (see the report for this change).
+
+_BASH_TRUNCATING_HOWS = {"redirect", "tee", "cp", "mv", "install", "truncate", "dd"}
+
+
+def rule_bash_no_whole_file_write(cmd: str, cwd: str | None, sid: str) -> str | None:
+    for p, how in bash_write_targets(cmd, cwd):
+        if how not in _BASH_TRUNCATING_HOWS or p.suffix != ".md":
+            continue
+        try:
+            if not p.is_file() or p.stat().st_size == 0:
+                continue
+        except OSError:
+            continue
+        rel = vault_rel(p) or ""
+        if not rel or _under_cleanup(rel) or rel in created_paths(sid):
+            continue
+        kind = shared_surface(rel)
+        if kind:
+            return (f"`{rel}` is a SHARED surface ({kind}): rows are atomic single-Edit appends, never a "
+                     "read-modify-write (Speculum/Kernel 'Queue-file custody'; QCUSTODY-1 for a region queue). "
+                    f"Bash may only APPEND to it (`>>`) — `{how}` truncates the whole file with no anchor. Use "
+                     "Edit/Write for a checked keyed-row append instead.")
+        return (f"Bash write ({how}) truncates `{rel}`, an existing non-empty vault file, with no anchor: another "
+                "session's content since your last read is gone with no record. Use Edit — its anchor is checked "
+                "against the file as it is now. Whole-file overwrite is never allowed unless this session created "
+                "the file. (Design §5.2 D1; new, empty, non-.md and Cleanup files are exempt; `>>` is unaffected.)")
+    return None
 
 
 def rule_bash_partition(cmd: str, inp: dict) -> str | None:
@@ -408,7 +524,7 @@ def rule_bash_partition(cmd: str, inp: dict) -> str | None:
     # inside the same per-file mutex as Edit/Write; `chore.py bash` drops these when the command
     # returns, and a lock older than LOCK_TTL is taken over exactly as it is on the Edit path.
     for p, how in targets:
-        if how not in ("redirect", "redirect-append", "sed-i", "tee") or p.suffix != ".md":
+        if how not in ("redirect", "redirect-append", "sed-i", "tee", "tee-append") or p.suffix != ".md":
             continue
         ok, age, holder = take_filelock(p, sid)
         if not ok:
@@ -423,8 +539,11 @@ def do_bash(inp: dict) -> None:
     cwd = inp.get("cwd")
     if not cmd:
         return
+    sid = inp.get("session_id", "-")
     for fn in (lambda: rule_vault_git(cmd, cwd), lambda: rule_launch_model(cmd),
                lambda: rule_data_integrity(cmd), lambda: rule_artifact_not_file(cmd, cwd),
+               lambda: rule_generated_view_bash(cmd, cwd),
+               lambda: rule_bash_no_whole_file_write(cmd, cwd, sid),
                lambda: rule_bash_partition(cmd, inp)):
         r = fn()
         if r:
@@ -567,6 +686,12 @@ def do_write(inp: dict) -> None:
         deny(EV, (f"Concilium STEM RULE: no file under ~/Atlas/Concilium/ may carry a vault role stem (`{p.stem}`) — it would "
                   "leak into kernel_freshness, the Lustrum arm and umbrella discovery. Use the Concilium-native names "
                   "(Fundamentum · Positio · Quaestiones · Vitia · Verba · Lex · Index). (Speculum/Kernel 'Standing constraints')"))
+        return
+    # the `# GENERATED` door — deterministic, so it refuses in every partition mode, like the stem rule
+    if is_generated(p):
+        log("deny", f"write\tgenerated-view\t{rel}\tsession={inp.get('session_id', '-')}")
+        clear_pre_exists(p)                      # a refused write leaves no record of itself
+        deny(EV, generated_refusal(rel, f"`{inp.get('tool_name') or 'Edit'}`"))
         return
     r = rule_display_name_filename(p)
     if r:

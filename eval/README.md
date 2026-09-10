@@ -1,6 +1,6 @@
-# Gedächtnis eval — two benches, both currently harness-only
+# Gedächtnis eval — three benches: two harness-only, one complete
 
-Two benches back the "Anthropic bar" claims in `.orchestration/review/gedaechtnis-everybody-2026-09-09/DESIGN.md`
+Three benches back the "Anthropic bar" claims in `.orchestration/review/gedaechtnis-everybody-2026-09-09/DESIGN.md`
 §7.2:
 
 - **`recall_bench/`** (WP6) — does the entry index beat today's grep-shaped `recall.py` at
@@ -9,6 +9,42 @@ Two benches back the "Anthropic bar" claims in `.orchestration/review/gedaechtni
 - **`memory_eval/`** (WP8) — does Gedächtnis actually help a session do a cross-session task better
   than no memory at all, or than Claude Code's own built-in auto-memory? Three arms: `none` ·
   `automemory` · `gedaechtnis`.
+- **`safety/`** (WP9, §7.2.3 — COMPLETE, not a skeleton) — do the doors ever let user data be
+  destroyed, and do they ever refuse the legitimate twin of an attack? See below.
+
+## Safety (WP9)
+
+**What it proves.** `safety/cases.json` holds 52 adversarial commands/writes (git history
+destruction, cache/media/Trash/anki_mining.db deletion, cross-lane writes, whole-file overwrites
+(Write AND Bash — a truncating redirect, `tee`, `cp`/`mv`/`install`, `truncate`, `dd of=` over an
+existing non-empty vault `.md`, including a lane's own single-file shared surfaces like a queue),
+stale/foreign locks, malformed shared-surface rows, …) and their 52 **legitimate twins** — the
+closest benign form of the same act (`git add -- file` next to `git add -A`, `git mv` next to a
+plain `mv` out of the vault, an Edit next to a whole-file Write, `>>`/`tee -a` next to `>`/`tee`,
+…). `safety/run_safety.py` runs every one of the 104 through the REAL `hooks/gate.py`, each in its
+own fresh throwaway sandbox (no real vault, no real `~/.claude`, no network, no model). A green run
+means: every attack was denied
+or refused-and-asked citing its rule, and not one legitimate twin was refused. `--mutant NAME`
+(one of `vault_git` · `data_integrity` · `bash_partition` · `d1_whole_file_write` ·
+`write_partition`) disables exactly that one rule by monkeypatch and re-runs — proving the case set
+actually DEPENDS on the rule, not just that the rule exists (`eval/safety/mutant_gate.py`).
+
+**How to run it:**
+
+```sh
+python3 eval/safety/run_safety.py                        # baseline — should print ALL GREEN, exit 0
+python3 eval/safety/run_safety.py --mutant vault_git      # should print "mutant bit: N case(s)…", exit 0
+```
+
+Both write `results.json` (machine-readable, DERIVED — never hand-typed) and `results.md` (the
+same table this prints to stdout) into `eval/safety/results/` by default (`--out DIR` to change
+it); that directory is gitignored, same as `recall_bench`'s and `memory_eval`'s own `results/`.
+
+**What a red means.** For the baseline run: `hooks/gate.py` no longer refuses something it used to
+— a real regression in the doors, not a test problem; fix the door, then re-run. For a `--mutant`
+run that prints `MUTANT DID NOT BITE`: no case in `cases.json` actually exercises that rule — the
+mutant table or the case set needs a new case, not the door. `gedaechtnis/tests/test_safety_eval.py`
+runs both shapes as part of the plugin's own test suite.
 
 ## What is built, and what is deliberately not
 
