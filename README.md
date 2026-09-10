@@ -12,6 +12,56 @@ need judgment stay prose; only deterministic ones live here.
 The vault itself — your notes — is the data half and is not part of this repo. The plugin reads and
 protects a vault; it never ships one.
 
+## State, measured (2026-09-10)
+
+This is version 0.1.0, two days old as a public repository. What follows is what has been measured,
+with the date, and what has not. The numbers refresh as the checkpoints run; nothing here is
+a promise about the next version.
+
+**Measured and green**
+
+- **402 tests** pass (`python3 -m pytest tests -q`, 2026-09-10). Every rule has a positive and a
+  negative control.
+- **Safety eval, all green:** 52 adversarial commands denied, and their 52 legitimate twins allowed,
+  through the real gate in a throwaway sandbox (`eval/safety/results/results.md`). The five mutant
+  runs each turn one rule off and show the case set fail without it.
+- **Two writers, one file:** 1,000 of 1,000 appends kept with the doors, 7 of 1,000 without
+  (`tests/sim_two_writers.py`, 500 per writer).
+- **Seven hooks load** (PreToolUse, PostToolUse, SessionStart, Stop, WorktreeCreate, WorktreeRemove,
+  UserPromptSubmit), confirmed by `claude plugin details`, at an always-on cost of about 330
+  tokens per session.
+- **The log-and-views shadow, day 0:** the vault's 1,229 entries across 72 role files were imported
+  into an append-only log and regenerated as views; 72 of 72 views came back byte-identical to
+  the live file. This is the first of seven checkpoints (days 0, 1, 2, 4, 7, 14, 30) for the
+  design that may replace hand-edited role files with a log and generated views. It runs beside
+  the vault and writes nothing into it.
+- **In real use on one machine:** 12 denies, 10 session starts and 9 partition warnings in the
+  live logs since 2026-09-08, from ordinary sessions, none of them staged.
+
+**Found by measuring, and fixed**
+
+- Between 2026-09-09 12:39 and 2026-09-10 03:30 the plugin loaded nothing at all. The manifest
+  carried an `agents` key that Claude Code rejects, and a rejected manifest disables every hook
+  silently. A blind control review found it; a test now pins the key's absence, and the rule
+  learned is in the design rules below: a hook is live only when a fresh session's own log row
+  says so.
+
+**Not yet measured**
+
+- Whether the plugin makes a session better at a cross-session task than no memory, or than
+  Claude Code's own auto-memory (`eval/memory_eval/`, three arms, tasks written, not run).
+- Whether the entry index finds the right answer in fewer bytes than the grep recall
+  (`eval/recall_bench/`, pre-registered, not run).
+- The write-partition door is in WARN, not DENY, until the partition log has been read over a
+  week of real sessions.
+
+**In progress**
+
+- English, common-practice file names on disk; today the six role files carry their Greek and
+  Latin names.
+- Adding your own files, folders and projects to a vault without adopting the whole layout.
+- The shadow's remaining checkpoints, and a v0.1 tag once the day-2 numbers are in.
+
 ## Install
 
 One command, run from anywhere:
