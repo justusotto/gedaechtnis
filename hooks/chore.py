@@ -266,6 +266,9 @@ def vanished_terms(old: str, new: str) -> list[str]:
 
 def other_occurrences(terms: list[str], exclude: Path, limit: int = 12) -> dict[str, list[str]]:
     out: dict[str, list[str]] = {}
+    # The archive left the vault on 2026-09-10 (council 2 Q-2026-09-09-3), so this prefix
+    # now matches nothing. KEPT, not dropped: it costs one string compare and it is what
+    # keeps this sweep sane if the one-`mv` restore is ever taken.
     skip = ("Workflows/anthropic-archive", ".git/", "/.tools/")
     for term in terms[:limit]:
         try:
