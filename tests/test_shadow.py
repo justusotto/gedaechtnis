@@ -464,3 +464,22 @@ def test_whole_file_identity_is_reported_and_BITES(mini):
     w2 = score(mini)["whole_file"]
     assert w2["identical"] == w["identical"] - 1, w2
     assert w2["differing"][0]["view"].endswith("Canon.md")
+
+
+def test_a_commit_to_a_GENERATED_VIEW_is_not_a_hand_edit(mini):
+    """NEGATIVE control against the shadow measuring itself. `.gedaechtnis/views/Alpha/Position.md`
+    matches the role-stem pattern perfectly well, so without the live-only rule the counter reads
+    the shadow's OWN commits as edits to the memory it is shadowing. Excluded for being GENERATED,
+    not for carrying the automated identity — this commit is by a human."""
+    v = mini["vault"]
+    git(v, "init", "-q")
+    git(v, "-c", "user.name=t", "-c", "user.email=t@x", "add", "-A")
+    git(v, "-c", "user.name=t", "-c", "user.email=t@x", "commit", "-q", "-m", "seed")
+    run("importer.py", env=mini["env"])
+    run("views.py", env=mini["env"])
+    score(mini)
+    git(v, "-c", "user.name=h", "-c", "user.email=human@x", "add", "-f", "--", ".gedaechtnis")
+    git(v, "-c", "user.name=h", "-c", "user.email=human@x", "commit", "-q", "-m", "commit the views")
+    c = score(mini)["counter"]
+    assert c["commits_in_window"] == 1, "the window must contain the commit"
+    assert c["hand_edit_commits"] == 0, "but a generated view is not a live role file"

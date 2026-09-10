@@ -214,6 +214,17 @@ def escape_rate() -> dict:
 ROLE_PATH = re.compile(r"(?:^|/)(?:" + "|".join(STEMS) + r")(?:-archive|-fixed|-resolved)?\.md$")
 
 
+def is_live_role_path(path: str) -> bool:
+    """A LIVE role file — which the shadow's own generated views are not.
+
+    `.gedaechtnis/views/Speculum/Position.md` matches the stem pattern perfectly well, so without
+    this the counter reads the shadow's own commits as edits to the memory it is shadowing. They are
+    excluded here for being generated, not merely for carrying the automated identity: a human who
+    commits a view by hand must not appear in the hand-edit line either.
+    """
+    return bool(ROLE_PATH.search(path)) and not path.startswith(".gedaechtnis/")
+
+
 def _git(*args, timeout=60):
     try:
         return subprocess.run(["git", "-C", str(VAULT), *args], capture_output=True, text=True,
@@ -256,7 +267,7 @@ def live_counter(start: dict) -> dict:
             cur = {"sha": sha_[:8], "author": email, "subject": subject[:100], "role": False}
             in_window += 1
             continue
-        if cur is not None and line.strip() and ROLE_PATH.search(line.strip()) and not cur["role"]:
+        if cur is not None and line.strip() and not cur["role"] and is_live_role_path(line.strip()):
             cur["role"] = True
             if cur["author"] == AUTOMATED_COMMITTER:
                 automated += 1
