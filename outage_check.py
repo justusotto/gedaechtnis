@@ -38,9 +38,28 @@ one `stat`.
 **≥1 HEALTHY session blocked in a week → downgrade to message-only** (`"outage_check": "message"`).
 His case is that one missed sentinel reads as the guard working. The known ways this can fire on a
 healthy session: the SessionStart hook timing out (15 s budget) or crashing; a state directory
-pruned under a live session; a Claude Code change to `session_id`'s meaning between the two events.
-Every block and every message is therefore logged to `<state>/outage-check.log` — the falsifier
-counts blocks, so a block that left no row could not be counted.
+pruned under a live session; a Claude Code change to `session_id`'s meaning between the two events;
+and — found the hard way, the day it was installed — A SESSION THAT WAS ALREADY RUNNING WHEN THE
+CHECK WAS INSTALLED. On 2026-09-10 at 17:12 the guardian session `2d87c590-d10c-484e-b420-
+3d963eaca729` merged and installed this check. It had started on 2026-09-08 08:51, before the
+plugin's per-session record existed, so it has no `session-start-2d87c590-….json` and never will.
+Its own handoff note said the check "takes effect in NEW sessions" — false: a hook in the USER
+settings is read on EVERY prompt, including the prompts of sessions that predate it. From 17:14 to
+21:37 every prompt to that session was refused (8 `block` rows for that sid: two builder task
+notifications and three of the owner's own messages), and it could not act on any of them, because
+a session cannot restart itself. Every block and every message is therefore logged to
+`<state>/outage-check.log` — the falsifier counts blocks, so a block that left no row could not be
+counted, and those 8 are healthy-session blocks by construction.
+
+★ THE EXEMPTION (the fix for that class). `init.py` writes `<state>/outage-check-installed.json`
+the moment it first registers the hook, and never rewrites it. A session whose TRANSCRIPT was
+created before that moment predates the guard: it is told so in one line and allowed to proceed.
+The transcript's BIRTH time is the signal because the transcript is created when the session
+starts, and the hook input carries its path beside `session_id` — while the sid alone says nothing
+about age. A RESUMED session never reaches this branch: resume is a SessionStart source the plugin
+matches, so it has a fresh record and the check is already silent. The exemption NEVER widens the
+gap: no stamp, no `transcript_path`, a transcript that does not exist, a filesystem without
+`st_birthtime`, or a transcript younger than the stamp all block exactly as before.
 
 ★ CHEAPNESS. It runs on EVERY prompt: stdlib only, no plugin import, one small JSON read (the
 config file, which also carries the mode) and one `stat`. It never reads the vault, never runs git,
@@ -59,6 +78,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 LOG_NAME = "outage-check.log"
+STAMP_NAME = "outage-check-installed.json"      # written ONCE by init.py; see the exemption above
 
 
 def _home() -> Path:
@@ -116,6 +136,45 @@ def log(st: Path, line: str) -> None:
         pass
 
 
+def installed_at(st: Path):
+    """When this check was first installed, as epoch seconds — or None when nothing says.
+
+    None is the SAFE value everywhere it is used: an absent, unreadable, malformed or
+    wrongly-typed stamp exempts nobody, and the check goes on blocking exactly as it did before
+    the stamp existed."""
+    try:
+        data = json.loads((st / STAMP_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    v = data.get("installed_at")
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    return float(v)
+
+
+def predates_install(st: Path, transcript_path) -> bool:
+    """Was this session already running when the check was installed?
+
+    The transcript is created when the session starts, so its BIRTH time is the session's age;
+    `st_birthtime` is macOS/BSD, and where the attribute is absent the exemption does not apply.
+    One `stat`, and only on the path that was about to block anyway."""
+    at = installed_at(st)
+    if at is None:
+        return False
+    if not isinstance(transcript_path, str) or not transcript_path.strip():
+        return False
+    try:
+        info = os.stat(os.path.expanduser(transcript_path.strip()))
+    except OSError:
+        return False
+    birth = getattr(info, "st_birthtime", None)
+    if not isinstance(birth, (int, float)):
+        return False
+    return float(birth) < at
+
+
 def message(st: Path, sid: str) -> str:
     return (
         "Gedächtnis did not load this session.\n\n"
@@ -162,6 +221,14 @@ def main() -> int:
         sys.stderr.write(message(st, sid))
         print("Gedächtnis did not load this session: its doors are not guarding this turn "
               "(`claude plugin list`). Say so before doing anything the doors would have refused.")
+        return 0
+    if predates_install(st, inp.get("transcript_path")):
+        # It was already running when the guard went up, and it cannot restart itself. Blocking it
+        # refuses every prompt it will ever get (2026-09-10, sid 2d87c590: 8 of them).
+        log(st, f"predates-install\tsid={sid}")
+        print("This session predates the Gedächtnis outage check's install, so it has no "
+              "SessionStart record and never will: its doors are whatever was loaded when it "
+              "started, and this check cannot tell. Restart Claude to get a checked session.")
         return 0
     log(st, f"block\tsid={sid}")
     sys.stderr.write(message(st, sid))
