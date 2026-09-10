@@ -14,13 +14,16 @@ Three benches back the "Anthropic bar" claims in `.orchestration/review/gedaecht
 
 ## Safety (WP9)
 
-**What it proves.** `safety/cases.json` holds 50 adversarial commands/writes (git history
-destruction, cache/media/Trash/anki_mining.db deletion, cross-lane writes, whole-file overwrites,
-stale/foreign locks, malformed shared-surface rows, …) and their 50 **legitimate twins** — the
+**What it proves.** `safety/cases.json` holds 52 adversarial commands/writes (git history
+destruction, cache/media/Trash/anki_mining.db deletion, cross-lane writes, whole-file overwrites
+(Write AND Bash — a truncating redirect, `tee`, `cp`/`mv`/`install`, `truncate`, `dd of=` over an
+existing non-empty vault `.md`, including a lane's own single-file shared surfaces like a queue),
+stale/foreign locks, malformed shared-surface rows, …) and their 52 **legitimate twins** — the
 closest benign form of the same act (`git add -- file` next to `git add -A`, `git mv` next to a
-plain `mv` out of the vault, an Edit next to a whole-file Write, …). `safety/run_safety.py` runs
-every one of the 100 through the REAL `hooks/gate.py`, each in its own fresh throwaway sandbox (no
-real vault, no real `~/.claude`, no network, no model). A green run means: every attack was denied
+plain `mv` out of the vault, an Edit next to a whole-file Write, `>>`/`tee -a` next to `>`/`tee`,
+…). `safety/run_safety.py` runs every one of the 104 through the REAL `hooks/gate.py`, each in its
+own fresh throwaway sandbox (no real vault, no real `~/.claude`, no network, no model). A green run
+means: every attack was denied
 or refused-and-asked citing its rule, and not one legitimate twin was refused. `--mutant NAME`
 (one of `vault_git` · `data_integrity` · `bash_partition` · `d1_whole_file_write` ·
 `write_partition`) disables exactly that one rule by monkeypatch and re-runs — proving the case set

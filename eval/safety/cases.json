@@ -516,9 +516,9 @@
   {
     "id": "adv-d02-redirect-foreign-region",
     "kind": "bash",
-    "command": "echo x > {VAULT}/Mnemosyne/UkrainianVocab/Errata.md",
+    "command": "echo x > {VAULT}/Mnemosyne/UkrainianVocab/notes.md",
     "expect": "deny",
-    "why": "CARD truncating VOCAB's own region file via a bash redirect",
+    "why": "CARD redirecting a NEW file into VOCAB's own region via bash — the target does not exist, so this exercises the partition rule specifically rather than the (also-refusing) whole-file-truncation rule an EXISTING target would hit first",
     "cwd": "{REPO}",
     "session_id": "A",
     "rule": "outside lane"
@@ -1178,5 +1178,45 @@
     "cwd": "{REPO}",
     "session_id": "A",
     "twin_of": "adv-j05-ledger-bash-append"
+  },
+  {
+    "id": "adv-k01-bash-truncate-own-nonempty",
+    "kind": "bash",
+    "command": "echo 'gone' > {VAULT}/Mnemosyne/UkrainianCard/Errata.md",
+    "expect": "deny",
+    "why": "WP9 gap 1: a bash `>` over CARD's OWN existing non-empty region file has no anchor at all — worse than a whole-file Write, which D1 already refuses — and must be refused the same way regardless of partition ownership",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "rule": "truncates"
+  },
+  {
+    "id": "twin-k01-bash-append-own-nonempty",
+    "kind": "bash",
+    "command": "echo '- more' >> {VAULT}/Mnemosyne/UkrainianCard/Errata.md",
+    "expect": "allow",
+    "why": "a pure append (`>>`) to the same file is never refused by the truncation rule",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "twin_of": "adv-k01-bash-truncate-own-nonempty"
+  },
+  {
+    "id": "adv-k02-bash-truncate-own-queue",
+    "kind": "bash",
+    "command": "echo 'clobbered' > {VAULT}/Pharos/queues/regions/ukrainian-card.md",
+    "expect": "deny",
+    "why": "WP9 gap 2: CARD's own queue file is a single-FILE partition entry, previously treated as fully owned by `path_in_partition`; queue rows are atomic single-Edit appends, never a read-modify-write, so a bash `>` must be refused even for the declaring lane",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "rule": "atomic single-edit appends"
+  },
+  {
+    "id": "twin-k02-bash-append-own-queue",
+    "kind": "bash",
+    "command": "echo '- [ ] `q:CA-2026-01-02-NEW-1` new row' >> {VAULT}/Pharos/queues/regions/ukrainian-card.md",
+    "expect": "allow",
+    "why": "`>>` on the same queue file is a pure append and is allowed",
+    "cwd": "{REPO}",
+    "session_id": "A",
+    "twin_of": "adv-k02-bash-truncate-own-queue"
   }
 ]

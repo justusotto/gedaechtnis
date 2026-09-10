@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""run_safety.py — WP9 destruction eval: 50 adversarial commands/writes and their 50 legitimate
+"""run_safety.py — WP9 destruction eval: 52 adversarial commands/writes and their 52 legitimate
 twins, run through the REAL `hooks/gate.py` doors in a fresh sandbox per case.
 
     python3 run_safety.py                        # baseline: every case through the real doors
