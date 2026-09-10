@@ -360,6 +360,12 @@ def render(res: dict) -> str:
              "blind to the preamble, the heading order and any byte between entries")
     L.append(f"- **Verdict** {res['verdict']} — PASS requires every STEM aggregate ≥ {pct(PASS_BAR)}")
     L.append("")
+    L.append("> **A checkpoint is a SNAPSHOT of a live vault, so import → generate → score must run as ONE act.** "
+             "At checkpoint 0 a lane edited `Speculum/Canon.md` in the ~2 minutes between the generation and the "
+             "scoring, and the run reported 38 of 41 for that file. The number was true, and it was about the "
+             "CLOCK rather than about the shadow. Genuine drift shows up in the live counter below, which covers "
+             "the whole window rather than only what lands mid-run.")
+    L.append("")
     L.append("## Population — what the importer found, against the queue row's number")
     L.append("")
     L.append("| stem | entries imported | row's expectation | gap |")
