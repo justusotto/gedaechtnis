@@ -449,3 +449,18 @@ def test_a_commit_that_touches_no_role_file_is_not_counted(mini):
     c = score(mini)["counter"]
     assert c["commits_in_window"] == 1, "the window must contain the commit"
     assert c["hand_edit_commits"] == 0, "but it touched no role file"
+
+
+def test_whole_file_identity_is_reported_and_BITES(mini):
+    """POSITIVE and NEGATIVE control on the strongest claim in the report. Per-entry fidelity is
+    blind to the preamble and the heading order, so the whole-file count is what a reader should
+    trust — and it has to be able to fall, or it is a decoration."""
+    run("importer.py", env=mini["env"])
+    run("views.py", env=mini["env"])
+    w = score(mini)["whole_file"]
+    assert w["identical"] == w["views"] and w["views"] > 0, w
+    v = mini["vault"] / ".gedaechtnis" / "views" / "Alpha" / "Canon.md"
+    v.write_text(v.read_text(encoding="utf-8").replace("intro", "intro, meddled with"), encoding="utf-8")
+    w2 = score(mini)["whole_file"]
+    assert w2["identical"] == w["identical"] - 1, w2
+    assert w2["differing"][0]["view"].endswith("Canon.md")

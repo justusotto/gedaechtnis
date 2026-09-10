@@ -142,6 +142,30 @@ def score_fidelity() -> list:
     return out
 
 
+def whole_file_identity() -> dict:
+    """-> how many views are byte-identical to their live file once the `# GENERATED` line is removed.
+
+    Strictly stronger than per-entry fidelity, and it is the number a reader actually wants: entry
+    fidelity can be 100% while the PREAMBLE, the heading ORDER or a stray byte between entries has
+    moved, and the per-entry score is blind to every one of those by construction.
+    """
+    same, differ = 0, []
+    for vp in sorted(views.VIEW_DIR.rglob("*.md")) if views.VIEW_DIR.is_dir() else []:
+        rel = vp.relative_to(views.VIEW_DIR)
+        try:
+            got = vp.read_text(encoding="utf-8").split("\n", 1)[1]
+            want = (VAULT / rel).read_text(encoding="utf-8")
+        except (OSError, IndexError) as e:
+            differ.append({"view": str(rel), "why": str(e)[:120]})
+            continue
+        if got == want:
+            same += 1
+        else:
+            differ.append({"view": str(rel), "view_bytes": len(got.encode("utf-8")),
+                           "live_bytes": len(want.encode("utf-8"))})
+    return {"identical": same, "views": same + len(differ), "differing": differ[:10]}
+
+
 def per_stem(rows: list) -> dict:
     agg = {}
     for r in rows:
@@ -319,6 +343,10 @@ def render(res: dict) -> str:
     L.append(f"- **Log** {res['log']['rows']} row(s) across {res['log']['files']} month file(s) · "
              f"grammar check: {res['log']['check']}")
     L.append(f"- **Views** {res['views']['count']} generated, {res['views']['rows']} row(s) rendered")
+    w = res["whole_file"]
+    L.append(f"- **Whole-file identity** {w['identical']} of {w['views']} views are BYTE-IDENTICAL to their live "
+             "file once the `# GENERATED` line is removed — strictly stronger than per-entry fidelity, which is "
+             "blind to the preamble, the heading order and any byte between entries")
     L.append(f"- **Verdict** {res['verdict']} — PASS requires every STEM aggregate ≥ {pct(PASS_BAR)}")
     L.append("")
     L.append("## Population — what the importer found, against the queue row's number")
@@ -439,6 +467,7 @@ def collect() -> dict:
             "views": {"count": len({(r["region"], r["stem"]) for r in files}),
                       "rows": sum(r.get("numerator", 0) + r.get("pointer_rows_excluded", 0) for r in files)},
             "files": files, "per_stem": agg, "escape": escape_rate(),
+            "whole_file": whole_file_identity(),
             "counter": live_counter(start), "links": wikilinks(),
             "verdict": verdict, "pass_bar": PASS_BAR, "notes": notes}
 
