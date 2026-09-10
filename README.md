@@ -76,7 +76,8 @@ a promise about the next version.
 - English, common-practice file names on disk; today the six role files carry their Greek and
   Latin names.
 - Adding your own files, folders and projects to a vault without adopting the whole layout.
-- The shadow's remaining checkpoints, and a v0.1 tag once the day-2 numbers are in.
+- The shadow's remaining checkpoints. `v0.1` is tagged on this state (2026-09-10); the refreshed
+  numbers land as `v0.2`.
 
 ## Install
 
