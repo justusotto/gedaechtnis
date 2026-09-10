@@ -45,18 +45,41 @@ def test_defaults_when_nothing_is_configured(tmp_path):
 
 
 def test_an_existing_atlas_vault_is_the_default(tmp_path):
-    """The documented exception: a machine that already has an Atlas vault keeps using it rather
-    than being handed a second, empty one."""
-    (tmp_path / "Atlas").mkdir()
+    """POSITIVE control for the documented exception: a machine that already has an Atlas VAULT —
+    proved by the roster file, not by the directory's name — keeps using it rather than being
+    handed a second, empty one (council 3 K-1, 2026-09-10)."""
+    (tmp_path / "Atlas" / "Global").mkdir(parents=True)
+    (tmp_path / "Atlas" / "Global" / "fleet-roster.md").write_text("# roster\n", encoding="utf-8")
     r = resolve(tmp_path)
     assert r["vault"] == str(tmp_path / "Atlas")
     assert r["roster"] == str(tmp_path / "Atlas" / "Global" / "fleet-roster.md")
 
 
+def test_a_directory_merely_named_atlas_is_not_adopted(tmp_path):
+    """NEGATIVE control for the same rule: somebody's photo folder called Atlas carries no fleet
+    roster, so it is not a vault and every hook must stay out of it."""
+    (tmp_path / "Atlas").mkdir()
+    (tmp_path / "Atlas" / "photo.jpg").write_bytes(b"\xff\xd8\xff")
+    r = resolve(tmp_path)
+    assert r["vault"] == str(tmp_path / "Gedaechtnis")
+    assert r["roster"] == str(tmp_path / "Gedaechtnis" / "Global" / "fleet-roster.md")
+
+
+def test_the_vault_env_var_is_the_mechanism(tmp_path):
+    """CLONEENV-1's positive control: GEDAECHTNIS_VAULT alone moves the vault, which is what
+    `<clone>/.claude/settings.local.json` writes for a session started inside a vault clone."""
+    clone = tmp_path / "clone-of-the-vault"
+    clone.mkdir()
+    r = resolve(tmp_path, GEDAECHTNIS_VAULT=str(clone))
+    assert r["vault"] == str(clone)
+    assert r["roster"] == str(clone / "Global" / "fleet-roster.md")
+
+
 def test_config_file_beats_the_default(tmp_path):
     write_config(tmp_path, {"vault": str(tmp_path / "v"), "state_dir": str(tmp_path / "s"),
                             "worktrees_dir": str(tmp_path / "w")})
-    (tmp_path / "Atlas").mkdir()                     # even against the Atlas fallback
+    (tmp_path / "Atlas" / "Global").mkdir(parents=True)          # even against a REAL Atlas vault
+    (tmp_path / "Atlas" / "Global" / "fleet-roster.md").write_text("# roster\n", encoding="utf-8")
     r = resolve(tmp_path)
     assert r["vault"] == str(tmp_path / "v") and r["state"] == str(tmp_path / "s")
     assert r["worktrees"] == str(tmp_path / "w")

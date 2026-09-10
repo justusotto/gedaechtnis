@@ -73,9 +73,12 @@ Example ~/.claude/gedaechtnis/config.json:
 
 Defaults: vault ~/Gedaechtnis · state_dir ~/.claude/gedaechtnis · fleet_roster
 <vault>/Global/fleet-roster.md · worktrees_dir ~/.claude/worktrees. ONE deliberate exception:
-if nothing names a vault and ~/Atlas exists, ~/Atlas is the vault — the first vault this plugin
-was written against is called Atlas, and a machine that already has one must not silently be
-given a second, empty one.
+if nothing names a vault and ~/Atlas is an Atlas VAULT — proved by the file
+~/Atlas/Global/fleet-roster.md, not by the directory's name — then ~/Atlas is the vault. The
+first vault this plugin was written against is called Atlas, and a machine that already has one
+must not silently be given a second, empty one. A directory that merely happens to be called
+Atlas (a photo folder, an unrelated project) is NOT adopted: adopting it would point every hook
+at a stranger's files (council 3 K-1, 2026-09-10).
 """
 from __future__ import annotations
 import json, os
@@ -111,9 +114,12 @@ def _path(env: str | None, key: str, default) -> Path:
 
 
 def _default_vault() -> Path:
-    """~/Gedaechtnis, unless an Atlas vault is already on this machine (see the module docstring)."""
+    """~/Gedaechtnis, unless an Atlas VAULT is already on this machine (see the module docstring).
+
+    The test is the roster FILE, never the directory's name: `~/Atlas` proves it is a vault by
+    carrying `Global/fleet-roster.md`. A bare directory called Atlas is somebody's photos."""
     atlas = HOME / "Atlas"
-    return atlas if atlas.is_dir() else HOME / "Gedaechtnis"
+    return atlas if (atlas / "Global" / "fleet-roster.md").is_file() else HOME / "Gedaechtnis"
 
 
 VAULT = _path("GEDAECHTNIS_VAULT", "vault", _default_vault)

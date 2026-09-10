@@ -129,12 +129,25 @@ def test_the_kernel_is_plain_english(home):
     assert "memory" in text and "six files" in text and "fleet-roster" in text
 
 
-def test_an_existing_atlas_directory_is_the_default_vault(home):
-    (home / "Atlas").mkdir()
+def test_an_existing_atlas_vault_is_the_default_vault(home):
+    """POSITIVE control: what makes ~/Atlas the vault is the ROSTER FILE, not the folder's name."""
+    (home / "Atlas" / "Global").mkdir(parents=True)
+    (home / "Atlas" / "Global" / "fleet-roster.md").write_text("# roster\n", encoding="utf-8")
     rc, out, _ = init(home)
     assert rc == 0
     assert (home / "Atlas" / "my_project" / "Map.md").is_file()
     assert not (home / "Gedaechtnis").exists()
+
+
+def test_a_directory_merely_named_atlas_is_not_adopted_as_the_vault(home):
+    """NEGATIVE control (council 3 K-1): a photo folder called Atlas is not a vault — init must
+    build ~/Gedaechtnis and leave the stranger's directory untouched."""
+    (home / "Atlas").mkdir()
+    (home / "Atlas" / "photo.jpg").write_bytes(b"\xff\xd8\xff")
+    rc, out, _ = init(home)
+    assert rc == 0
+    assert (home / "Gedaechtnis" / "my_project" / "Map.md").is_file()
+    assert sorted(p.name for p in (home / "Atlas").iterdir()) == ["photo.jpg"]
 
 
 # --------------------------------------------------------------- idempotent ----
