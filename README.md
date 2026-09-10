@@ -35,6 +35,13 @@ a promise about the next version.
   the live file. This is the first of seven checkpoints (days 0, 1, 2, 4, 7, 14, 30) for the
   design that may replace hand-edited role files with a log and generated views. It runs beside
   the vault and writes nothing into it.
+- **Recall bench, grep arm, first real run:** 30 held-out questions drawn by a separate model
+  session from a real vault of 988 files. **recall@3 was 0 of 30**, and the expected entry sat
+  at median rank 30 while sections of 665 KB took the top places. The cause is the ranking rule
+  (coverage first, so the largest section covers every term), confirmed by re-running on role
+  files only (5 of 30). A length-aware ranking is pre-registered as arm (a′) in
+  `eval/recall_bench/PREREGISTRATION.md` with its bar stated before it is built. The number is
+  bad and it is the point of having the bench.
 - **In real use on one machine:** 12 denies, 10 session starts and 9 partition warnings in the
   live logs since 2026-09-08, from ordinary sessions, none of them staged.
 
