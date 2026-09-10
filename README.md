@@ -339,6 +339,37 @@ python3 tools/publish_check.py
 It refuses, listing every hit, if any file carries a home-directory path, an email address, a
 private repository name or anything shaped like an API key. It has no allowlist and scans itself.
 
+## Publishing
+
+This plugin is developed inside a private repository and published from a mirror clone. Two things
+travel with a push that no file check can see: **refs and history**.
+
+Refresh the mirror clone without taking the upstream's tags:
+
+```sh
+git pull --no-rebase --no-tags
+```
+
+Publish a release by NAME, never with a flag that sends every ref:
+
+```sh
+python3 tools/publish_check.py --root .    # tree AND refs
+git push origin main
+git push origin v0.1                       # the tag, by name
+```
+
+**Never `git push --tags` and never `git push --follow-tags`.** A clone made from a private
+repository inherits that repository's tags, and each one points at a private commit: pushing them
+publishes those commits and their whole ancestry, under tag names that have nothing to do with this
+project. That is not hypothetical — on 2026-09-10 one `--tags` published five inherited tags, and
+deleting them from the remote minutes later does not remove the objects until the host collects
+them.
+
+Two guards hold the rule so nobody has to remember it: `tools/publish_check.py` refuses a clone that
+carries any tag other than a `v*` release (naming it), and a PreToolUse door in `hooks/gate.py`
+refuses `--tags` / `--follow-tags` from such a clone while allowing the same command from a clone
+whose tags are all releases. A single tag pushed by name is never blocked.
+
 ## Design rules
 
 - **Every deny cites its reason.** A wall teaches nothing; a wall with the entry it enforces

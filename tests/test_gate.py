@@ -1065,3 +1065,67 @@ def test_the_map_row_is_committed_iff_the_vault_already_has_a_commit(world, tmp_
     assert "committed" not in ctx(res2)
     assert subprocess.run(["git", "-C", str(v2), "rev-parse", "--verify", "-q", "HEAD"],
                           capture_output=True).returncode != 0
+
+
+# ------------------------------------------- the inherited-tag door (MIRRORTAGS-1, 2026-09-10) ----
+# A public mirror clone inherits the tags of the private repo it was cloned from, and `git push
+# --tags` publishes the private commits they point at. Positive control: the push is refused, by
+# tag name. Negative control: the SAME command from a clone whose tags are all releases is allowed —
+# without that half the door would just be a ban on `--tags`, which is not the rule.
+
+def _git(*args, cwd=None):
+    return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *args],
+                          cwd=str(cwd) if cwd else None, capture_output=True, text=True,
+                          check=True, timeout=120)
+
+
+@pytest.fixture
+def mirror(tmp_path):
+    """A clone carrying one tag inherited from its upstream, exactly as the real mirror did."""
+    up = tmp_path / "upstream"; up.mkdir()
+    _git("init", "-q", "-b", "main", str(up))
+    (up / "hello.txt").write_text("hello\n", encoding="utf-8")
+    _git("add", "--", "hello.txt", cwd=up)
+    _git("commit", "-q", "-m", "root", "--", "hello.txt", cwd=up)
+    _git("tag", "cursus-phase1-start", cwd=up)
+    dst = tmp_path / "mirror"
+    _git("clone", "-q", str(up), str(dst))
+    assert _git("tag", "-l", cwd=dst).stdout.split() == ["cursus-phase1-start"]
+    return dst
+
+
+def _release_only(mirror):
+    _git("tag", "-d", "cursus-phase1-start", cwd=mirror)
+    _git("tag", "v0.1", cwd=mirror)
+    return mirror
+
+
+def test_push_tags_from_a_clone_with_an_inherited_tag_denied(world, mirror):
+    res = bash(world, f"git -C {mirror} push origin main --tags")
+    assert decision(res) == "deny"
+    assert "cursus-phase1-start" in json.dumps(res)
+
+
+def test_push_tags_is_denied_whatever_the_argument_order_and_from_the_cwd(world, mirror):
+    assert decision(bash(world, f"git -C {mirror} push --tags origin main")) == "deny"
+    assert decision(bash(world, f"git -C {mirror} push --follow-tags origin main")) == "deny"
+    assert decision(bash(world, "git push --tags", cwd=str(mirror))) == "deny"
+    assert decision(bash(world, f"cd {mirror} && git push origin main --follow-tags")) == "deny"
+
+
+def test_push_tags_from_a_clone_whose_tags_are_all_releases_is_allowed(world, mirror):
+    """NEGATIVE CONTROL: the door is about the inherited tag, not about the flag."""
+    m = _release_only(mirror)
+    assert bash(world, f"git -C {m} push origin main --tags") is None
+    assert bash(world, f"git -C {m} push --follow-tags origin main") is None
+
+
+def test_pushing_one_tag_by_name_is_always_allowed(world, mirror):
+    """The prescribed form, even from the clone that still carries the inherited tag."""
+    assert bash(world, f"git -C {mirror} push origin v0.2") is None
+    assert bash(world, "git push origin v0.2", cwd=str(mirror)) is None
+
+
+def test_the_deny_names_the_by_name_push_and_the_no_tags_refresh(world, mirror):
+    msg = json.dumps(bash(world, f"git -C {mirror} push origin main --tags"))
+    assert "push origin <tag>" in msg and "--no-tags" in msg

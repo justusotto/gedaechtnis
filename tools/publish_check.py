@@ -19,9 +19,17 @@ makes "allowlist nothing" literally true.
 
 Binary and oversized files are read as UTF-8 with undecodable bytes replaced, so a stray secret in
 a blob is still found; nothing is skipped except `.git/` and `__pycache__/`.
+
+**The tree is not the only thing a push sends.** When `--root` IS a git root (a mirror clone), this
+check also reads its TAGS. A clone made from the private monorepo inherits that monorepo's tags,
+and a single `git push --tags` then publishes the private commits those tags point at, with their
+whole ancestry — that happened on 2026-09-10. A tag that is not one of this plugin's releases
+(`v*`) is therefore a refusal: delete the inherited tag locally, refresh the clone with
+`git pull --no-rebase --no-tags`, and publish a release BY NAME (`git push origin v0.1`). A `--root`
+that is not a git root has no refs of its own and this half is skipped.
 """
 from __future__ import annotations
-import argparse, re, sys
+import argparse, fnmatch, re, subprocess, sys
 from pathlib import Path
 
 SKIP_DIRS = {".git", "__pycache__", ".mypy_cache", ".pytest_cache", "node_modules"}
@@ -71,6 +79,29 @@ def scan(root: Path) -> list[tuple[Path, int, str, str]]:
     return hits
 
 
+RELEASE_TAG = "v*"          # the only tag shape this plugin publishes; see the module docstring
+
+
+def foreign_tags(root: Path) -> tuple[list[str], str | None]:
+    """(the tags on `root` that are not `v*`, error) — ([], None) when `root` is not a git root.
+
+    One `git tag -l`, no network. The `.git` test is what keeps this half from firing on a plugin
+    directory that merely SITS INSIDE some larger repo: that repo's tags are not this tree's to
+    publish, and no push from here would carry them.
+    """
+    if not (root / ".git").exists():
+        return [], None
+    try:
+        p = subprocess.run(["git", "-C", str(root), "tag", "-l"],
+                           capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError) as e:          # git missing, or wedged
+        return [], f"could not read the tags of {root}: {e}"
+    if p.returncode != 0:
+        return [], f"could not read the tags of {root}: {p.stderr.strip()[:200]}"
+    tags = [t.strip() for t in p.stdout.splitlines() if t.strip()]
+    return [t for t in tags if not fnmatch.fnmatch(t, RELEASE_TAG)], None
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Refuse to publish a tree that carries a person with it.")
     ap.add_argument("--root", default=str(Path(__file__).resolve().parents[1]),
@@ -80,13 +111,22 @@ def main() -> int:
     if not root.is_dir():
         print(f"publish check: {root} is not a directory", file=sys.stderr)
         return 1
+    bad, err = foreign_tags(root)
+    if err:
+        print(f"publish check: {err} — an unreadable ref set is not a clean one", file=sys.stderr)
+    if bad:
+        print(f"publish check: {root} carries {len(bad)} tag(s) that are not this plugin's releases "
+              f"({', '.join(bad)}) — a `git push --tags` from here would publish the private commits they "
+              f"point at; delete them locally, refresh with `git pull --no-rebase --no-tags`, and push a "
+              f"release by name (`git push origin <tag>`).")
     hits = scan(root)
-    if not hits:
+    if not hits and not bad and not err:
         print(f"publish check: clean — {root}")
         return 0
-    print(f"publish check: {len(hits)} hit(s) under {root} — this tree is not publishable:")
-    for p, n, kind, text in hits:
-        print(f"  {p.relative_to(root)}:{n}: {kind}: {text}")
+    if hits:
+        print(f"publish check: {len(hits)} hit(s) under {root} — this tree is not publishable:")
+        for p, n, kind, text in hits:
+            print(f"  {p.relative_to(root)}:{n}: {kind}: {text}")
     return 1
 
 
