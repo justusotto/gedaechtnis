@@ -187,37 +187,65 @@ def escape_rate() -> dict:
 
 # ------------------------------------------------------------------ 3. live counter ----
 
-def live_counter(start: dict) -> dict:
-    """Hand edits to the five live stems since the start pin, vs rows appended since the same date."""
-    since = start.get("date") or time.strftime("%Y-%m-%d")
-    # `git log -- '*Canon.md'` matches at any depth; these five patterns ARE the role surface the
-    # shadow shadows. They also match the pull-only sidecars (`Canon-archive.md`), which is the
-    # conservative direction for this counter: it would rather over-report a hand edit than miss one.
-    pathspecs = [f"*{stem}.md" for stem in STEMS]
-    cmd = ["git", "-C", str(VAULT), "log", f"--since={since}",
-           "--format=%H%x09%ae%x09%s", "--"] + pathspecs
-    hand = []
-    automated = 0
-    err = ""
+ROLE_PATH = re.compile(r"(?:^|/)(?:" + "|".join(STEMS) + r")(?:-archive|-fixed|-resolved)?\.md$")
+
+
+def _git(*args, timeout=60):
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=60)
-        if r.returncode != 0:
-            err = r.stderr.strip()[:200]
-        for line in r.stdout.splitlines():
-            parts = line.split("\t")
-            if len(parts) < 3:
-                continue
-            sha, email, subject = parts[0], parts[1], parts[2]
-            if email == AUTOMATED_COMMITTER:
+        return subprocess.run(["git", "-C", str(VAULT), *args], capture_output=True, text=True,
+                              stdin=subprocess.DEVNULL, timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def live_counter(start: dict) -> dict:
+    """Hand edits to the five live stems since the start pin, vs rows appended in the same window.
+
+    Anchored on the start pin's SHA (`<start>..HEAD`), not on `--since`. Checkpoint 0 measured a
+    FALSE ZERO with the date form: `git log --since=<date> -- '*Position.md'` returns nothing on
+    this vault while the same query without the pathspec, and the same pathspec without `--since`,
+    both return the commit — `--since` prunes the traversal, and path simplification then finds
+    nothing left to report. It failed silently and read as "no hand edits", which is the answer this
+    counter most wants to be true. A range is exact, and needs no timezone.
+
+    And the zero carries a POSITIVE CONTROL: `commits_in_window` is counted by the same query with
+    no path filter at all, so a zero in the role-file line is readable only against a window that
+    demonstrably contains commits.
+    """
+    since = start.get("date") or time.strftime("%Y-%m-%d")
+    sha = start.get("vault_sha") or ""
+    rng = ""
+    if sha and (_git("cat-file", "-e", sha + "^{commit}") or subprocess.CompletedProcess([], 1)).returncode == 0:
+        rng = f"{sha}..HEAD"
+    args = ["log", "--format=%H%x09%ae%x09%s", "--name-only"]
+    args += [rng] if rng else [f"--since={since}"]
+    r = _git(*args)
+    err = "" if r is not None and r.returncode == 0 else "git log failed"
+    if r is not None and r.returncode != 0:
+        err = r.stderr.strip()[:200]
+
+    hand, automated, in_window = [], 0, 0
+    cur = None
+    for line in (r.stdout.splitlines() if r is not None else []):
+        if "\t" in line and len(line.split("\t")) >= 3 and re.match(r"^[0-9a-f]{40}\t", line):
+            sha_, email, subject = line.split("\t", 2)
+            cur = {"sha": sha_[:8], "author": email, "subject": subject[:100], "role": False}
+            in_window += 1
+            continue
+        if cur is not None and line.strip() and ROLE_PATH.search(line.strip()) and not cur["role"]:
+            cur["role"] = True
+            if cur["author"] == AUTOMATED_COMMITTER:
                 automated += 1
             else:
-                hand.append({"sha": sha[:8], "author": email, "subject": subject[:100]})
-    except (OSError, subprocess.SubprocessError) as e:
-        err = str(e)[:200]
+                hand.append({k: cur[k] for k in ("sha", "author", "subject")})
     rows_since = [x for x in logstore.all_rows() if x["ts"][:10] >= since]
-    return {"since": since, "hand_edit_commits": len(hand), "automated_commits_excluded": automated,
+    return {"since": since, "range": rng or f"--since={since}",
+            "commits_in_window": in_window,
+            "hand_edit_commits": len(hand), "automated_commits_excluded": automated,
             "rows_appended": len(rows_since), "hand_edits": hand[:20], "error": err,
-            "population": f"vault commits touching */{{{','.join(STEMS)}}}.md since {since}"}
+            "population": (f"vault commits in {rng or 'since ' + since} that touch any of "
+                           f"{{{','.join(STEMS)}}}.md (sidecars included), out of "
+                           f"{in_window} commit(s) in the window")}
 
 
 # ------------------------------------------------------------------ 4. wikilinks ----
@@ -361,6 +389,8 @@ def render(res: dict) -> str:
     L.append("## Live counter — hand edits vs rows")
     L.append("")
     L.append(f"- Population: {c['population']}")
+    L.append(f"- Positive control: **{c['commits_in_window']}** commit(s) in the window `{c['range']}` "
+             "(counted with no path filter — a zero on the line below is only readable against this)")
     L.append(f"- Hand-edit commits to live role files: **{c['hand_edit_commits']}** "
              f"({c['automated_commits_excluded']} automated `{AUTOMATED_COMMITTER}` commit(s) excluded)")
     L.append(f"- Rows appended to the log in the same window: **{c['rows_appended']}**")

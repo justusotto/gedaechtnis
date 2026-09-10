@@ -68,7 +68,7 @@ def build(region: str, stem: str, rows: list, vault: Path = None) -> tuple:
     preamble, entries = importer.split_entries(text)
 
     by_heading = {}
-    for r in sorted(rows, key=_ordinal):
+    for r in sorted(rows, key=lambda x: (_ordinal(x), x["ts"], x.get("seq", 0))):
         by_heading.setdefault(r["heading"], []).append(r)
     taken = {}
 
@@ -79,13 +79,18 @@ def build(region: str, stem: str, rows: list, vault: Path = None) -> tuple:
         pool = by_heading.get(heading, [])
         k = taken.get(heading, 0)
         taken[heading] = k + 1
-        if k < len(pool):
-            row = pool[k]
-        elif pool:
-            row = pool[0]                    # a repeated heading the log saw once: reuse its row
-        else:
+        if not pool:
             missing.append(heading)
             continue
+        # THE NEWEST ROW WINS. An entry the owner rewrites in the live file arrives as a SECOND row
+        # under the same heading and the same ordinal — the log is append-only, so a correction is a
+        # new row and never an edit. Picking pool[k] positionally would silently render the
+        # SUPERSEDED text and score it as a fidelity miss with no hint of the cause. Observed live
+        # during checkpoint 0: two `Speculum/Position` entries were rewritten mid-run.
+        # Ordinal first (that is what distinguishes two genuinely different entries sharing a
+        # heading), timestamp second (that is what distinguishes a correction from its original).
+        at_k = [r for r in pool if _ordinal(r) == k]
+        row = max(at_k or pool, key=lambda x: (x["ts"], x.get("seq", 0)))
         parts.append(importer.reconstruct(row["heading"], row["body"]))
         used.append(row["id"])
 

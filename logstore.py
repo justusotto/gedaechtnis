@@ -142,6 +142,12 @@ def parse_line(line: str):
 
 
 def all_rows() -> list:
+    """-> [row] in LOG ORDER, each carrying a derived `seq` (its position in that order).
+
+    `seq` is not part of the grammar and is never written: it is the tiebreaker for two rows whose
+    `ts` is identical, which happens whenever an import writes a correction in the same second as
+    the row it corrects. Without it "the newest row wins" is decided by dict iteration order.
+    """
     rows = []
     for f in log_files():
         for line in f.read_text(encoding="utf-8").splitlines():
@@ -150,6 +156,7 @@ def all_rows() -> list:
             except ValueError:
                 continue                       # `check` is the place that reports malformed rows
             if d:
+                d["seq"] = len(rows)
                 rows.append(d)
     return rows
 

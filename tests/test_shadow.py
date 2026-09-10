@@ -360,3 +360,92 @@ def test_a_wikilink_to_a_file_that_does_not_exist_IS_reported(mini):
     res = score(mini)
     assert res["links"]["unresolved"] == 1
     assert res["links"]["examples"][0]["link"] == "No/Such/File"
+
+
+def test_a_corrected_entry_renders_the_NEWEST_row_not_the_first(mini):
+    """POSITIVE control on append-only semantics reaching the view. The log never edits: a rewritten
+    entry arrives as a SECOND row under the same heading and the same ordinal, and the view must
+    render the newer one. Picking positionally would render the SUPERSEDED text and score it as a
+    fidelity miss with no hint of the cause — observed live during checkpoint 0, when two
+    `Speculum/Position` entries were rewritten mid-run."""
+    run("importer.py", env=mini["env"])
+    canon = mini["vault"] / "Alpha" / "Canon.md"
+    canon.write_text(canon.read_text(encoding="utf-8").replace("NEVER do the thing.",
+                                                              "NEVER do the thing, corrected."),
+                     encoding="utf-8")
+    res = import_json(mini)
+    assert res["appended"] == 1, "exactly one entry changed, so exactly one row is new"
+    run("views.py", env=mini["env"])
+    view = (mini["vault"] / ".gedaechtnis" / "views" / "Alpha" / "Canon.md").read_text(encoding="utf-8")
+    assert "NEVER do the thing, corrected." in view
+    assert "NEVER do the thing.\n" not in view
+    assert score(mini)["per_stem"]["Canon"]["reproduced"] == 3
+
+
+def test_the_superseded_row_is_still_in_the_log(mini):
+    """NEGATIVE control on the same act: 'newest wins' is about the VIEW, never about the log. The
+    original row stays on disk — an append-only store that loses its history is a file."""
+    run("importer.py", env=mini["env"])
+    canon = mini["vault"] / "Alpha" / "Canon.md"
+    canon.write_text(canon.read_text(encoding="utf-8").replace("NEVER do the thing.", "corrected."),
+                     encoding="utf-8")
+    run("importer.py", env=mini["env"])
+    log = next((mini["vault"] / ".gedaechtnis" / "log").glob("*.tsv")).read_text(encoding="utf-8")
+    assert "NEVER do the thing." in log and "corrected." in log
+    assert run("logstore.py", "check", env=mini["env"]).strip().endswith(f"{EXPECTED_ENTRIES + 1} row(s)")
+
+
+# ================================================== the live counter (git-backed) ===============
+
+def git(vault, *args, env=None):
+    p = subprocess.run(["git", "-C", str(vault), *args], capture_output=True, text=True, timeout=60)
+    assert p.returncode == 0, p.stderr
+    return p.stdout
+
+
+def test_the_live_counter_sees_a_hand_edit_and_excludes_the_automated_committer(mini):
+    """POSITIVE control on the counter AND its own control line. Checkpoint 0 measured a FALSE ZERO
+    here: `git log --since=<date> -- '*Position.md'` returns nothing on a real vault while the same
+    pathspec without `--since` returns the commit — `--since` prunes the traversal and path
+    simplification finds nothing left. It failed silently, and read as "no hand edits", which is the
+    answer this counter most wants to be true. Anchored on the start SHA now, and the run reports
+    how many commits are in the window at all so a zero is readable."""
+    v = mini["vault"]
+    git(v, "init", "-q")
+    git(v, "-c", "user.name=t", "-c", "user.email=t@x", "add", "-A")
+    git(v, "-c", "user.name=t", "-c", "user.email=t@x", "commit", "-q", "-m", "seed")
+    run("importer.py", env=mini["env"])
+    run("views.py", env=mini["env"])
+    score(mini)                                        # writes the start pin at this SHA
+
+    canon = v / "Alpha" / "Canon.md"
+    canon.write_text(canon.read_text(encoding="utf-8") + "\n## Four\n\nadded by hand.\n", encoding="utf-8")
+    git(v, "-c", "user.name=h", "-c", "user.email=human@x", "add", "--", "Alpha/Canon.md")
+    git(v, "-c", "user.name=h", "-c", "user.email=human@x", "commit", "-q", "-m", "a hand edit")
+    (v / "Global" / "Errata.md").write_text("# Errata\n\n## Auto\n\nbody\n", encoding="utf-8")
+    git(v, "-c", "user.name=a", "-c", "user.email=atlas@local", "add", "--", "Global/Errata.md")
+    git(v, "-c", "user.name=a", "-c", "user.email=atlas@local", "commit", "-q", "-m", "auto")
+
+    c = score(mini)["counter"]
+    assert c["commits_in_window"] == 2, c
+    assert c["hand_edit_commits"] == 1, c
+    assert c["automated_commits_excluded"] == 1, c
+    assert c["hand_edits"][0]["subject"] == "a hand edit"
+
+
+def test_a_commit_that_touches_no_role_file_is_not_counted(mini):
+    """NEGATIVE control — the half that proves the counter reads PATHS and not merely commits. A
+    counter that reported every commit would read the vault's bookkeeping stream as hand editing."""
+    v = mini["vault"]
+    git(v, "init", "-q")
+    git(v, "-c", "user.name=t", "-c", "user.email=t@x", "add", "-A")
+    git(v, "-c", "user.name=t", "-c", "user.email=t@x", "commit", "-q", "-m", "seed")
+    run("importer.py", env=mini["env"])
+    run("views.py", env=mini["env"])
+    score(mini)
+    (v / "Alpha" / "Map.md").write_text("# Alpha, retitled\n", encoding="utf-8")
+    git(v, "-c", "user.name=h", "-c", "user.email=human@x", "add", "--", "Alpha/Map.md")
+    git(v, "-c", "user.name=h", "-c", "user.email=human@x", "commit", "-q", "-m", "not a role file")
+    c = score(mini)["counter"]
+    assert c["commits_in_window"] == 1, "the window must contain the commit"
+    assert c["hand_edit_commits"] == 0, "but it touched no role file"
