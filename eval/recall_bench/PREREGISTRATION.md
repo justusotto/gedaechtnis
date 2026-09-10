@@ -57,3 +57,9 @@ thresholds has been altered.)
   arm — which is the correct, honest number, not a bug: per
   `Global/Patterns-verification.md` ("a floor of 0 means the two runs agreed"), a future arm that
   DOES carry randomness (a model-scored variant, say) is the case this machinery exists for.
+
+## 2026-09-10 — first real run of arm (a), and a new arm (a′) pre-registered
+
+Arm (a) was run on a real 30-question held-out set (drawn by a separate model session, not the builder) against a real vault of 988 files: **recall@3 = 0 of 30**, mean bytes-to-answer 1.23 MB. The expected entry was in the hit list every time, at median rank 30. Cause, measured by varying the corpus: coverage-first ranking is won by the largest sections (a 665 KB queue section covers every term); on role files alone recall@3 is 5 of 30 and the winners become 14–34 KB state sections. The 2026-09-09 claim above is unchanged.
+
+**New arm (a′), grep length-aware**, pre-registered today, before it is built: same term extraction, coverage that a section cannot win on bulk alone, non-role surfaces excluded by default. **Claim:** on the same 30 questions and the same vault, (a′) reaches recall@3 ≥ 15 of 30 at mean bytes-to-answer ≤ 20 KB. If it does not, ranking is not the fix and arm (b) index-first is built first. Arm (b)'s ≥30% claim is then measured against (a′), the stronger control, never against the 0-of-30 baseline.
