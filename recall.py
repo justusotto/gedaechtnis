@@ -44,6 +44,17 @@ notice outboxes) are excluded by default — they are append-heavy operational s
 the whole vault's vocabulary and answer no question about what was decided or what went wrong.
 `--include-queues` searches them anyway, for the caller who is actually asking about a queue.
 
+**Generated views are not memory either.** `.gedaechtnis/views/<Region>/<Stem>.md` is the vault's
+own log-and-views shadow: a byte-identical mirror of every imported entry, each file stamped
+`# GENERATED` at the top, built to prove a log-and-views design reproduces the live vault — not to
+be read as a second source. Left searchable, it doubles every hit (measured on the 2026-09-10
+recall bench: the shadow copy of the expected entry outranked the live one in 28 of 30 questions,
+because the two bodies are byte-identical and the final tie-break is the path, where
+`.gedaechtnis/…` sorts before every live region). Excluded by default for that reason; no user's
+vault outside this experiment has a `.gedaechtnis/` to exclude, so the exclusion is a no-op
+everywhere else. `--include-generated` searches it anyway, for the caller who is actually asking
+about the shadow.
+
 **Archives are searched.** A `-archive`, `-fixed` or `-resolved` sibling holds the narrative that
 the live file compressed away; excluding it would hide exactly the reasoning the caller is asking
 for. Their entries are marked `(archive)` so the caller knows the live file is the authority.
@@ -63,6 +74,11 @@ import config  # noqa: E402  (every path is resolved there)
 SKIP_DIRS = {".git", "__pycache__", "node_modules", ".obsidian", ".trash"}
 # Not memory: work queues and lane notice outboxes, at any depth. Excluded unless asked for.
 NON_MEMORY_DIRS = frozenset({"Pharos", "Channels"})
+# Not memory either: the vault's own generated evidence about itself — see the docstring's
+# "Generated views are not memory either." A separate set (and flag) from NON_MEMORY_DIRS because
+# the reason is different: queues restate the vault's vocabulary without answering anything,
+# generated views answer correctly but only by DUPLICATING an entry that is already found.
+GENERATED_DIRS = frozenset({".gedaechtnis"})
 MAX_FILE_BYTES = 2_000_000
 
 # BM25's length normalisation, and the one number that tunes it: a hit's weighted frequency is
@@ -107,10 +123,11 @@ def terms(question: str) -> list[str]:
     return out
 
 
-def md_files(vault: Path, include_queues: bool = False):
+def md_files(vault: Path, include_queues: bool = False, include_generated: bool = False):
     for dirpath, dirnames, filenames in os.walk(vault):
         dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS and not d.startswith(".git")
-                             and (include_queues or d not in NON_MEMORY_DIRS))
+                             and (include_queues or d not in NON_MEMORY_DIRS)
+                             and (include_generated or d not in GENERATED_DIRS))
         for name in sorted(filenames):
             if name.endswith(".md"):
                 p = Path(dirpath) / name
@@ -154,7 +171,7 @@ def score(heading: str, body: str, pats: list) -> list[int]:
 
 
 def search(vault: Path, question: str, include_queues: bool = False,
-           ranking: str = "a-prime") -> tuple[list[dict], list[str]]:
+           ranking: str = "a-prime", include_generated: bool = False) -> tuple[list[dict], list[str]]:
     """Every matching entry, best first. The caller decides how many to print — the count of
     what was NOT printed is part of the answer, so it is never truncated here.
 
@@ -170,7 +187,7 @@ def search(vault: Path, question: str, include_queues: bool = False,
     if not want:
         return hits, want
     pats = patterns(want)
-    for path in md_files(vault, include_queues=include_queues):
+    for path in md_files(vault, include_queues=include_queues, include_generated=include_generated):
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
@@ -259,6 +276,9 @@ def main(argv=None) -> int:
     ap.add_argument("--include-queues", action="store_true",
                     help="also search Pharos/ and Channels/ (excluded by default: queues and notice "
                          "outboxes are operational surfaces, not memory)")
+    ap.add_argument("--include-generated", action="store_true",
+                    help="also search .gedaechtnis/ (excluded by default: it is a byte-identical "
+                         "generated mirror of every imported entry, not a second source)")
     ap.add_argument("--rank", choices=RANKINGS, default="a-prime",
                     help="`flat` is the pre-2026-09-10 order (plain coverage, raw frequency) and "
                          "`length-only` adds the size normalisation without the measured stoplist. "
@@ -269,7 +289,8 @@ def main(argv=None) -> int:
         print(f"recall: no vault at {vault} — run init.py to create one.", file=sys.stderr)
         return 2
     question = " ".join(a.question)
-    hits, want = search(vault, question, include_queues=a.include_queues, ranking=a.rank)
+    hits, want = search(vault, question, include_queues=a.include_queues, ranking=a.rank,
+                        include_generated=a.include_generated)
     print(render(hits[: max(1, a.limit)], want, question, max(500, a.max_bytes), len(hits)))
     return 0
 

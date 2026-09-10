@@ -54,7 +54,8 @@ def normalize_heading(heading: str) -> str:
 
 
 def score_question(vault: Path, row: dict, limit: int, max_bytes: int,
-                   include_queues: bool = False, ranking: str = "a-prime") -> dict:
+                   include_queues: bool = False, ranking: str = "a-prime",
+                   include_generated: bool = False) -> dict:
     """One question, scored against arm (a). Bytes-to-answer sums every shown hit's body up to
     and including the first one that matches `expected` (see PREREGISTRATION.md for the exact
     definition); when the answer is never found, the reader paid for all `limit` hits and got
@@ -62,7 +63,7 @@ def score_question(vault: Path, row: dict, limit: int, max_bytes: int,
     file_part, _, heading_part = row["expected"].partition("#")
     t0 = time.monotonic()
     hits, _want = recall.search(vault, row["question"], include_queues=include_queues,
-                                ranking=ranking)
+                                ranking=ranking, include_generated=include_generated)
     wall_ms = (time.monotonic() - t0) * 1000
     top = hits[:limit]
     bytes_read = 0
@@ -88,12 +89,14 @@ def score_question(vault: Path, row: dict, limit: int, max_bytes: int,
 
 
 def score_grep(vault: Path, questions: list[dict], limit: int, max_bytes: int,
-               include_queues: bool = False, ranking: str = "a-prime") -> list[dict]:
-    """Arm (a) / (a′). The two knobs are the arm's CONFIGURATION, not a reimplementation: both are
+               include_queues: bool = False, ranking: str = "a-prime",
+               include_generated: bool = False) -> list[dict]:
+    """Arm (a) / (a′). The three knobs are the arm's CONFIGURATION, not a reimplementation: all are
     forwarded to the real `recall.search`, so a bench row can never be scored against a ranking
-    that recall.py does not itself ship. `ranking="flat"` reproduces the pre-2026-09-10 order
-    exactly, which is what makes an exclusion-only run readable against a rank-only run."""
-    return [score_question(vault, row, limit, max_bytes, include_queues, ranking)
+    (or a corpus inclusion) that recall.py does not itself ship. `ranking="flat"` reproduces the
+    pre-2026-09-10 order exactly, which is what makes an exclusion-only run readable against a
+    rank-only run."""
+    return [score_question(vault, row, limit, max_bytes, include_queues, ranking, include_generated)
             for row in questions]
 
 
@@ -182,6 +185,9 @@ def main(argv=None) -> int:
     ap.add_argument("--include-queues", action="store_true",
                     help="forwarded to recall.search: also search Pharos/ and Channels/ "
                          "(recall.py excludes them by default since 2026-09-10)")
+    ap.add_argument("--include-generated", action="store_true",
+                    help="forwarded to recall.search: also search .gedaechtnis/ (recall.py "
+                         "excludes the generated log-and-views shadow by default since RECALL-VIEWS-1)")
     ap.add_argument("--rank", choices=recall.RANKINGS, default="a-prime",
                     help="forwarded to recall.search: `flat` is the pre-2026-09-10 order — the "
                          "negative control for arm (a′) — and `length-only` is a′ without its "
@@ -216,7 +222,7 @@ def main(argv=None) -> int:
         return 2
     questions = load_questions(Path(a.questions).expanduser().resolve())
 
-    cfg = dict(include_queues=a.include_queues, ranking=a.rank)
+    cfg = dict(include_queues=a.include_queues, ranking=a.rank, include_generated=a.include_generated)
     run1 = score_grep(vault, questions, a.limit, a.max_bytes, **cfg)
     run2 = score_grep(vault, questions, a.limit, a.max_bytes, **cfg)   # repeat control, byte-identical config
     agg1, agg2 = aggregate(run1), aggregate(run2)

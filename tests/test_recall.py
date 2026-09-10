@@ -250,3 +250,46 @@ def test_an_unknown_ranking_is_refused(bulk_vault):
     name — the same rule `recall_bench/run.py` follows for its unbuilt arms."""
     rc, out, err = recall(bulk_vault, "apostrophe", "--rank", "densityy")
     assert rc != 0 and "densityy" in err
+
+
+# ----------------------------------------------------------------- RECALL-VIEWS-1 ----
+# `.gedaechtnis/views/<Region>/<Stem>.md` is the vault's log-and-views shadow: a byte-identical
+# generated mirror of every imported live entry. Left searchable it doubled every hit — on the
+# 2026-09-10 recall bench the shadow copy outranked the live entry in 28 of 30 questions, because
+# the bodies are byte-identical and the final tie-break is the path, where `.gedaechtnis/…` sorts
+# before every live region. `q:CU-2026-09-10-RECALL-VIEWS-1`.
+
+@pytest.fixture
+def shadowed_vault(tmp_path):
+    """A live entry plus its byte-identical `.gedaechtnis/views/...` mirror, GENERATED-stamped
+    exactly as the real shadow writer stamps it."""
+    v = tmp_path / "shadowed"
+    (v / "Global").mkdir(parents=True)
+    (v / ".gedaechtnis" / "views" / "Global").mkdir(parents=True)
+    body = ("# Patterns\n\n## Why the trailing newline on a queue row is load-bearing\n\n"
+            "A queue file whose last line lacks its terminator glues the next appended row onto "
+            "the end of that line, where no checkbox parser sees it.\n")
+    (v / "Global" / "Patterns.md").write_text(body, encoding="utf-8")
+    (v / ".gedaechtnis" / "views" / "Global" / "Patterns.md").write_text(
+        "# GENERATED sha256:deadbeef\n\n" + body, encoding="utf-8")
+    return v
+
+
+def test_the_generated_view_is_excluded_by_default(shadowed_vault):
+    """POSITIVE control: the live path is returned, and the generated mirror never appears at
+    all — not just ranked below it."""
+    rc, out, err = recall(shadowed_vault, "trailing newline load-bearing queue row")
+    assert rc == 0, err
+    assert "Global/Patterns.md" in first_hit(out)
+    assert ".gedaechtnis" not in out, out[:400]
+
+
+def test_include_generated_returns_the_view_copy_too(shadowed_vault):
+    """NEGATIVE control, and the whole point of the flag: with `--include-generated`, one flag
+    and nothing else changed, the shadow copy comes back — proving the default's absence above is
+    the exclusion at work, not a search failure."""
+    rc, out, err = recall(shadowed_vault, "trailing newline load-bearing queue row",
+                          "--include-generated")
+    assert rc == 0, err
+    assert ".gedaechtnis/views/Global/Patterns.md" in out, out[:600]
+    assert "Global/Patterns.md" in out
