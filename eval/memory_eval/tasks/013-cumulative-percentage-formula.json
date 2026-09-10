@@ -1,0 +1,31 @@
+{
+  "task_id": "013-cumulative-percentage-formula",
+  "title": "Cumulative-percentage column formula",
+  "author": "author-b",
+  "source_region": "Mnemosyne/UkranianGameScript",
+  "positive_control": false,
+  "description": "Day 1 records the exact formula chosen for a cumulative-percentage column in a frequency-list pipeline, picked specifically to avoid a rounding bias from a long tail of rare rows. Day 3 must recall the exact formula. A memory-less model would default to the naive, more common approach (summing already-rounded per-row percentages); it has no way to know this project deliberately computes from raw counts instead.",
+  "day1_prompt": "We're deciding how to compute a cumulative-percentage column in our word-frequency corpus pipeline (there's a long tail of many rank-1 words, which biases naive per-row rounding). Decide and record: compute it as `Total_Frequency.cumsum() / total * 100`, working from the raw integer counts — rounding each row's percentage first and then cumulatively summing those rounded values would compound a bias of up to about +2% by the final row, which is why we avoid that.",
+  "memory_sentence": "The cumulative-percentage column is computed as `Total_Frequency.cumsum() / total * 100`, working from raw integer counts, to avoid compounding a rounding bias of up to about +2% that would result from summing already-rounded per-row percentages.",
+  "canon_heading": "Cumulative percentage computed from raw counts via Total_Frequency.cumsum()",
+  "fact": "Total_Frequency.cumsum()",
+  "day_n": 3,
+  "day_n_prompt": "It's day 3. How is the cumulative-percentage column computed in our word-frequency pipeline — from raw counts, or from already-rounded per-row percentages? State the exact formula/method used.",
+  "checker_file": "cumulative-percentage-answer.txt",
+  "checker_must_contain": "Total_Frequency.cumsum()",
+  "checker_must_match": [
+    "(?i)Total_Frequency\\.cumsum\\(\\)"
+  ],
+  "checker_must_not_match": [],
+  "swap": {
+    "day1_prompt": "We're deciding how to compute a cumulative-percentage column in our word-frequency corpus pipeline. Decide and record: compute it as `Percentage.cumsum()` — round each row's percentage to 3 decimal places first, then take the running cumulative sum of those already-rounded values; it's simpler and close enough for our purposes.",
+    "memory_sentence": "The cumulative-percentage column is computed as `Percentage.cumsum()` — the running cumulative sum of each row's percentage already rounded to 3 decimal places.",
+    "canon_heading": "Cumulative percentage computed from rounded per-row percentages",
+    "fact": "Percentage.cumsum()",
+    "checker_must_contain": "Percentage.cumsum()",
+    "checker_must_match": [
+      "(?i)Percentage\\.cumsum\\(\\)"
+    ],
+    "checker_must_not_match": []
+  }
+}

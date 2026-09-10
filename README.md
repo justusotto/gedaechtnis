@@ -51,14 +51,19 @@ a promise about the next version.
   on the same 30 questions it reaches **11 of 30 at 16 KB read before the answer** (was 0 of 30 at
   1.23 MB) — the pre-registered bar was 15 of 30 at ≤ 20 KB, so it fails on hits and the index arm
   is next; on the same entries served as one-entry-per-row files it reaches 18 of 30 at 7 KB.
-- **Memory eval, first live run:** three cross-session tasks, three arms, Sonnet 5 at low
-  effort, 18 real sessions, $0.55 in total. Sessions with the plugin answered **3 of 3** day-N
-  tasks from what day 1 had recorded; a plain prior-decisions file in the prompt answered 2 of 3;
-  no memory answered 1 of 3, and that one was a checker weakness, not a memory result. The
-  no-memory arm failed the positive-control task, as it must. One sample per cell, tasks written
-  by the plugin's own builders, and the middle arm is not Claude Code's own memory loader, which
-  cannot be pointed at a fixture. Details and limits in `eval/memory_eval/` and the run's
-  report; nothing here is a percentage.
+- **Memory eval, second live run — a negative result on the comparison that matters:** 12
+  cross-session tasks (10 written by two model sessions that did not build the plugin, drawn from
+  10 regions of a real vault), 4 arms, 3 samples per cell, Sonnet 5 at low effort, 192 real
+  sessions, $4.76. Sessions with the plugin answered **36 of 36** day-N tasks from what day 1 had
+  recorded — but a **byte-matched** prior-decisions file in the prompt answered **35 of 36**, and
+  the pre-registered bar was two whole tasks. **The plugin is not shown to beat a 3 KB memory file
+  on this task shape**; the one-task gap is inside the run's own noise floor. No memory answered
+  **0 of 36**, so the tasks are genuinely unanswerable without it, and when the recorded fact was
+  replaced by its opposite the sessions followed the opposite **35 of 36 times**, so the memory is
+  read rather than guessed around. The first run's 3-vs-2 headline was a checker artefact, in both
+  directions, and is retracted. Limits: one model, one effort, the plugin loaded through staged
+  project settings rather than the install path, and the file arm is not Claude Code's own memory
+  loader. Details in `eval/memory_eval/` and the run's report; nothing here is a percentage.
 - **In real use on one machine:** 12 denies, 10 session starts and 9 partition warnings in the
   live logs since 2026-09-08, from ordinary sessions, none of them staged.
 
@@ -72,9 +77,12 @@ a promise about the next version.
 
 **Not yet measured**
 
-- Whether the plugin beats Claude Code's own auto-memory: the live eval's middle arm cannot load
-  it, so that comparison is still open. And whether 3 of 3 holds at more than one sample per
-  cell, on tasks not written by the builders.
+- Whether the plugin beats Claude Code's own auto-memory: the live eval's file arm cannot load
+  it, so that comparison is still open. (Whether the first run's 3 of 3 held at three samples per
+  cell, on tasks not written by the builders, IS now measured — it held, and so did the file arm's;
+  see the second run above.) Whether the plugin helps on a task shape where a flat file cannot
+  simply be pasted into the prompt — multi-entry recall, a vault too large to fit, a fact recorded
+  many sessions before the question — is untested, and is where the second run says to look next.
 - Whether the entry index finds the right answer in fewer bytes than the grep recall
   (`eval/recall_bench/`, pre-registered, not run).
 - The write-partition door is in WARN, not DENY, until the partition log has been read over a

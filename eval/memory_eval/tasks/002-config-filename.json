@@ -10,5 +10,22 @@
   "day_n": 2,
   "day_n_prompt": "It is day 2. What must the config file be named in this project? Answer with only the filename.",
   "checker_file": "config-name-answer.txt",
-  "checker_must_contain": "settings.toml"
+  "checker_must_contain": "settings.toml",
+  "author": "builder (first eval, 2026-09-10)",
+  "source_region": "-",
+  "checker_must_match": [
+    "(?i)settings\\.toml"
+  ],
+  "checker_must_not_match": [],
+  "swap": {
+    "day1_prompt": "Decide and record a project convention: this project's config file must be named project.ini, not config.yaml.",
+    "memory_sentence": "This project's config file must be named project.ini.",
+    "canon_heading": "The config file is named project.ini",
+    "fact": "project.ini",
+    "checker_must_contain": "project.ini",
+    "checker_must_match": [
+      "(?i)project\\.ini"
+    ],
+    "checker_must_not_match": []
+  }
 }

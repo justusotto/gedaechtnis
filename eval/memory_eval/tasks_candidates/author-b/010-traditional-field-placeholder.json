@@ -1,0 +1,31 @@
+{
+  "task_id": "010-traditional-field-placeholder",
+  "title": "Traditional-character field population policy",
+  "author": "author-b",
+  "source_region": "Sinica/ChineseDecks",
+  "positive_control": false,
+  "description": "Day 1 records a project-specific policy for a Chinese-card field: it is never auto-converted, instead receiving a specific literal placeholder token. Day 6 must recall that exact placeholder token. Auto-converting simplified-to-traditional text is the obvious default a general-knowledge model would assume, so a memory-less model has no way to guess this project deliberately rejects that and uses this specific placeholder string instead.",
+
+  "day1_prompt": "We're deciding how the `TraditionalChars` field is populated on each card in our Chinese-vocab pipeline. Decide and record: this field is NEVER auto-converted from the simplified text — instead, the pipeline writes the literal placeholder value `PENDING_MANUAL` into it, so a human fills it in by hand later.",
+  "memory_sentence": "The `TraditionalChars` field is never auto-converted from simplified text; the pipeline writes the literal placeholder value `PENDING_MANUAL` into it so a human fills it in by hand later.",
+  "canon_heading": "TraditionalChars field uses a manual placeholder, never auto-conversion",
+  "fact": "PENDING_MANUAL",
+
+  "day_n": 6,
+  "day_n_prompt": "It's day 6. When a new card is created, what literal placeholder value gets written into the `TraditionalChars` field instead of an auto-converted value? Answer with only the placeholder value.",
+
+  "checker_file": "traditional-field-answer.txt",
+  "checker_must_contain": "PENDING_MANUAL",
+  "checker_must_match": ["(?i)PENDING_MANUAL", "(?i)(never|not).{0,30}auto-?convert"],
+  "checker_must_not_match": [],
+
+  "swap": {
+    "day1_prompt": "We're deciding how the `TraditionalChars` field is populated on each card in our Chinese-vocab pipeline. Decide and record: this field IS auto-converted from the simplified text at card-creation time, using a small conversion library we're calling `hanzi-convert`, with no manual step.",
+    "memory_sentence": "The `TraditionalChars` field is auto-converted from simplified text at card-creation time using the `hanzi-convert` library, with no manual step.",
+    "canon_heading": "TraditionalChars field is auto-converted via hanzi-convert",
+    "fact": "hanzi-convert",
+    "checker_must_contain": "hanzi-convert",
+    "checker_must_match": ["(?i)hanzi-convert", "(?i)auto-?convert"],
+    "checker_must_not_match": []
+  }
+}
