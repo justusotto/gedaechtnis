@@ -3,7 +3,7 @@
 
     python3 init.py [--repo DIR] [--discover] [--decline] [--offer-declined] [--all]
                     [--vault DIR] [--lane NAME] [--region NAME] [--dry-run] [--yes]
-                    [--no-outage-check] [--remove-outage-check]
+                    [--no-outage-check] [--install-outage-check] [--remove-outage-check]
 
 Run it from inside a project, or from anywhere at all, and it creates everything the hooks need,
 creating ONLY what is absent. An existing file is reported as `kept` and is never touched, so the
@@ -62,7 +62,10 @@ What it creates (each line of the report names one of these):
                                   check exists for (see `outage_check.py`). The file is MERGED,
                                   never replaced, and one it cannot parse is left alone and
                                   reported. `--no-outage-check` skips it;
-                                  `--remove-outage-check` undoes it and writes nothing else.
+                                  `--install-outage-check` adds it and writes NOTHING else (the
+                                  right command for a machine already set up — a full run there
+                                  would resolve a region from the repo's basename and create it);
+                                  `--remove-outage-check` undoes it, also on its own.
 
 When the vault had no commit yet, the files this run created are committed as its first commit
 (path-limited, exactly the created files, nothing else — the vault's own git law).
@@ -856,6 +859,32 @@ def _write_settings(path: Path, data: dict) -> None:
     os.replace(str(tmp), str(path))
 
 
+def _install_outage(settings_path: Path, dry_run: bool = False) -> int:
+    """`--install-outage-check`: register the check and write NOTHING else.
+
+    A full `init.py` run against a repo that already has a memory is not a safe way to add this:
+    it would resolve a region from the repo's basename and create a whole new region in the vault
+    for a repo whose region is called something else, and append an @-import line to a CLAUDE.md
+    that already imports a different file. Adding one hook to one settings file is a smaller act
+    than an install, so it gets its own door."""
+    data, err = read_settings(settings_path)
+    if err:
+        return refuse(err + ", so the outage check could not be installed.")
+    data, changed = install_outage_check(data)
+    if not changed:
+        print(f"  kept         {settings_path}  (already runs the plugin-outage check)")
+        return 0
+    verb = "updated" if settings_path.exists() else "created"
+    if dry_run:
+        print(f"  would {verb[:6]}  {settings_path}  (UserPromptSubmit plugin-outage check)")
+        return 0
+    _write_settings(settings_path, data)
+    print(f"  {verb:13}{settings_path}  (UserPromptSubmit plugin-outage check; "
+          "`init.py --remove-outage-check` undoes it)")
+    print("  Restart Claude Code for it to take effect.")
+    return 0
+
+
 def _remove_outage(settings_path: Path) -> int:
     """`--remove-outage-check`: a standalone act, like `--decline`. Writes nothing else."""
     data, err = read_settings(settings_path)
@@ -952,6 +981,8 @@ def main(argv=None) -> int:
     ap.add_argument("--yes", action="store_true", help="take the default without asking (also implied by a non-terminal stdin)")
     ap.add_argument("--no-outage-check", action="store_true",
                     help="do not register the plugin-outage check in ~/.claude/settings.json")
+    ap.add_argument("--install-outage-check", action="store_true",
+                    help="register the plugin-outage check in ~/.claude/settings.json, and write nothing else")
     ap.add_argument("--remove-outage-check", action="store_true",
                     help="remove the plugin-outage check from ~/.claude/settings.json, and write nothing else")
     a = ap.parse_args(argv)
@@ -972,6 +1003,8 @@ def main(argv=None) -> int:
 
     if a.remove_outage_check:
         return _remove_outage(settings_path)
+    if a.install_outage_check:
+        return _install_outage(settings_path, a.dry_run)
     if a.decline:
         return _decline([common.git_root(repo) or repo], cfg_path)
 

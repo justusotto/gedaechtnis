@@ -384,6 +384,48 @@ def test_a_moved_plugin_rewrites_its_entry_instead_of_duplicating_it(world, tmp_
     assert str(moved / "outage_check.py") in specs[0]["command"]
 
 
+def tree(root: Path) -> dict:
+    import hashlib
+    out = {}
+    for p in sorted(root.rglob("*")):
+        if p.is_symlink():
+            out[str(p.relative_to(root))] = "-> " + os.readlink(p)
+        elif p.is_file():
+            out[str(p.relative_to(root))] = hashlib.sha1(p.read_bytes()).hexdigest()
+    return out
+
+
+def test_install_outage_check_alone_writes_nothing_else(world):
+    """The command a machine that is ALREADY set up runs. A full `init.py` run there would resolve
+    a region from the repo's basename and create it in the vault — this must touch one file."""
+    before = tree(world["home"]) | {"vault:" + k: v for k, v in tree(world["vault"]).items()}
+    p = run_init(world, "--install-outage-check")
+    assert p.returncode == 0, p.stderr
+    after = tree(world["home"]) | {"vault:" + k: v for k, v in tree(world["vault"]).items()}
+    changed = sorted(k for k in set(before) | set(after) if before.get(k) != after.get(k))
+    assert changed == [".claude/settings.json"], changed
+    assert len(installed(world)) == 1
+    assert not (world["repo"] / "CLAUDE.md").exists(), "a standalone install touched the repo"
+
+
+def test_install_outage_check_alone_is_idempotent_and_dry_runnable(world):
+    assert run_init(world, "--install-outage-check", "--dry-run").returncode == 0
+    assert not settings_path(world).exists()
+    run_init(world, "--install-outage-check")
+    first = settings_path(world).read_bytes()
+    p = run_init(world, "--install-outage-check")
+    assert p.returncode == 0 and "already runs" in p.stdout
+    assert settings_path(world).read_bytes() == first
+
+
+def test_install_outage_check_alone_refuses_a_settings_file_it_cannot_parse(world):
+    settings_path(world).write_text("{ not json\n", encoding="utf-8")
+    before = settings_path(world).read_bytes()
+    p = run_init(world, "--install-outage-check")
+    assert p.returncode == 2 and "could not be read as JSON" in p.stderr
+    assert settings_path(world).read_bytes() == before
+
+
 def test_dry_run_writes_no_settings(world):
     p = run_init(world, "--repo", str(world["repo"]), "--yes", "--dry-run")
     assert p.returncode == 0, p.stderr

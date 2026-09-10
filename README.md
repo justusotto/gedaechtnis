@@ -33,7 +33,7 @@ a promise about the next version.
 - **The outage check bites:** the scratch plugin carrying the exact 2026-09-09 defect is rejected by
   the real validator (`claude plugin validate`, `agents: Invalid input`) and the first prompt of a
   session with no SessionStart record is refused, exit 2; the shipped manifest validates and the
-  same check is silent (`tests/test_outage_check.py`, 30 cases).
+  same check is silent (`tests/test_outage_check.py`, 33 cases).
 - **The log-and-views shadow, day 0:** the vault's 1,229 entries across 72 role files were imported
   into an append-only log and regenerated as views; 72 of 72 views came back byte-identical to
   the live file. This is the first of seven checkpoints (days 0, 1, 2, 4, 7, 14, 30) for the
@@ -165,7 +165,10 @@ permanently, `"outage_check": "message"` to keep the warning without the refusal
 all — a schema change rather than an outage — it never blocks: it exits 0 and appends one row to
 `~/.claude/gedaechtnis/outage-check.log`, where every block and every warning is also recorded. It
 is settings.json surgery, so it merges into whatever is already there, never duplicates itself, and
-leaves a file it cannot parse untouched and says so. `--no-outage-check` skips the install.
+leaves a file it cannot parse untouched and says so. `--no-outage-check` skips the install, and
+`python3 init.py --install-outage-check` adds it on its own, writing nothing else — which is the
+command for a machine that is already set up, since a full run there would name a region after the
+repo folder and create it.
 **Its falsifier is written down and cheap to check:** if one *healthy* session is blocked within a
 week — the log is the count — it is downgraded to `"outage_check": "message"`. The known ways that
 could happen are the SessionStart hook timing out or crashing and a state directory pruned under a
