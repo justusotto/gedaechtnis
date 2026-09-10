@@ -16,6 +16,7 @@ from common import (read_input, context, log, expand, under, vault_rel, fleet_re
                     lane_for, path_in_partition, region_of_repo, repo_root_of, shared_surface,
                     record_touched, was_created, record_created, release_filelock, ROLE_STEMS)
 import names
+import context_economy
 
 EV = "PostToolUse"
 UUID = re.compile(r"https://claude\.ai/code/artifact/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})")
@@ -184,6 +185,10 @@ def do_write(inp: dict) -> None:
     if not fp:
         return
     p = expand(fp, inp.get("cwd"))
+    # context economy: this session wrote `p` — ANY file, not only vault ones (the notice this
+    # feeds is about the whole worktree). Recorded before the vault check below, which is about
+    # what the Stop hook commits and has nothing to do with what a later Read should warn about.
+    context_economy.record_write(inp.get("session_id", "-"), p)
     if not under(p, VAULT):
         return
     sid = inp.get("session_id", "-")
@@ -382,6 +387,9 @@ def do_bash(inp: dict) -> None:
     if not cmd:
         return
     sid = inp.get("session_id", "-")
+    # context economy: record every file this Bash command read via cat/head/tail/sed -n, so a
+    # later read of the same unchanged content gets the RE-READ notice.
+    context_economy.record_bash_reads(sid, cmd, inp.get("cwd"))
     try:
         from gate import bash_write_targets           # the same target list the gate locked from
     except ImportError as e:                          # pragma: no cover - the two files ship together
@@ -396,11 +404,22 @@ def do_bash(inp: dict) -> None:
         log("chore", f"bash\treleased={len(freed)}\t{' '.join(freed)}")
 
 
+def do_read(inp: dict) -> None:
+    """PostToolUse Read: the read happened — record its hash so a later re-read can be compared
+    against it (context_economy.py). A PreToolUse alone cannot know the read succeeded."""
+    ti = inp.get("tool_input") or {}
+    fp = ti.get("file_path") or ""
+    if not fp:
+        return
+    p = expand(fp, inp.get("cwd"))
+    context_economy.record_read(inp.get("session_id", "-"), p)
+
+
 def main() -> None:
     which = sys.argv[1] if len(sys.argv) > 1 else ""
     inp = read_input()
     {"artifact": do_artifact, "write": do_write, "inbox": do_inbox,
-     "bash": do_bash}.get(which, lambda _i: None)(inp)
+     "bash": do_bash, "read": do_read}.get(which, lambda _i: None)(inp)
 
 
 if __name__ == "__main__":

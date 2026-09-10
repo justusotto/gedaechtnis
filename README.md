@@ -153,11 +153,13 @@ never renames a file — it only changes what a session calls the file it alread
 | PreToolUse Edit/Write | `gate.py write` | **Write partition** — a session may write only the vault directories its repo's `.atlas-lane` marker declares, so two sessions working in parallel cannot overwrite each other's notes. Ships in `warn` mode (logs what it would have refused); write `deny` into `partition.mode` in the state directory to enforce. Shared surfaces (queue files, the message ledger, a region inbox) accept an appended well-formed row from anyone, and nothing else. **Display names are never file names** — a new file called `Decisions.md`, `Fehler.md` or `open-questions.md` is refused with the stem it means (`Canon.md`, `Errata.md`, `Aporia.md`) and the path to write instead, so one role never ends up as two files; a file of that name already on disk is your data and is left alone. |
 | PreToolUse Edit/Write | `gate.py write` | **Two sessions, one file, nothing lost.** A whole-file `Write` over an existing note is refused: it replaces the file from what you read a minute ago, and every line another session added since is gone with no error. Edit is offered instead — its anchor is checked against the file as it is now, so a stale edit fails loudly rather than clobbering. New files, empty files, anything that is not `.md`, and anything inside a `Cleanup */` bundle are exempt, as is a file this session created. Alongside it, a **per-file lock** held from the moment permission is asked until the tool has finished: a second session meeting it is told to retry, which makes it re-read. A lock older than ten seconds is stale and is taken over, so a tool that errors or a hook that dies never leaves a file locked. Shell writes to a note (`>`, `>>`, `tee`, `sed -i`) take the same lock. |
 | PreToolUse Agent | `gate.py agent` | A subagent call names a `model`, unless its definition already does — an unpinned agent silently inherits the session's model, which can be several times the price you intended. |
+| PreToolUse Read, PreToolUse Bash | `gate.py read`, `gate.py bash` | **Context economy** — two non-blocking notices, never a refusal. See "Context economy" below. |
 | PostToolUse Artifact | `chore.py artifact` | Records a published artifact's title and id in the vault's artifact index and commits that one file, so a page you published is findable later instead of living in a chat scrollback. |
 | PostToolUse Edit/Write | `chore.py write` | Repairs a queue file's missing trailing newline (without it the next appended row glues onto the previous line and no parser sees it); reports commit SHAs in the text that resolve in no known repo; when an edit removes a heading or an id, lists every other file still citing it; and, the first time a role file is written in a project (`Eidos.md`, `Nomos.md`, `Annales.md`…), adds its one row to that project's `Map.md` and commits it, so a file is born by being written and nothing has to be created in advance. |
 | PostToolUse Bash | `chore.py bash` | Releases the per-file locks a shell write took, the moment the command returns, instead of making the next session wait for them to age out. |
 | PostToolUse Edit/Write | `chore.py inbox` | When a session writes in a region that is not its own, appends one row to that region's `Inbox.md`, so the record lands where the work happened rather than where the writer had permission. |
 | PostToolUse Edit/Write | `chore.py write` | Also releases this session's lock on the file, records the vault path just written against this session's id — the touched set the Stop commit is built from — and, when the gate saw the file was absent, records that this session created it. |
+| PostToolUse Read, PostToolUse Bash | `chore.py read`, `chore.py bash` | **Context economy** — records that the read happened, so the *next* read of the same unchanged file gets the notice. |
 | SessionStart | `session_start.py` | States the facts a session should not have to ask for: which lane it is, what it may write, the partition mode, the vault's HEAD and uncommitted count, unread inbox and ledger rows. On a `startup` (not a resume or a compact) it also injects the operating rules. In a git repo that has no memory yet, it tells the session to ask you once — *"create one? (yes / no / never)"* — and at most once per project per day. |
 | SessionStart | `claim.py start` | Takes this session's per-region writer claim, so the vault's one-writer-per-region rule is kept by machinery instead of by a ritual performed from memory. Does nothing at all when no claim helper is configured, when the session has no lane, or when its partition names no region. |
 | Stop | `claim.py stop` | Gives back exactly the claims this session took, and nothing else. A claim that is never released is worse than none: the next session defers to a holder that no longer exists. |
@@ -181,6 +183,24 @@ Three more tools ship alongside the hooks:
 Every refusal and repair is logged under the state directory: `deny.log`, `partition.log`,
 `chore.log`, `session.log`, `hook-errors.log`.
 
+## Context economy
+
+Two notices, both non-blocking — they ride `additionalContext` on an explicit **allow**, so a
+session sees them on its next turn and nothing is ever refused:
+
+- **Re-read.** Reading a file (`Read`, or `cat`/`head`/`tail`/`sed -n` of one file from a shell
+  command) whose content is byte-identical to what this session already read earlier in the
+  session says so, with how long ago and how many tokens the re-read would cost, and suggests
+  Grep for the section instead.
+- **Big-read.** Reading a file whole (no `offset`/`limit`; `cat`, not `head`/`tail`/`sed -n`)
+  over `big_read_kb` KB (default **24**) says how big it is and how many tokens that is, and
+  suggests Grep-for-the-heading-then-offset instead. Never fires for a file this session wrote
+  itself this session, for a small file, or for an image/PDF/binary.
+
+Both are on by default (`context_economy: true`); turn them off with `GEDAECHTNIS_CONTEXT_ECONOMY=0`
+or `"context_economy": false` in the config file. `python3 tools/status.py --session-id <SID>`
+reports how many of each fired this session.
+
 ## Configuration
 
 Precedence, per setting: environment variable → `~/.claude/gedaechtnis/config.json` → default.
@@ -202,6 +222,8 @@ Precedence, per setting: environment variable → `~/.claude/gedaechtnis/config.
 | `auto_commit` | `GEDAECHTNIS_AUTO_COMMIT` | `true` — the Stop hook commits this session's vault writes |
 | `inject_rules` | `GEDAECHTNIS_INJECT_RULES` | `true` — the operating rules are injected at session start |
 | `language` | `GEDAECHTNIS_LANGUAGE` | `en` — `de` and `latin` are the switch; see "What the files are called" above |
+| `context_economy` | `GEDAECHTNIS_CONTEXT_ECONOMY` | `true` — the two non-blocking read notices below |
+| `big_read_kb` | `GEDAECHTNIS_BIG_READ_KB` | `24` — the size (KB) above which a whole-file read gets the big-read notice |
 
 ```json
 {
