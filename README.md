@@ -59,8 +59,12 @@ a promise about the next version.
   cause was found to be the vault's own generated log-and-views shadow (a byte-identical copy of
   every entry, outranking the live one 28 of 30 times); excluding it by default and re-running the
   same 30 questions under a new pre-registration entry **clears the bar: 15 of 30 at 14.2 KB**
-  (`eval/recall_bench/PREREGISTRATION.md`, 2026-09-10 22:15). Arm (b) index-first is not built as a
-  consequence.
+  (`eval/recall_bench/PREREGISTRATION.md`, 2026-09-10 22:15). A $0 sweep the next morning showed the
+  pass holds **only at the shipped constant** (`COMMON_TERM_SHARE` 0.05; its neighbours 0.02 / 0.10 /
+  0.20 give 14, 11 and 11 of 30), and the constant was set after these 30 questions were seen — so
+  the pass is a fit until a held-out set, drawn by script with the constant frozen first,
+  reproduces it (pre-registration addendum, 2026-09-11). Arm (b) index-first is built only if that
+  set fails.
 - **Memory eval, second live run — a negative result on the comparison that matters:** 12
   cross-session tasks (10 written by two model sessions that did not build the plugin, drawn from
   10 regions of a real vault), 4 arms, 3 samples per cell, Sonnet 5 at low effort, 192 real
@@ -70,7 +74,9 @@ a promise about the next version.
   on this task shape**; the one-task gap is inside the run's own noise floor. No memory answered
   **0 of 36**, so the tasks are genuinely unanswerable without it, and when the recorded fact was
   replaced by its opposite the sessions followed the opposite **35 of 36 times**, so the memory is
-  read rather than guessed around. The first run's 3-vs-2 headline was a checker artefact, in both
+  read rather than guessed around. Each test vault held **one** entry (`eval/memory_eval/run.py`,
+  the fixture), so recall had nothing to rank: this measures the plugin against a small file, not a
+  populated vault against one. The first run's 3-vs-2 headline was a checker artefact, in both
   directions, and is retracted. Limits: one model, one effort, the plugin loaded through staged
   project settings rather than the install path, and the file arm is not Claude Code's own memory
   loader. Details in `eval/memory_eval/` and the run's report; nothing here is a percentage.
