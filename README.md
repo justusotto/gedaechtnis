@@ -62,9 +62,12 @@ a promise about the next version.
   (`eval/recall_bench/PREREGISTRATION.md`, 2026-09-10 22:15). A $0 sweep the next morning showed the
   pass holds **only at the shipped constant** (`COMMON_TERM_SHARE` 0.05; its neighbours 0.02 / 0.10 /
   0.20 give 14, 11 and 11 of 30), and the constant was set after these 30 questions were seen — so
-  the pass is a fit until a held-out set, drawn by script with the constant frozen first,
-  reproduces it (pre-registration addendum, 2026-09-11). Arm (b) index-first is built only if that
-  set fails.
+  the pass was a fit until a held-out set reproduced it. **It did (2026-09-11 12:55):** 60 fresh
+  entries drawn by seeded script from 13 regions with the constant frozen first, questions written
+  blind by a separate model session, **42 of 60 at 8.4 KB** at the pinned 0.05 (noise floor 0);
+  0.10 gives 34 of 60 at 18.8 KB and 0.20 gives 29 of 60 at 30.2 KB, so the constant stays pinned at
+  0.05 and arm (b) index-first is not built (pre-registration, 2026-09-11 12:10 entry and its
+  result line). The same 60 on the log-and-views cold corpus score 48 of 60 at 5.8 KB.
 - **Memory eval, second live run — a negative result on the comparison that matters:** 12
   cross-session tasks (10 written by two model sessions that did not build the plugin, drawn from
   10 regions of a real vault), 4 arms, 3 samples per cell, Sonnet 5 at low effort, 192 real
