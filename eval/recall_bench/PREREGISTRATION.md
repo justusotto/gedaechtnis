@@ -114,3 +114,7 @@ B**, median rank of the expected entry 4, noise floor 0 on every metric. Full ta
 `.orchestration/review/recallbench-2026-09-10/RESULT.md`, addendum of 22:15; run directory
 `.orchestration/review/recallbench-2026-09-10/run-b0-noviews-vault/`. Arm (b) index-first is NOT
 built as a consequence of this run.
+
+## Addendum 2026-09-11 — the RECALL-VIEWS-1 pass is sensitive to `COMMON_TERM_SHARE` (recorded, not a re-read of the pass)
+
+A $0 sweep on the same vault and the same 30 questions, everything else as shipped: 0.02 → 14/30 at 8.4 KB · **0.05 → 15/30 at 14.2 KB (the pass)** · 0.10 → 11/30 at 23.8 KB · 0.20 → 11/30 at 31.8 KB. The pass holds at the one value the constant was set to after these 30 questions were seen and fails at every neighbour. The 2026-09-10 22:15 entry stands as written (it is not edited); what it licenses is narrowed: **the pass is not cited as a bar until a held-out set, drawn by script with the constant frozen at 0.05 in a dated entry written BEFORE the draw, reproduces it.** The size of that set (30 · 40 · 60) and its source are council 4's iteration-2 item. Full table: `atlas-system/.orchestration/review/concilium4-2026-09-10/SWEEP-common-term-share.md`.
