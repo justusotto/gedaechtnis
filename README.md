@@ -30,11 +30,20 @@ a promise about the next version.
 - **Seven hooks load** (PreToolUse, PostToolUse, SessionStart, Stop, WorktreeCreate, WorktreeRemove,
   UserPromptSubmit), confirmed by `claude plugin details`, at an always-on cost of about 330
   tokens per session.
+- **The outage check bites:** the scratch plugin carrying the exact 2026-09-09 defect is rejected by
+  the real validator (`claude plugin validate`, `agents: Invalid input`) and the first prompt of a
+  session with no SessionStart record is refused, exit 2; the shipped manifest validates and the
+  same check is silent (`tests/test_outage_check.py`, 62 cases).
 - **The log-and-views shadow, day 0:** the vault's 1,229 entries across 72 role files were imported
   into an append-only log and regenerated as views; 72 of 72 views came back byte-identical to
   the live file. This is the first of seven checkpoints (days 0, 1, 2, 4, 7, 14, 30) for the
   design that may replace hand-edited role files with a log and generated views. It runs beside
   the vault and writes nothing into it.
+- **The shadow's COLD build, on a clone of the vault (2026-09-10):** with all 74 live role files
+  physically moved out of the vault, **71 of 72 views rebuilt from the log alone came back
+  byte-identical**; the one that differs is the one orphan row (a heading the live file has since
+  dropped), and it is counted rather than hidden. Session-written rows are **0 of 9** against hand
+  edits in the same window — the writer landed the same day, so that ratio measures nothing yet.
 - **Recall bench, grep arm, first real run:** 30 held-out questions drawn by a separate model
   session from a real vault of 988 files. **recall@3 was 0 of 30**, and the expected entry sat
   at median rank 30 while sections of 665 KB took the top places. The cause is the ranking rule
@@ -42,14 +51,45 @@ a promise about the next version.
   files only (5 of 30). A length-aware ranking is pre-registered as arm (a′) in
   `eval/recall_bench/PREREGISTRATION.md` with its bar stated before it is built. The number is
   bad and it is the point of having the bench.
-- **Memory eval, first live run:** three cross-session tasks, three arms, Sonnet 5 at low
-  effort, 18 real sessions, $0.55 in total. Sessions with the plugin answered **3 of 3** day-N
-  tasks from what day 1 had recorded; a plain prior-decisions file in the prompt answered 2 of 3;
-  no memory answered 1 of 3, and that one was a checker weakness, not a memory result. The
-  no-memory arm failed the positive-control task, as it must. One sample per cell, tasks written
-  by the plugin's own builders, and the middle arm is not Claude Code's own memory loader, which
-  cannot be pointed at a fixture. Details and limits in `eval/memory_eval/` and the run's
-  report; nothing here is a percentage.
+- **Recall bench, arm (a′), the length-aware rank, same day:** the ranking now discounts a term that
+  is common in the corpus and divides frequency by entry size, and skips queue and notice surfaces;
+  on the same 30 questions it reaches **11 of 30 at 16 KB read before the answer** (was 0 of 30 at
+  1.23 MB) — the pre-registered bar was 15 of 30 at ≤ 20 KB, so it fails on hits and the index arm
+  is next; on the same entries served as one-entry-per-row files it reaches 18 of 30 at 7 KB. The
+  cause was found to be the vault's own generated log-and-views shadow (a byte-identical copy of
+  every entry, outranking the live one 28 of 30 times); excluding it by default and re-running the
+  same 30 questions under a new pre-registration entry **clears the bar: 15 of 30 at 14.2 KB**
+  (`eval/recall_bench/PREREGISTRATION.md`, 2026-09-10 22:15). A $0 sweep the next morning showed the
+  pass holds **only at the shipped constant** (`COMMON_TERM_SHARE` 0.05; its neighbours 0.02 / 0.10 /
+  0.20 give 14, 11 and 11 of 30), and the constant was set after these 30 questions were seen — so
+  the pass was a fit until a held-out set reproduced it. **It did (2026-09-11 12:55):** 60 fresh
+  entries drawn by seeded script from 13 regions with the constant frozen first, questions written
+  blind by a separate model session, **42 of 60 at 8.4 KB** at the pinned 0.05 (noise floor 0);
+  0.10 gives 34 of 60 at 18.8 KB and 0.20 gives 29 of 60 at 30.2 KB, so the constant stays pinned at
+  0.05 and arm (b) index-first is not built (pre-registration, 2026-09-11 12:10 entry and its
+  result line). The same 60 on the log-and-views cold corpus score 48 of 60 at 5.8 KB.
+- **Memory eval, second live run — a negative result on the comparison that matters:** 12
+  cross-session tasks (10 written by two model sessions that did not build the plugin, drawn from
+  10 regions of a real vault), 4 arms, 3 samples per cell, Sonnet 5 at low effort, 192 real
+  sessions, $4.76. Sessions with the plugin answered **36 of 36** day-N tasks from what day 1 had
+  recorded — but a **byte-matched** prior-decisions file in the prompt answered **35 of 36**, and
+  the pre-registered bar was two whole tasks. **The plugin is not shown to beat a 3 KB memory file
+  on this task shape**; the one-task gap is inside the run's own noise floor. No memory answered
+  **0 of 36**, so the tasks are genuinely unanswerable without it, and when the recorded fact was
+  replaced by its opposite the sessions followed the opposite **35 of 36 times**, so the memory is
+  read rather than guessed around. Each test vault held **one** entry (`eval/memory_eval/run.py`,
+  the fixture), so recall had nothing to rank: this measures the plugin against a small file, not a
+  populated vault against one. The first run's 3-vs-2 headline was a checker artefact, in both
+  directions, and is retracted. Limits: one model, one effort, the plugin loaded through staged
+  project settings rather than the install path, and the file arm is not Claude Code's own memory
+  loader. Details in `eval/memory_eval/` and the run's report; nothing here is a percentage.
+- **The install path itself, first run (q:CU-2026-09-10-FRESHHOME-1):** a completely fresh `HOME` →
+  `init.py --yes --repo` → one pinned `claude -p --setting-sources user,project` — the gap the
+  memory-eval bullet above names. The fresh `HOME` cannot authenticate (no Keychain fallback once
+  `HOME` is overridden: `"Not logged in · Please run /login"`, `$0`), but `session.log` gains its
+  row anyway — Claude Code runs SessionStart/UserPromptSubmit locally before the API auth check —
+  so the plugin is proven to load through the real `~/.claude/skills/gedaechtnis` symlink, at zero
+  cost, authenticated or not (`eval/fresh_home/`, `tests/test_fresh_home_eval.py`).
 - **In real use on one machine:** 12 denies, 10 session starts and 9 partition warnings in the
   live logs since 2026-09-08, from ordinary sessions, none of them staged.
 
@@ -63,9 +103,12 @@ a promise about the next version.
 
 **Not yet measured**
 
-- Whether the plugin beats Claude Code's own auto-memory: the live eval's middle arm cannot load
-  it, so that comparison is still open. And whether 3 of 3 holds at more than one sample per
-  cell, on tasks not written by the builders.
+- Whether the plugin beats Claude Code's own auto-memory: the live eval's file arm cannot load
+  it, so that comparison is still open. (Whether the first run's 3 of 3 held at three samples per
+  cell, on tasks not written by the builders, IS now measured — it held, and so did the file arm's;
+  see the second run above.) Whether the plugin helps on a task shape where a flat file cannot
+  simply be pasted into the prompt — multi-entry recall, a vault too large to fit, a fact recorded
+  many sessions before the question — is untested, and is where the second run says to look next.
 - Whether the entry index finds the right answer in fewer bytes than the grep recall
   (`eval/recall_bench/`, pre-registered, not run).
 - The write-partition door is in WARN, not DENY, until the partition log has been read over a
@@ -144,6 +187,40 @@ absent and never overwrites a file: run it again and every line reports `kept`.
 Then restart Claude Code (or `/reload-plugins`) and open it in the repo: the first session prints a
 facts block naming your vault and lane. There is nothing to build and no dependency beyond Python
 3.9+ from the standard library.
+
+**The install also registers one hook outside the plugin, and this is deliberate.** A plugin whose
+manifest fails validation loads *nothing* — hooks included — and Claude Code says so nowhere: on
+2026-09-09 a single bad key cost fifteen hours in which every session ran with no doors at all, and
+it was found by an unrelated review, not by any of the tests. A check for that failure cannot live
+inside the thing that fails, so `init.py` adds one `hooks.UserPromptSubmit` entry to
+`~/.claude/settings.json` running `outage_check.py`. On every prompt it does one `stat`: if the
+plugin's own SessionStart record for this session — `~/.claude/gedaechtnis/session-start-<session
+id>.json` — is missing, the prompt is refused (exit 2) with a message saying that Gedächtnis did not
+load, that a rejected manifest is the likely cause (`claude plugin list` shows the ✘;
+`claude plugin validate <plugin dir>` names the key), and how to switch the check off:
+`GEDAECHTNIS_OUTAGE_CHECK=off claude` for one session, `"outage_check": "off"` in the config file
+permanently, `"outage_check": "message"` to keep the warning without the refusal, or
+`python3 init.py --remove-outage-check` to uninstall it. If the hook input carries no session id at
+all — a schema change rather than an outage — it never blocks: it exits 0 and appends one row to
+`~/.claude/gedaechtnis/outage-check.log`, where every block and every warning is also recorded. The
+install also writes `~/.claude/gedaechtnis/outage-check-installed.json`, saying when the check first
+began guarding — written once and never rewritten, since every session older than that moment is
+exempted by it. That exemption exists because a hook in the user settings is read on *every* prompt,
+not only in sessions started after it was installed: on 2026-09-10 the install refused the
+installing session's own next eight prompts, and a running session cannot restart itself, so a
+session whose transcript was created before the stamp is now told so in one line and allowed to
+proceed, while everything else blocks exactly as before. The install
+is settings.json surgery, so it merges into whatever is already there, never duplicates itself, and
+leaves a file it cannot parse untouched and says so. `--no-outage-check` skips the install, and
+`python3 init.py --install-outage-check` adds it on its own, writing nothing else — which is the
+command for a machine that is already set up, since a full run there would name a region after the
+repo folder and create it.
+**Its falsifier is written down and cheap to check:** if one *healthy* session is blocked within a
+week — the log is the count — it is downgraded to `"outage_check": "message"`. The known ways that
+could happen are the SessionStart hook timing out or crashing and a state directory pruned under a
+live session. (`tests/test_plugin_manifest.py` also pins the manifest, but it *skips* where the
+`claude` CLI is absent or the plugin is unregistered, so it is not a gate; this check is the one
+that runs on your machine, every prompt.)
 
 **A project you add later** is not forgotten and not taken silently. The first time a session starts
 in a git repo with no memory, the facts block asks you once, in one line — *"This project has no
@@ -338,6 +415,37 @@ python3 tools/publish_check.py
 
 It refuses, listing every hit, if any file carries a home-directory path, an email address, a
 private repository name or anything shaped like an API key. It has no allowlist and scans itself.
+
+## Publishing
+
+This plugin is developed inside a private repository and published from a mirror clone. Two things
+travel with a push that no file check can see: **refs and history**.
+
+Refresh the mirror clone without taking the upstream's tags:
+
+```sh
+git pull --no-rebase --no-tags
+```
+
+Publish a release by NAME, never with a flag that sends every ref:
+
+```sh
+python3 tools/publish_check.py --root .    # tree AND refs
+git push origin main
+git push origin v0.1                       # the tag, by name
+```
+
+**Never `git push --tags` and never `git push --follow-tags`.** A clone made from a private
+repository inherits that repository's tags, and each one points at a private commit: pushing them
+publishes those commits and their whole ancestry, under tag names that have nothing to do with this
+project. That is not hypothetical — on 2026-09-10 one `--tags` published five inherited tags, and
+deleting them from the remote minutes later does not remove the objects until the host collects
+them.
+
+Two guards hold the rule so nobody has to remember it: `tools/publish_check.py` refuses a clone that
+carries any tag other than a `v*` release (naming it), and a PreToolUse door in `hooks/gate.py`
+refuses `--tags` / `--follow-tags` from such a clone while allowing the same command from a clone
+whose tags are all releases. A single tag pushed by name is never blocked.
 
 ## Design rules
 

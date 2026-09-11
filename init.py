@@ -3,6 +3,7 @@
 
     python3 init.py [--repo DIR] [--discover] [--decline] [--offer-declined] [--all]
                     [--vault DIR] [--lane NAME] [--region NAME] [--dry-run] [--yes]
+                    [--no-outage-check] [--install-outage-check] [--remove-outage-check]
 
 Run it from inside a project, or from anywhere at all, and it creates everything the hooks need,
 creating ONLY what is absent. An existing file is reported as `kept` and is never touched, so the
@@ -53,6 +54,27 @@ What it creates (each line of the report names one of these):
                                   file exists without it)
   <config>                        ~/.claude/gedaechtnis/config.json naming the vault
   ~/.claude/skills/gedaechtnis    a symlink to this plugin, which is how Claude Code loads it
+  ~/.claude/settings.json         one `hooks.UserPromptSubmit` entry running `outage_check.py`,
+                                  which refuses the first prompt of a session the plugin did not
+                                  load. It is registered in the USER settings, deliberately
+                                  OUTSIDE the plugin manifest, because a rejected manifest
+                                  disables every hook the manifest declares — the failure this
+                                  check exists for (see `outage_check.py`). The file is MERGED,
+                                  never replaced, and one it cannot parse is left alone and
+                                  reported. `--no-outage-check` skips it;
+                                  `--install-outage-check` adds it and writes NOTHING else (the
+                                  right command for a machine already set up — a full run there
+                                  would resolve a region from the repo's basename and create it);
+                                  `--remove-outage-check` undoes it, also on its own.
+  <state>/outage-check-installed.json
+                                  when that check FIRST began guarding, written once and never
+                                  rewritten — including when the settings entry was already there
+                                  and no stamp was (the state a machine installed before this
+                                  existed is in). A session whose transcript is older than the
+                                  stamp predates the guard and is exempted rather than refused: on
+                                  2026-09-10 the install locked the INSTALLING session out of its
+                                  own next eight prompts, and a session cannot restart itself.
+                                  `--remove-outage-check` removes it; `--dry-run` writes neither.
 
 When the vault had no commit yet, the files this run created are committed as its first commit
 (path-limited, exactly the created files, nothing else — the vault's own git law).
@@ -71,7 +93,7 @@ Every path comes from hooks/config.py — nothing here names a directory of its 
 what lets the test suite run this against a temporary HOME and never touch a real vault.
 """
 from __future__ import annotations
-import argparse, json, os, re, subprocess, sys, time
+import argparse, json, os, re, shlex, subprocess, sys, time
 from pathlib import Path
 
 PLUGIN = Path(__file__).resolve().parent
@@ -623,7 +645,8 @@ class Step:
         self.path, self.verb, self.write, self.note = path, verb, write, note
 
 
-def plan(repo: Path, vault: Path, lane: str, region: str, cfg_path: Path, skills_dir: Path) -> list[Step]:
+def plan(repo: Path, vault: Path, lane: str, region: str, cfg_path: Path, skills_dir: Path,
+         settings_path: Path | None = None, state: Path | None = None) -> list[Step]:
     steps: list[Step] = []
 
     def file(path: Path, content: str, note: str = ""):
@@ -699,7 +722,240 @@ def plan(repo: Path, vault: Path, lane: str, region: str, cfg_path: Path, skills
         steps.append(Step(link, "kept", note=note))
     else:
         steps.append(Step(link, "created", lambda: _symlink(link), f"-> {PLUGIN}"))
+
+    # the plugin-outage check, registered OUTSIDE the plugin (see `outage_check.py`). Skipped
+    # entirely when `--no-outage-check` passed no settings path.
+    if settings_path is not None:
+        data, err = read_settings(settings_path)
+        if err:
+            steps.append(Step(settings_path, "kept", note=err + "; the plugin-outage check was NOT installed"))
+        else:
+            merged, changed = install_outage_check(data)
+            if not changed:
+                steps.append(Step(settings_path, "kept", note="already runs the plugin-outage check"))
+            else:
+                verb = "updated" if settings_path.exists() else "created"
+                steps.append(Step(settings_path, verb,
+                                  lambda p=settings_path, d=merged: _write_settings(p, d),
+                                  "UserPromptSubmit plugin-outage check (`init.py --remove-outage-check` undoes it)"))
+            # The stamp goes down whenever the check is registered — including the `kept` case,
+            # where the hook is already installed but nothing ever recorded WHEN. Written once and
+            # never rewritten; sessions older than it are exempt instead of locked out.
+            stamp = outage_stamp_path(state)
+            if stamp.exists():
+                steps.append(Step(stamp, "kept", note="when the outage check began guarding"))
+            else:
+                steps.append(Step(stamp, "created",
+                                  lambda p=stamp: write_install_stamp(p),
+                                  "when the outage check began guarding; sessions older than it are exempt"))
     return steps
+
+
+# ------------------------------------------------- the plugin-outage check ----
+# `outage_check.py` is registered in the USER settings, deliberately OUTSIDE the plugin manifest:
+# a rejected manifest disables every hook the manifest declares, so a check for that failure
+# cannot be declared there. See that file's docstring for the 2026-09-09 outage and council 3's
+# K-2 verdict. Everything below is ordinary JSON surgery on ~/.claude/settings.json, and it is
+# careful in one way that matters: the file belongs to the USER, not to this installer, so it is
+# merged into, never replaced, and a settings.json we cannot parse is left alone and reported.
+
+OUTAGE_SCRIPT = PLUGIN / "outage_check.py"
+OUTAGE_MARK = "outage_check.py"          # how an already-installed entry is recognised
+OUTAGE_STAMP = "outage-check-installed.json"     # in the state dir, beside the check's own log
+
+
+def outage_stamp_path(state: Path | None = None) -> Path:
+    """`<state>/outage-check-installed.json` — the same state directory `outage_check.state_dir()`
+    resolves (env > config.json > ~/.claude/gedaechtnis), which is what `config.STATE` already is."""
+    return (config.STATE if state is None else Path(state)) / OUTAGE_STAMP
+
+
+def write_install_stamp(path: Path) -> bool:
+    """Write the stamp if it is absent; return whether it was written.
+
+    NEVER rewritten. Its value is the moment this check FIRST began guarding, and every session
+    older than that moment is exempted by it (`outage_check.predates_install`) — so a rewrite
+    would silently re-lock out exactly the sessions the stamp exists to protect."""
+    if path.exists():
+        return False
+    now = time.time()
+    _write(path, json.dumps({"installed_at": now,
+                             "iso": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(now))},
+                            indent=2) + "\n")
+    return True
+
+
+def outage_command(script: Path = OUTAGE_SCRIPT) -> str:
+    """The shell command Claude Code runs on every prompt.
+
+    The `test -f` guard is load-bearing: `python3 <missing file>` exits 2, and exit 2 on
+    UserPromptSubmit BLOCKS the prompt — so a plugin that has been moved or uninstalled would
+    wedge every session of a user who never asked for this check. Missing script: exit 0, say
+    nothing. Missing python3: the shell's own 127, which is not 2 and therefore not a block."""
+    q = shlex.quote(str(script))
+    return f"test -f {q} || exit 0; python3 -B {q}"
+
+
+def _settings_entries(data: dict) -> list:
+    hooks = data.get("hooks")
+    if not isinstance(hooks, dict):
+        return []
+    ups = hooks.get("UserPromptSubmit")
+    return ups if isinstance(ups, list) else []
+
+
+def outage_installed(data: dict) -> list:
+    """Every hook spec in `hooks.UserPromptSubmit` that is this check (by script basename)."""
+    found = []
+    for group in _settings_entries(data):
+        if not isinstance(group, dict):
+            continue
+        for spec in group.get("hooks", []) if isinstance(group.get("hooks"), list) else []:
+            if isinstance(spec, dict) and OUTAGE_MARK in str(spec.get("command", "")):
+                found.append(spec)
+    return found
+
+
+def read_settings(path: Path) -> tuple[dict, str | None]:
+    """(settings, error). A missing file is an empty one. A file we cannot parse — or that is not
+    a JSON object — is an ERROR, never an empty dict: writing over a user's malformed settings
+    would destroy hand-written configuration to install a guard nobody asked to be destructive."""
+    if not path.exists():
+        return {}, None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        return {}, f"{path} could not be read as JSON ({e.__class__.__name__}); left untouched"
+    if not isinstance(data, dict):
+        return {}, f"{path} is not a JSON object; left untouched"
+    return data, None
+
+
+def install_outage_check(data: dict, script: Path = OUTAGE_SCRIPT) -> tuple[dict, bool]:
+    """Merge the hook into `hooks.UserPromptSubmit`. Returns (settings, changed).
+
+    Idempotent by the script's basename, not by the whole command string, so a second run adds
+    nothing — and a plugin that has MOVED has its one entry rewritten in place rather than
+    duplicated beside a dead path."""
+    cmd = outage_command(script)
+    present = outage_installed(data)
+    if present:
+        changed = False
+        for spec in present:
+            if spec.get("command") != cmd:
+                spec["command"] = cmd
+                changed = True
+        return data, changed
+    hooks = data.setdefault("hooks", {})
+    if not isinstance(hooks, dict):
+        hooks = data["hooks"] = {}
+    ups = hooks.setdefault("UserPromptSubmit", [])
+    if not isinstance(ups, list):
+        ups = hooks["UserPromptSubmit"] = []
+    ups.append({"hooks": [{"type": "command", "command": cmd, "timeout": 10}]})
+    return data, True
+
+
+def remove_outage_check(data: dict) -> tuple[dict, bool]:
+    """Drop this check's hook specs, and any container they leave empty. Another hook sharing the
+    group survives, which is the whole reason the removal is per-SPEC and not per-group."""
+    changed = False
+    hooks = data.get("hooks")
+    if not isinstance(hooks, dict):
+        return data, False
+    ups = hooks.get("UserPromptSubmit")
+    if not isinstance(ups, list):
+        return data, False
+    kept_groups = []
+    for group in ups:
+        if not isinstance(group, dict) or not isinstance(group.get("hooks"), list):
+            kept_groups.append(group)
+            continue
+        specs = [s for s in group["hooks"]
+                 if not (isinstance(s, dict) and OUTAGE_MARK in str(s.get("command", "")))]
+        if len(specs) != len(group["hooks"]):
+            changed = True
+        if specs:
+            group["hooks"] = specs
+            kept_groups.append(group)
+        elif len(group) > 1:                       # a matcher or other keys: keep the husk, not ours to delete
+            group["hooks"] = specs
+            kept_groups.append(group)
+    if not changed:
+        return data, False
+    if kept_groups:
+        hooks["UserPromptSubmit"] = kept_groups
+    else:
+        hooks.pop("UserPromptSubmit", None)
+        if not hooks:
+            data.pop("hooks", None)
+    return data, True
+
+
+def _write_settings(path: Path, data: dict) -> None:
+    """Atomic: a settings.json half-written by a crash is a Claude Code that will not start."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    os.replace(str(tmp), str(path))
+
+
+def _install_outage(settings_path: Path, dry_run: bool = False) -> int:
+    """`--install-outage-check`: register the check and write NOTHING else.
+
+    A full `init.py` run against a repo that already has a memory is not a safe way to add this:
+    it would resolve a region from the repo's basename and create a whole new region in the vault
+    for a repo whose region is called something else, and append an @-import line to a CLAUDE.md
+    that already imports a different file. Adding one hook to one settings file is a smaller act
+    than an install, so it gets its own door."""
+    data, err = read_settings(settings_path)
+    if err:
+        return refuse(err + ", so the outage check could not be installed.")
+    data, changed = install_outage_check(data)
+    if not changed:
+        print(f"  kept         {settings_path}  (already runs the plugin-outage check)")
+    else:
+        verb = "updated" if settings_path.exists() else "created"
+        if dry_run:
+            print(f"  would {verb[:6]}  {settings_path}  (UserPromptSubmit plugin-outage check)")
+        else:
+            _write_settings(settings_path, data)
+            print(f"  {verb:13}{settings_path}  (UserPromptSubmit plugin-outage check; "
+                  "`init.py --remove-outage-check` undoes it)")
+    # Also in the `kept` case: a machine installed before the stamp existed has the hook and no
+    # record of when it went up, which is the state that locked a live session out on 2026-09-10.
+    stamp = outage_stamp_path()
+    if dry_run:
+        if not stamp.exists():
+            print(f"  would create  {stamp}  (when the outage check began guarding)")
+    elif write_install_stamp(stamp):
+        print(f"  created      {stamp}  (when the outage check began guarding; sessions older "
+              "than it are exempt)")
+    else:
+        print(f"  kept         {stamp}  (when the outage check began guarding)")
+    if changed and not dry_run:
+        print("  Restart Claude Code for it to take effect.")
+    return 0
+
+
+def _remove_outage(settings_path: Path) -> int:
+    """`--remove-outage-check`: a standalone act, like `--decline`. Writes nothing else."""
+    data, err = read_settings(settings_path)
+    if err:
+        return refuse(err + ", so the outage check could not be removed.")
+    data, changed = remove_outage_check(data)
+    if changed:
+        _write_settings(settings_path, data)
+        print(f"  removed      {settings_path}  (UserPromptSubmit plugin-outage check)")
+    else:
+        print(f"  kept         {settings_path}  (no plugin-outage check was installed)")
+    stamp = outage_stamp_path()
+    try:
+        stamp.unlink()
+        print(f"  removed      {stamp}")
+    except OSError:
+        pass                                   # absent, or not ours to delete: nothing to undo
+    return 0
 
 
 def _config_names_a_vault(cfg_path: Path) -> bool:
@@ -782,6 +1038,12 @@ def main(argv=None) -> int:
     ap.add_argument("--all", action="store_true", help="ignore the declined list for this one run")
     ap.add_argument("--dry-run", action="store_true", help="report what would be created; write nothing")
     ap.add_argument("--yes", action="store_true", help="take the default without asking (also implied by a non-terminal stdin)")
+    ap.add_argument("--no-outage-check", action="store_true",
+                    help="do not register the plugin-outage check in ~/.claude/settings.json")
+    ap.add_argument("--install-outage-check", action="store_true",
+                    help="register the plugin-outage check in ~/.claude/settings.json, and write nothing else")
+    ap.add_argument("--remove-outage-check", action="store_true",
+                    help="remove the plugin-outage check from ~/.claude/settings.json, and write nothing else")
     a = ap.parse_args(argv)
 
     cwd = Path(os.getcwd()).expanduser().resolve()
@@ -794,9 +1056,14 @@ def main(argv=None) -> int:
         return refuse(f"{vault} exists but is not a directory, so it cannot be the vault.")
     cfg_path = config.CONFIG_PATH
     skills_dir = config.HOME / ".claude" / "skills"
+    settings_path = config.HOME / ".claude" / "settings.json"
     home = config.HOME
     now = time.time()
 
+    if a.remove_outage_check:
+        return _remove_outage(settings_path)
+    if a.install_outage_check:
+        return _install_outage(settings_path, a.dry_run)
     if a.decline:
         return _decline([common.git_root(repo) or repo], cfg_path)
 
@@ -886,7 +1153,8 @@ def main(argv=None) -> int:
     # ---- one act: the plan is re-made per repo, so repo 2 sees what repo 1 created ----
     created: list[Path] = []
     for t, region, lane in plans:
-        steps = plan(t, vault, lane, region, cfg_path, skills_dir)
+        steps = plan(t, vault, lane, region, cfg_path, skills_dir,
+                     None if a.no_outage_check else settings_path, state=config.STATE)
         print(f"Gedächtnis init — repo {t}, vault {vault}, lane {lane}, region {region}" + (" (dry run)" if a.dry_run else ""))
         todo = [s for s in steps if s.verb != "kept"]
         if single and todo and not a.dry_run and not a.yes and sys.stdin.isatty():

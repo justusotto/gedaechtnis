@@ -2,10 +2,12 @@
 """logstore.py — ONE vault-wide append-only log of memory entries; rows, not files.
 
     python3 logstore.py append --region Speculum --kind decision --stem Canon \
-        --heading "## The vault is at the home directory" --body "…" [--flags binding,pointer]
-    python3 logstore.py read   [--region R] [--stem S] [--kind K] [--json]
+        --heading "## The vault is at the home directory" --body "…" [--flags binding,pointer] \
+        [--src session]
+    python3 logstore.py read   [--region R] [--stem S] [--kind K] [--src S] [--json]
     python3 logstore.py check  [--file <log>]        # grammar + no duplicate ids + no duplicate content
-    python3 logstore.py count                        # rows per stem, rows per region
+    python3 logstore.py count                        # rows per stem, rows per region, rows per src
+    python3 logstore.py migrate [--dry-run]          # stamp `src` onto rows written before the column
 
 The store is `<vault>/.gedaechtnis/log/YYYY-MM.tsv` — a HIDDEN directory on purpose: during the
 30-day additive shadow nothing the owner sees in Obsidian may change, so the log and the generated
@@ -14,7 +16,7 @@ views live where the vault's own reader never walks. Where they live afterwards 
 Grammar, one row per line, tab-separated — `ledger.py`'s grammar generalised from lane notices to
 memory entries:
 
-    id \t ts \t region \t kind \t stem \t heading \t body \t flags
+    id \t ts \t region \t kind \t stem \t heading \t body \t flags \t src
 
     id      <region>·<ts>·<8 hex of sha256(region, stem, heading, body)> — DERIVED, never minted.
             A sequence would need a central counter; a content hash needs nothing, and makes the
@@ -27,7 +29,27 @@ memory entries:
     heading the entry's own heading line (or, in a bullet-structured file, its first line)
     body    the entry text below the heading; newlines escaped `\\n`, tabs `\\t`, backslash `\\\\`
     flags   comma list, possibly empty: `pointer` (the entry is only a wikilink to somewhere else),
-            `binding` (its text carries NEVER or ALWAYS), `ord=N` (its 0-based position in its file)
+            `binding` (its text carries NEVER or ALWAYS), `ord=N` (its 0-based position in its file),
+            `preamble` / `order` (a SHAPE row — see below)
+    src     WHO wrote the row: `importer` (a sweep of the live role files) or `session` (a live
+            session's own edit, appended by the PostToolUse chore the moment the edit lands).
+            OPTIONAL in the grammar and absent from every row written before 2026-09-10; a row
+            with no `src` field reads as `importer`, which is true by construction — the importer
+            was the only writer that existed. `migrate` stamps it explicitly.
+
+**`src` is NOT part of the identity hash, and that is the point.** The identity stays
+(region, content hash), so a session row for text the importer already carries is a no-op that
+returns the importer's row. `src=session` therefore marks exactly the rows the SESSION got to
+first — the numerator the council named for the cut-over ratio (council 3, K-3, 2026-09-10), and
+never a second copy of something the importer had already swept.
+
+SHAPE ROWS. Two rows per role file carry the file's shape rather than an entry: `# PREAMBLE`
+(body = the bytes above the first entry) and `# ORDER` (body = the entry headings, one per line,
+in the live file's order). Their headings begin with a single `#`, which `split_entries` never
+cuts on, so neither can ever collide with a real entry. They exist so `views.py --cold` can
+rebuild a file from the log ALONE — preamble and order included — instead of reading the live
+file for them. An entry that MOVES does not change its own content and so mints no new row; the
+`# ORDER` row does change, so order stays current without churning the entry rows.
 
 APPEND-ONLY, and idempotent. `append` refuses nothing and rewrites nothing: if a row with the same
 region and the same content hash is already in the log it returns that row's id and writes no line.
@@ -39,7 +61,7 @@ two runs of the importer a day apart over the same entry would mint two differen
 duplicate detection compares the region and the hash, and `check` reports either kind of collision.
 """
 from __future__ import annotations
-import argparse, hashlib, json, re, sys, time
+import argparse, hashlib, json, os, re, sys, time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
@@ -52,10 +74,19 @@ START_FILE = VAULT / ".gedaechtnis" / "shadow-start.json"
 
 KINDS = ("decision", "lesson", "state", "question", "note")
 STEMS = ("Canon", "Errata", "Patterns", "Position", "Aporia")
-FIELDS = ("id", "ts", "region", "kind", "stem", "heading", "body", "flags")
+SRCS = ("importer", "session")
+DEFAULT_SRC = "importer"                 # what a row written before the column existed WAS
+FIELDS = ("id", "ts", "region", "kind", "stem", "heading", "body", "flags", "src")
+
+# The shape rows (see the module docstring). `#` — one hash — is never an entry heading: the
+# splitter cuts on `## `, `### ` and a top-level `- ` and on nothing else, so these two headings
+# are unreachable from any live file's own text.
+PREAMBLE_HEADING = "# PREAMBLE"
+ORDER_HEADING = "# ORDER"
+SHAPE_FLAGS = ("preamble", "order")
 
 HEADER = ("# Gedaechtnis memory log — append-only; "
-          "id\tts\tregion\tkind\tstem\theading\tbody\tflags (see gedaechtnis/logstore.py)\n")
+          "id\tts\tregion\tkind\tstem\theading\tbody\tflags\tsrc (see gedaechtnis/logstore.py)\n")
 
 ROW = re.compile(
     r"^([A-Za-z0-9_./-]+·\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}·[0-9a-f]{8})"
@@ -65,8 +96,16 @@ ROW = re.compile(
     r"\t(Canon|Errata|Patterns|Position|Aporia)"
     r"\t([^\t\n]*)"
     r"\t([^\t\n]*)"
-    r"\t([^\t\n]*)$"
+    r"\t([^\t\n]*)"
+    r"(?:\t(importer|session))?$"          # `src`, optional: absent means `importer` (see docstring)
 )
+
+
+def is_shape(row) -> bool:
+    """A shape row (`# PREAMBLE` / `# ORDER`) carries a file's form, never one of its entries.
+    Every consumer that counts ENTRIES filters on this — a shape row in a fidelity denominator
+    would be an entry the live file does not have."""
+    return any(f in SHAPE_FLAGS for f in row["flags"])
 
 
 # --------------------------------------------------------------------- escaping ----
@@ -133,11 +172,14 @@ def parse_line(line: str):
         return None
     m = ROW.match(line)
     if not m:
-        raise ValueError("row does not match `id\\tts\\tregion\\tkind\\tstem\\theading\\tbody\\tflags`")
+        raise ValueError("row does not match "
+                         "`id\\tts\\tregion\\tkind\\tstem\\theading\\tbody\\tflags[\\tsrc]`")
     d = dict(zip(FIELDS, m.groups()))
     d["heading"] = unescape(d["heading"])
     d["body"] = unescape(d["body"])
     d["flags"] = [f for f in d["flags"].split(",") if f]
+    d["src_explicit"] = d["src"] is not None    # `migrate` is the only caller that cares
+    d["src"] = d["src"] or DEFAULT_SRC
     return d
 
 
@@ -174,18 +216,25 @@ def _index(rows) -> dict:
 # --------------------------------------------------------------------- writing ----
 
 def append(region: str, kind: str, stem: str, heading: str, body: str,
-           flags=(), ts: str = "", known: dict = None) -> tuple:
+           flags=(), ts: str = "", known: dict = None, src: str = DEFAULT_SRC) -> tuple:
     """-> (row_id, appended). Idempotent: a row whose (region, content hash) is already in the log
     is a NO-OP and returns the existing id.
 
     `known` lets a bulk importer pass the identity map it already built, so importing 1,229 entries
     is one read of the log rather than 1,229 — the caller must keep it current, which the importer
     does by inserting each row it writes.
+
+    `src` is stamped on the row and deliberately kept OUT of the identity hash: two writers that
+    produce the same text are the same memory, and whichever got there first keeps the row. So
+    `src=session` counts only the entries a live session recorded BEFORE any importer sweep saw
+    them — which is the whole reason the column exists.
     """
     if kind not in KINDS:
         raise ValueError(f"kind must be one of {KINDS}, not {kind!r}")
     if stem not in STEMS:
         raise ValueError(f"stem must be one of {STEMS}, not {stem!r}")
+    if src not in SRCS:
+        raise ValueError(f"src must be one of {SRCS}, not {src!r}")
     if "·" in region or "\t" in region or not region:
         raise ValueError(f"region must be a vault-relative folder with no tab and no `·`: {region!r}")
     digest = content_hash(region, stem, heading, body)
@@ -196,7 +245,7 @@ def append(region: str, kind: str, stem: str, heading: str, body: str,
     ts = ts or time.strftime("%Y-%m-%dT%H:%M:%S")
     row_id = make_id(region, ts, digest)
     flag_s = ",".join(str(f) for f in flags)
-    line = "\t".join((row_id, ts, region, kind, stem, escape(heading), escape(body), flag_s))
+    line = "\t".join((row_id, ts, region, kind, stem, escape(heading), escape(body), flag_s, src))
     if not ROW.match(line):
         raise ValueError(f"refused: the composed row does not match the grammar: {line[:160]}")
     LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -206,7 +255,7 @@ def append(region: str, kind: str, stem: str, heading: str, body: str,
         if new:
             fh.write(HEADER)
         fh.write(line + "\n")
-    row = dict(zip(FIELDS, (row_id, ts, region, kind, stem, heading, body, list(flags))))
+    row = dict(zip(FIELDS, (row_id, ts, region, kind, stem, heading, body, list(flags), src)))
     if known is not None:
         known[(region, digest)] = row
     return row_id, True
@@ -248,6 +297,9 @@ def check(path=None) -> int:
             if digest != want:
                 print(f"{f}:{lineno}: id hash {digest} != sha256 of the row's own content ({want})")
                 bad += 1
+            if d["src"] not in SRCS:
+                print(f"{f}:{lineno}: src {d['src']!r} is not one of {SRCS}")
+                bad += 1
             key = (d["region"], digest)
             if key in by_content:
                 print(f"{f}:{lineno}: duplicate content for {d['region']} (first seen {by_content[key]})")
@@ -261,10 +313,68 @@ def counts() -> dict:
     rows = all_rows()
     per_stem = {}
     per_region = {}
+    per_src = {s: 0 for s in SRCS}
+    shape = 0
     for r in rows:
+        if is_shape(r):
+            shape += 1
         per_stem[r["stem"]] = per_stem.get(r["stem"], 0) + 1
         per_region[r["region"]] = per_region.get(r["region"], 0) + 1
-    return {"rows": len(rows), "per_stem": per_stem, "per_region": per_region}
+        per_src[r["src"]] = per_src.get(r["src"], 0) + 1
+    return {"rows": len(rows), "entry_rows": len(rows) - shape, "shape_rows": shape,
+            "per_stem": per_stem, "per_region": per_region, "per_src": per_src}
+
+
+# --------------------------------------------------------------------- migrating ----
+
+def migrate(dry_run: bool = False) -> dict:
+    """Stamp `src=importer` onto every row written before the column existed. One-shot, idempotent.
+
+    APPEND-ONLY IS ABOUT CONTENT, and this migration keeps that literally: it adds a ninth FIELD to
+    a line and touches nothing inside the eight that were there. The proof is not a promise — every
+    line is parsed before and after, and the migration REFUSES (writing nothing) unless all eight
+    original fields, the row's id and its content hash come back identical. A backup of each file is
+    written first under `<file>.pre-srccol-<date>` (never clobbered if one is already there, and
+    outside the `*.tsv` glob so `all_rows` never reads it back as log).
+    """
+    stamped, already, files = 0, 0, []
+    for f in log_files():
+        lines = f.read_text(encoding="utf-8").splitlines()
+        out, changed = [], 0
+        for line in lines:
+            if not line or line.startswith("#"):
+                out.append(HEADER.rstrip("\n") if line.startswith("# Gedaechtnis memory log") else line)
+                continue
+            try:
+                before = parse_line(line)
+            except ValueError:
+                out.append(line)                       # `check` reports malformed rows; never repair one here
+                continue
+            if before["src_explicit"]:
+                already += 1
+                out.append(line)
+                continue
+            new = line + "\t" + DEFAULT_SRC
+            after = parse_line(new)
+            same = all(before[k] == after[k] for k in FIELDS if k != "src")
+            if not (same and after["src"] == DEFAULT_SRC):
+                raise SystemExit(f"REFUSED: migrating {f} would change a row's content, not only its "
+                                 f"`src` field. Nothing was written.\n  {line[:160]}")
+            out.append(new)
+            changed += 1
+        if not changed:
+            continue
+        stamped += changed
+        files.append(str(f))
+        if dry_run:
+            continue
+        bak = f.with_name(f.name + ".pre-srccol-" + time.strftime("%Y-%m-%d"))
+        if not bak.exists():                            # check-before-clobber, once per day
+            bak.write_text(f.read_text(encoding="utf-8"), encoding="utf-8")
+        tmp = f.with_name(f.name + ".tmp-srccol")
+        tmp.write_text("\n".join(out) + "\n", encoding="utf-8")
+        os.replace(str(tmp), str(f))                    # atomic: no reader sees a half-migrated log
+    return {"stamped": stamped, "already_stamped": already, "files": files, "dry_run": dry_run}
 
 
 def main() -> int:
@@ -277,37 +387,50 @@ def main() -> int:
     a.add_argument("--heading", required=True)
     a.add_argument("--body", default="")
     a.add_argument("--flags", default="")
+    a.add_argument("--src", choices=SRCS, default=DEFAULT_SRC,
+                   help="who is writing this row (default: importer)")
     r = sub.add_parser("read")
     r.add_argument("--region")
     r.add_argument("--stem")
     r.add_argument("--kind")
+    r.add_argument("--src", choices=SRCS)
     r.add_argument("--json", action="store_true")
     c = sub.add_parser("check")
     c.add_argument("--file")
     sub.add_parser("count")
+    mg = sub.add_parser("migrate")
+    mg.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
     if args.cmd == "append":
         flags = [f for f in args.flags.split(",") if f]
-        row_id, wrote = append(args.region, args.kind, args.stem, args.heading, args.body, flags)
-        print(f"{row_id}\t{'appended' if wrote else 'already present (no-op)'}")
+        row_id, wrote = append(args.region, args.kind, args.stem, args.heading, args.body, flags,
+                               src=args.src)
+        print(f"{row_id}\t{'appended' if wrote else 'already present (no-op)'}\tsrc={args.src}")
         return 0
     if args.cmd == "read":
         rows = [x for x in all_rows()
                 if (not args.region or x["region"] == args.region)
                 and (not args.stem or x["stem"] == args.stem)
-                and (not args.kind or x["kind"] == args.kind)]
+                and (not args.kind or x["kind"] == args.kind)
+                and (not args.src or x["src"] == args.src)]
         if args.json:
             print(json.dumps(rows, indent=1, ensure_ascii=False))
         else:
             for x in rows:
-                print("\t".join((x["id"], x["region"], x["stem"], x["heading"][:100])))
+                print("\t".join((x["id"], x["region"], x["stem"], x["src"], x["heading"][:100])))
             print(f"# {len(rows)} row(s)", file=sys.stderr)
         return 0
     if args.cmd == "check":
         return check(args.file)
     if args.cmd == "count":
         print(json.dumps(counts(), indent=1, ensure_ascii=False))
+        return 0
+    if args.cmd == "migrate":
+        res = migrate(args.dry_run)
+        verb = "would stamp" if args.dry_run else "stamped"
+        print(f"{verb} src={DEFAULT_SRC} on {res['stamped']} row(s) across {len(res['files'])} "
+              f"file(s); {res['already_stamped']} row(s) already carried the column")
         return 0
     return 0
 

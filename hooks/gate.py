@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """gate.py — the PreToolUse locked doors of Das Gedächtnis.
 
-    python3 gate.py bash    # vault git law · launch pins model · data integrity · artifact-not-file ·
-                            # no whole-file overwrite (D1's bash half + shared-surface append-only)
+    python3 gate.py bash    # vault git law · inherited-tag push · launch pins model · data integrity ·
+                            # artifact-not-file · no whole-file overwrite (D1's bash half +
+                            # shared-surface append-only)
     python3 gate.py write   # partition (WARN or DENY per state file) · Concilium stem rule
     python3 gate.py agent   # every Agent call pins a model unless its definition does
 
@@ -23,6 +24,7 @@ from common import (read_input, deny, ask, allow, log, expand, under, vault_rel,
                     note_pre_exists, clear_pre_exists, created_paths, take_filelock, release_filelock)
 import fnmatch
 import shlex
+import subprocess
 import config as _cfg
 import names
 import context_economy
@@ -218,6 +220,75 @@ def rule_vault_git(cmd: str, cwd: str | None) -> str | None:
                     "`stash` or `reset --hard` past a modified-on-disk warning on a file you don't own)")
         if sub == "clean" and re.search(r"\s-[a-zA-Z]*f", seg):
             return "`git clean -f` in ~/Atlas deletes untracked files another session may be writing. Refused; move to Trash by hand if needed."
+    return None
+
+
+# ------------------------------------------------ the inherited-tag door (MIRRORTAGS-1, 2026-09-10) ----
+# A public mirror clone made from a private monorepo INHERITS that monorepo's tags: a tag is a ref
+# like any other, and `git push --tags` publishes every one of them together with the private commit
+# each points at and its whole ancestry. That is not a hypothesis — it happened on 2026-09-10, five
+# tags deep, and the remote objects survive until the host garbage-collects them.
+#
+# The tree scanner (`tools/publish_check.py`) cannot see this class at all: it reads FILES, and a tag
+# is a ref. So the door is keyed on the two flags that send every ref — `--tags`, `--follow-tags` —
+# and asks one question of the clone they would push from: does it carry a tag that is not one of
+# this project's own releases? If it does, the push is refused by name. A clone whose tags are all
+# releases pushes as before (the negative control), and a push of ONE tag by name is never touched.
+#
+# Cost: a single `git tag -l`, and only when one of those two flags is present.
+
+RELEASE_TAG = "v*"          # the shape a release tag has; `tools/publish_check.py` agrees, by design
+
+
+def git_subcommand(seg: str) -> str | None:
+    """The subcommand of a `git` segment, skipping the options and their values (`-C <dir>`, `-c k=v`)."""
+    toks = seg.split()[1:]
+    i = 0
+    while i < len(toks):
+        if toks[i] in ("-C", "-c"):
+            i += 2; continue
+        if toks[i].startswith("-"):
+            i += 1; continue
+        return toks[i]
+    return None
+
+
+def non_release_tags(repo: Path) -> list[str]:
+    """Tags on `repo` that are not `v*`. One local `git tag -l`, no network.
+
+    Empty on ANY failure: a door that cannot read the refs has no opinion. The alternative — refusing
+    what it could not read — would block a legitimate push in every directory that is not a git repo,
+    which is how an over-conservative guard destroys a run as thoroughly as an overrun.
+    """
+    try:
+        p = subprocess.run(["git", "-C", str(repo), "tag", "-l"],
+                           capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if p.returncode != 0:
+        return []
+    tags = [t.strip() for t in p.stdout.splitlines() if t.strip()]
+    return [t for t in tags if not fnmatch.fnmatch(t, RELEASE_TAG)]
+
+
+def rule_inherited_tag_push(cmd: str, cwd: str | None) -> str | None:
+    for seg, repo in git_segments(cmd, cwd):
+        if git_subcommand(seg) != "push":
+            continue
+        flags = set(seg.split())
+        if not (flags & {"--tags", "--follow-tags"}):
+            continue
+        bad = non_release_tags(repo)
+        if not bad:
+            continue                              # every tag here is a release of this project
+        which = "--tags" if "--tags" in flags else "--follow-tags"
+        return (f"`git push {which}` sends EVERY tag this clone has, and `{repo}` carries "
+                f"{len(bad)} tag(s) this project never released ({', '.join(bad[:5])}) — a clone made from a "
+                "private repo inherits its tags, and pushing one publishes the private commit it points at with its "
+                "whole ancestry (it happened on 2026-09-10, and the objects outlive the tag deletion). Publish the "
+                "release BY NAME instead: `git push origin <tag>`. Then delete the inherited tag locally and refresh "
+                "this clone with `git pull --no-rebase --no-tags`. (Speculum/Errata 'A public mirror clone fed from a "
+                "private monorepo CARRIES THE MONOREPO'S TAGS')")
     return None
 
 
@@ -541,7 +612,8 @@ def do_bash(inp: dict) -> None:
     if not cmd:
         return
     sid = inp.get("session_id", "-")
-    for fn in (lambda: rule_vault_git(cmd, cwd), lambda: rule_launch_model(cmd),
+    for fn in (lambda: rule_vault_git(cmd, cwd), lambda: rule_inherited_tag_push(cmd, cwd),
+               lambda: rule_launch_model(cmd),
                lambda: rule_data_integrity(cmd), lambda: rule_artifact_not_file(cmd, cwd),
                lambda: rule_generated_view_bash(cmd, cwd),
                lambda: rule_bash_no_whole_file_write(cmd, cwd, sid),

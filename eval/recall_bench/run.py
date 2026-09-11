@@ -53,14 +53,17 @@ def normalize_heading(heading: str) -> str:
     return heading.lstrip("#").strip()
 
 
-def score_question(vault: Path, row: dict, limit: int, max_bytes: int) -> dict:
+def score_question(vault: Path, row: dict, limit: int, max_bytes: int,
+                   include_queues: bool = False, ranking: str = "a-prime",
+                   include_generated: bool = False) -> dict:
     """One question, scored against arm (a). Bytes-to-answer sums every shown hit's body up to
     and including the first one that matches `expected` (see PREREGISTRATION.md for the exact
     definition); when the answer is never found, the reader paid for all `limit` hits and got
     nothing, which is the correct, unforgiving number for that case."""
     file_part, _, heading_part = row["expected"].partition("#")
     t0 = time.monotonic()
-    hits, _want = recall.search(vault, row["question"])
+    hits, _want = recall.search(vault, row["question"], include_queues=include_queues,
+                                ranking=ranking, include_generated=include_generated)
     wall_ms = (time.monotonic() - t0) * 1000
     top = hits[:limit]
     bytes_read = 0
@@ -70,24 +73,46 @@ def score_question(vault: Path, row: dict, limit: int, max_bytes: int) -> dict:
         if h["path"] == file_part and normalize_heading(h["heading"]) == heading_part:
             hit_rank = i + 1
             break
+    # Where the expected entry sits in the WHOLE hit list, not just the top N — `null` when the
+    # search never found it at all. recall@N alone cannot tell "the ranking buried it at 30" from
+    # "it is not in the corpus", and on 2026-09-10 that distinction was the entire finding: 0 of
+    # 30 with the right entry present every time. Recording it here means the number comes out of
+    # the run directory instead of a second script nobody kept.
+    full_rank = next((i + 1 for i, h in enumerate(hits)
+                      if h["path"] == file_part and normalize_heading(h["heading"]) == heading_part),
+                     None)
     return {
         "question": row["question"], "expected": row["expected"], "region": row.get("region", ""),
-        "hit_rank": hit_rank, "recall_at_limit": hit_rank is not None,
+        "hit_rank": hit_rank, "recall_at_limit": hit_rank is not None, "full_rank": full_rank,
         "bytes_to_answer": bytes_read, "total_hits": len(hits), "wall_ms": round(wall_ms, 3),
     }
 
 
-def score_grep(vault: Path, questions: list[dict], limit: int, max_bytes: int) -> list[dict]:
-    return [score_question(vault, row, limit, max_bytes) for row in questions]
+def score_grep(vault: Path, questions: list[dict], limit: int, max_bytes: int,
+               include_queues: bool = False, ranking: str = "a-prime",
+               include_generated: bool = False) -> list[dict]:
+    """Arm (a) / (a′). The three knobs are the arm's CONFIGURATION, not a reimplementation: all are
+    forwarded to the real `recall.search`, so a bench row can never be scored against a ranking
+    (or a corpus inclusion) that recall.py does not itself ship. `ranking="flat"` reproduces the
+    pre-2026-09-10 order exactly, which is what makes an exclusion-only run readable against a
+    rank-only run."""
+    return [score_question(vault, row, limit, max_bytes, include_queues, ranking, include_generated)
+            for row in questions]
 
 
 def aggregate(rows: list[dict]) -> dict:
+    """`.get("full_rank")` on purpose: JSONL written before 2026-09-10 has no such column, and a
+    result file must stay re-renderable after the instrument grows a field — otherwise the first
+    schema change quietly retires every run already on disk."""
     n = len(rows) or 1
+    found = sorted(r["full_rank"] for r in rows if r.get("full_rank") is not None)
     return {
         "n_questions": len(rows),
         "recall_at_limit_rate": sum(1 for r in rows if r["recall_at_limit"]) / n,
         "mean_bytes_to_answer": sum(r["bytes_to_answer"] for r in rows) / n,
         "mean_wall_ms": sum(r["wall_ms"] for r in rows) / n,
+        "expected_present": len(found),
+        "median_full_rank": found[len(found) // 2] if found else None,
     }
 
 
@@ -103,19 +128,22 @@ def render_markdown(rows: list[dict], summary: dict | None = None, floor: dict |
     """Pure function of the rows (+ optional summary/floor): call it twice on the same input and
     get byte-identical output. This is the ONLY place a markdown table is produced — `main()`
     calls it, and so does the test that proves the on-disk `.md` is a true regeneration."""
-    lines = ["| # | region | question | recall_at_limit | hit_rank | bytes_to_answer | wall_ms |",
-             "|---|---|---|---|---|---|---|"]
+    lines = ["| # | region | question | recall_at_limit | hit_rank | full_rank | bytes_to_answer | wall_ms |",
+             "|---|---|---|---|---|---|---|---|"]
     for i, r in enumerate(rows, 1):
         q = r["question"].replace("|", "\\|")
         lines.append(f"| {i} | {r.get('region', '')} | {q} | {r['recall_at_limit']} | "
                      f"{r['hit_rank'] if r['hit_rank'] is not None else '-'} | "
+                     f"{r.get('full_rank') if r.get('full_rank') is not None else '-'} | "
                      f"{r['bytes_to_answer']} | {r['wall_ms']} |")
     if summary is not None:
         lines.append("")
         lines.append(f"**recall@limit rate:** {summary['recall_at_limit_rate']:.3f} · "
                      f"**mean bytes-to-answer:** {summary['mean_bytes_to_answer']:.1f} · "
                      f"**mean wall ms:** {summary['mean_wall_ms']:.3f} · "
-                     f"**n:** {summary['n_questions']}")
+                     f"**n:** {summary['n_questions']} · "
+                     f"**expected entry present:** {summary.get('expected_present', '-')} · "
+                     f"**median rank of it:** {summary.get('median_full_rank', '-')}")
     if floor is not None:
         lines.append(f"**noise floor (repeat control):** " +
                      ", ".join(f"{k}={v:.4f}" for k, v in sorted(floor.items())))
@@ -154,6 +182,16 @@ def main(argv=None) -> int:
     ap.add_argument("--questions", default=str(DEFAULT_QUESTIONS), help="question-set JSON (default: the shipped example)")
     ap.add_argument("--out", default=None, help="output directory for results.jsonl/.md (default: ./results next to this script)")
     ap.add_argument("--limit", type=int, default=3, help="recall@N (default 3, matching the pre-registered claim)")
+    ap.add_argument("--include-queues", action="store_true",
+                    help="forwarded to recall.search: also search Pharos/ and Channels/ "
+                         "(recall.py excludes them by default since 2026-09-10)")
+    ap.add_argument("--include-generated", action="store_true",
+                    help="forwarded to recall.search: also search .gedaechtnis/ (recall.py "
+                         "excludes the generated log-and-views shadow by default since RECALL-VIEWS-1)")
+    ap.add_argument("--rank", choices=recall.RANKINGS, default="a-prime",
+                    help="forwarded to recall.search: `flat` is the pre-2026-09-10 order — the "
+                         "negative control for arm (a′) — and `length-only` is a′ without its "
+                         "measured stoplist, which attributes a change to one half of the rank")
     ap.add_argument("--max-bytes", type=int, default=6000, help="forwarded conceptually to match recall.py's own default cap")
     ap.add_argument("--render-only", default=None, metavar="JSONL",
                     help="skip the bench entirely: regenerate results.md from an existing JSONL and exit. "
@@ -184,8 +222,9 @@ def main(argv=None) -> int:
         return 2
     questions = load_questions(Path(a.questions).expanduser().resolve())
 
-    run1 = score_grep(vault, questions, a.limit, a.max_bytes)
-    run2 = score_grep(vault, questions, a.limit, a.max_bytes)   # repeat control, byte-identical config
+    cfg = dict(include_queues=a.include_queues, ranking=a.rank, include_generated=a.include_generated)
+    run1 = score_grep(vault, questions, a.limit, a.max_bytes, **cfg)
+    run2 = score_grep(vault, questions, a.limit, a.max_bytes, **cfg)   # repeat control, byte-identical config
     agg1, agg2 = aggregate(run1), aggregate(run2)
     floor = floor_between(agg1, agg2)
 

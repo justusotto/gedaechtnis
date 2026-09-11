@@ -24,6 +24,12 @@ Headings inside a fenced code block are not headings. That one rule is worth its
 without changing it, the importer prints it under `UNPARSED` and moves on — the file is reported,
 never repaired.
 
+Also written, per role file that has entries: two SHAPE rows, `# PREAMBLE` (the bytes above the
+first entry) and `# ORDER` (the entry headings in the file's own order). They are counted apart from
+the entries everywhere, and they exist so `views.py --cold` can rebuild a file from the log alone.
+A file with no entries gets neither — it is not in the shadow at all, and giving it shape rows would
+invent a view out of a stub.
+
 Idempotent by construction: `logstore.append` is keyed on (region, content hash), so a second run
 over an unchanged vault appends zero rows and says so.
 """
@@ -190,54 +196,137 @@ def entry_flags(heading: str, body: str, ordinal: int) -> list:
     return flags
 
 
+def entries_of_file(region: str, stem: str, path: Path) -> tuple:
+    """-> ([entry dict], [shape dict], [(rel, why)]) for ONE role file: the per-file half of `scan`.
+
+    Split out so the session writer (hooks/chore.py) can log the entries of the single file a
+    session just edited without walking the vault — one parser, one definition of "an entry",
+    used by the sweep and by the live writer alike. Two spellings of that would make the src
+    column measure the difference between two parsers instead of the difference between two
+    writers.
+
+    THE SHAPE ROWS are the second return value: `# PREAMBLE` (the bytes above the first entry) and
+    `# ORDER` (the entry headings, one per line, in the file's own order). They exist because a
+    cold build — `views.py --cold`, the file rebuilt from the log with the live file moved aside —
+    needs both, and until now `views.py` read both off the live file. Council 3's C-04: that is
+    precisely why day 0's "72 of 72 byte-identical" could not fail on those bytes.
+
+    ORDER is a row of its OWN rather than a flag on each entry, because an entry that MOVES does
+    not change its own content and so mints no new row: the `ord=N` flags in the log go stale the
+    moment anything is inserted above them, silently. The `# ORDER` row does change when the order
+    changes, so it is re-minted, and the newest one wins like every other correction.
+
+    A file with no entries gets NO shape rows and no entry rows — it is not in the shadow at all,
+    which is what it already was; giving it shape rows alone would invent a 73rd view out of a stub.
+    """
+    unparsed = []
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as e:
+        return [], [], [(str(path), f"unreadable: {e}")]
+    pre, blocks = split_entries(text)
+    if not blocks and text.strip():
+        unparsed.append((str(path), "no `##`/`###` heading and no top-level `- ` bullet"))
+    elif joined(pre, blocks) != text:
+        unparsed.append((str(path), "entries do not re-join byte-identical (missing final newline?)"))
+    out = []
+    for n, (heading, body) in enumerate(blocks):
+        out.append({"region": region, "stem": stem, "kind": KIND_OF_STEM[stem],
+                    "heading": heading, "body": body,
+                    "flags": entry_flags(heading, body, n), "path": str(path)})
+    shape = []
+    if blocks:
+        for heading, body, flag in ((logstore.PREAMBLE_HEADING, pre, "preamble"),
+                                    (logstore.ORDER_HEADING,
+                                     "\n".join(h for h, _b in blocks), "order")):
+            shape.append({"region": region, "stem": stem, "kind": "note", "heading": heading,
+                          "body": body, "flags": [flag], "path": str(path)})
+    return out, shape, unparsed
+
+
+def log_one_file(region: str, stem: str, path: Path, src: str = "session") -> dict:
+    """Append a row for every entry of ONE live role file the log does not already carry.
+
+    This is the SESSION WRITE PATH (council 3, K-3): `hooks/chore.py` calls it the moment a session's
+    Edit or Write to a role file lands, so the edit becomes a row in the same act rather than
+    waiting for the next importer sweep. Rows are stamped `src=session`, and because `src` is not
+    part of the identity hash, an entry the importer already swept is a no-op here — the column
+    counts who got there FIRST, which is exactly the cut-over numerator.
+
+    The SHAPE rows go in too, and they must: a session that adds an entry has changed the file's
+    heading order, and a cold build reading a stale `# ORDER` row would rebuild the file the way it
+    looked before the edit and call the difference a fidelity miss.
+
+    -> {'entries', 'appended': [row ids], 'shape_appended': [row ids], 'unparsed'}. Reads the file,
+    appends rows; it never writes a vault role file, same as every other function in this module.
+    """
+    found, shape, bad = entries_of_file(region, stem, path)
+    known = logstore._index(logstore.all_rows())
+    appended, shape_appended = [], []
+    for e in found:
+        rid, wrote = logstore.append(e["region"], e["kind"], e["stem"], e["heading"], e["body"],
+                                     e["flags"], known=known, src=src)
+        if wrote:
+            appended.append(rid)
+    for s in shape:
+        rid, wrote = logstore.append(s["region"], s["kind"], s["stem"], s["heading"], s["body"],
+                                     s["flags"], known=known, src=src)
+        if wrote:
+            shape_appended.append(rid)
+    return {"entries": len(found), "appended": appended, "shape_appended": shape_appended,
+            "unparsed": bad}
+
+
 def scan(vault: Path = None) -> dict:
     """-> {'entries': [...], 'per_stem': {...}, 'unparsed': [...]} — a pure read of the vault."""
     vault = vault or VAULT
     entries = []
+    shape = []
     per_stem = {s: 0 for s in STEMS}
     unparsed = []
     for region, d in regions(vault):
         for stem, p in role_files(d):
-            try:
-                text = p.read_text(encoding="utf-8")
-            except (OSError, UnicodeDecodeError) as e:
-                unparsed.append((str(p.relative_to(vault)), f"unreadable: {e}"))
-                continue
-            pre, blocks = split_entries(text)
-            if not blocks and text.strip():
-                # not an error by itself — a stub role file has no entries — but say so out loud
-                unparsed.append((str(p.relative_to(vault)),
-                                 "no `##`/`###` heading and no top-level `- ` bullet"))
-            elif joined(pre, blocks) != text:
-                # LOUD, never normalised: the only shape that reaches here is a file whose last line
-                # is a heading with no terminating newline, and a shadow that silently added that
-                # byte would be reporting its own formatter as fidelity.
-                unparsed.append((str(p.relative_to(vault)),
-                                 "entries do not re-join byte-identical (missing final newline?)"))
-            for n, (heading, body) in enumerate(blocks):
-                entries.append({"region": region, "stem": stem, "kind": KIND_OF_STEM[stem],
-                                "heading": heading, "body": body,
-                                "flags": entry_flags(heading, body, n),
-                                "path": str(p.relative_to(vault))})
+            # `unparsed` is LOUD, never normalised: the shape that reaches it is a file whose last
+            # line is a heading with no terminating newline, and a shadow that silently added that
+            # byte would be reporting its own formatter as fidelity.
+            found, shp, bad = entries_of_file(region, stem, p)
+            for _path, why in bad:
+                unparsed.append((str(p.relative_to(vault)), why))
+            for e in found:
+                e["path"] = str(p.relative_to(vault))
+                entries.append(e)
                 per_stem[stem] += 1
-    return {"entries": entries, "per_stem": per_stem, "unparsed": unparsed}
+            for s in shp:
+                s["path"] = str(p.relative_to(vault))
+                shape.append(s)
+    return {"entries": entries, "shape": shape, "per_stem": per_stem, "unparsed": unparsed}
 
 
 def run(dry_run: bool = False, vault: Path = None) -> dict:
     found = scan(vault)
     appended = 0
     skipped = 0
+    shape_appended = 0
     if not dry_run:
         known = logstore._index(logstore.all_rows())
         for e in found["entries"]:
             _rid, wrote = logstore.append(e["region"], e["kind"], e["stem"], e["heading"],
-                                          e["body"], e["flags"], known=known)
+                                          e["body"], e["flags"], known=known,
+                                          src="importer")
             if wrote:
                 appended += 1
             else:
                 skipped += 1
+        # counted apart from the entries, and always: a shape row is not a memory, and folding it
+        # into `appended` would move the number the EXPECTED table is read against.
+        for s in found["shape"]:
+            _rid, wrote = logstore.append(s["region"], s["kind"], s["stem"], s["heading"],
+                                          s["body"], s["flags"], known=known, src="importer")
+            if wrote:
+                shape_appended += 1
     return {"per_stem": found["per_stem"], "entries": len(found["entries"]),
             "appended": appended, "already_present": skipped,
+            "shape_rows": len(found["shape"]), "shape_appended": shape_appended,
             "unparsed": found["unparsed"], "regions": len(regions(vault))}
 
 
@@ -252,6 +341,9 @@ def report(res: dict) -> None:
         print(f"{stem:10} {got:7} {exp:9} {got - exp:+6}")
     print(f"{'TOTAL':10} {total:7} {exp_total:9} {total - exp_total:+6}")
     print(f"appended: {res['appended']}   already present (no-op): {res['already_present']}")
+    print(f"shape rows (# PREAMBLE / # ORDER, one pair per file with entries): "
+          f"{res['shape_rows']} found, {res['shape_appended']} appended — these are what "
+          f"`views.py --cold` rebuilds a file's preamble and heading order from")
     if res["unparsed"]:
         print("UNPARSED (reported, never repaired):")
         for path, why in res["unparsed"]:

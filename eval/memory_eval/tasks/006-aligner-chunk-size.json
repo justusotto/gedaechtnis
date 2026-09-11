@@ -1,0 +1,31 @@
+{
+  "task_id": "006-aligner-chunk-size",
+  "title": "Aligner chunking constant",
+  "author": "author-a",
+  "source_region": "Mnemosyne/AnkiAutoMiner",
+  "positive_control": false,
+  "description": "Day 1 records a tuning constant: how many source segments are batched into a single aligner subagent call in this project's mining pipeline. The value is an arbitrary tuning choice with no natural default (it could be any small-to-moderate integer), so a memory-less model cannot guess the exact number this project settled on from the day-N prompt or general pipeline-design conventions.",
+  "day1_prompt": "Day 1: we are tuning the mining pipeline's subtitle-aligner batching. Decide and record: the aligner CHUNK_SIZE constant (how many segments are sent per aligner subagent call) is set to 60.",
+  "memory_sentence": "This project's aligner CHUNK_SIZE constant is set to 60 segments per call.",
+  "canon_heading": "Aligner CHUNK_SIZE is 60",
+  "fact": "60",
+  "day_n": 11,
+  "day_n_prompt": "Day 11: a new contributor asks what our mining pipeline's aligner CHUNK_SIZE constant (segments per aligner subagent call) is currently set to. Answer with only the number.",
+  "checker_file": "chunk-size-answer.txt",
+  "checker_must_contain": "60",
+  "checker_must_match": [
+    "(?i)\\b60\\b"
+  ],
+  "checker_must_not_match": [],
+  "swap": {
+    "day1_prompt": "Day 1: we are tuning the mining pipeline's subtitle-aligner batching. Decide and record: the aligner CHUNK_SIZE constant (how many segments are sent per aligner subagent call) is set to 30.",
+    "memory_sentence": "This project's aligner CHUNK_SIZE constant is set to 30 segments per call.",
+    "canon_heading": "Aligner CHUNK_SIZE is 30",
+    "fact": "30",
+    "checker_must_contain": "30",
+    "checker_must_match": [
+      "(?i)\\b30\\b"
+    ],
+    "checker_must_not_match": []
+  }
+}

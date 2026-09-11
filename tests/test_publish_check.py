@@ -72,3 +72,51 @@ def test_the_checker_scans_itself(copy):
                     encoding="utf-8")
     rc, out = run(copy)
     assert rc == 1 and "tools/publish_check.py" in out, out
+
+
+# ------------------------------------------------------------------ the refs half (MIRRORTAGS-1) ----
+# A mirror clone made from the private monorepo INHERITS its tags, and `git push --tags` then
+# publishes the private commits they point at. The tree scan above cannot see that: a tag is a ref,
+# not a file. Both controls below use a REAL clone, because inheriting-by-clone is the mechanism.
+
+def git(*args, cwd=None):
+    return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *args],
+                          cwd=str(cwd) if cwd else None, capture_output=True, text=True,
+                          check=True, timeout=120)
+
+
+@pytest.fixture
+def clone(tmp_path):
+    """A publish-clean clone of an upstream that carries one non-release tag, as the mirror did."""
+    up = tmp_path / "upstream"; up.mkdir()
+    git("init", "-q", "-b", "main", str(up))
+    (up / "hello.txt").write_text("hello\n", encoding="utf-8")
+    git("add", "--", "hello.txt", cwd=up)
+    git("commit", "-q", "-m", "root", "--", "hello.txt", cwd=up)
+    git("tag", "cursus-phase1-start", cwd=up)
+    dst = tmp_path / "mirror"
+    git("clone", "-q", str(up), str(dst))
+    return dst
+
+
+def test_an_inherited_tag_is_refused(clone):
+    assert git("tag", "-l", cwd=clone).stdout.split() == ["cursus-phase1-start"], "the clone must inherit the tag"
+    rc, out = run(clone)
+    assert rc == 1, out
+    assert "cursus-phase1-start" in out and "--no-tags" in out, out
+
+
+def test_only_release_tags_passes(clone):
+    """Negative control: the same clone, its inherited tag deleted and a real release tagged."""
+    git("tag", "-d", "cursus-phase1-start", cwd=clone)
+    git("tag", "v0.1", cwd=clone)
+    rc, out = run(clone)
+    assert rc == 0, out
+    assert "clean" in out
+
+
+def test_a_non_git_root_is_not_judged_on_the_tags_of_the_repo_it_sits_in(copy):
+    """The plugin directory lives inside a repo whose tags it will never push: skipped, not refused."""
+    assert not (copy / ".git").exists()
+    rc, out = run(copy)
+    assert rc == 0, out

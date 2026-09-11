@@ -1,0 +1,31 @@
+{
+  "task_id": "005-interactive-lock-ttl",
+  "title": "Interactive lock reap timeout",
+  "author": "author-a",
+  "source_region": "Speculum",
+  "positive_control": false,
+  "description": "Day 1 records a specific numeric timeout for a locking/claim mechanism: an INTERACTIVE claim (a live human session, confirmed by a live PID) gets a much longer hard reap timeout than an ordinary automated claim. The exact minute count is an arbitrary tuning choice with no natural default, so a memory-less model cannot guess it from the day-N prompt or general systems-design knowledge — a lock timeout could plausibly be anywhere from minutes to days.",
+
+  "day1_prompt": "Day 1: we are tuning our region-lock reaper. Decide and record: an ordinary automated claim gets a hard reap timeout of 60 minutes, but an INTERACTIVE claim (a live human session, confirmed by a live PID on the same host) gets a much longer hard reap timeout of 720 minutes before the reaper is allowed to remove it.",
+  "memory_sentence": "This project's lock reaper gives an INTERACTIVE claim (confirmed live PID) a hard reap timeout of 720 minutes, versus 60 minutes for an ordinary automated claim.",
+  "canon_heading": "Interactive lock hard reap timeout is 720 minutes",
+  "fact": "720",
+
+  "day_n": 9,
+  "day_n_prompt": "Day 9: a developer asks how long an INTERACTIVE claim (one held by a live human session) can survive before our lock reaper is allowed to remove it. Answer with only the number of minutes.",
+
+  "checker_file": "lock-ttl-answer.txt",
+  "checker_must_contain": "720",
+  "checker_must_match": ["(?i)\\b720\\b"],
+  "checker_must_not_match": [],
+
+  "swap": {
+    "day1_prompt": "Day 1: we are tuning our region-lock reaper. Decide and record: an ordinary automated claim gets a hard reap timeout of 60 minutes, but an INTERACTIVE claim (a live human session, confirmed by a live PID on the same host) gets a longer hard reap timeout of 180 minutes before the reaper is allowed to remove it.",
+    "memory_sentence": "This project's lock reaper gives an INTERACTIVE claim (confirmed live PID) a hard reap timeout of 180 minutes, versus 60 minutes for an ordinary automated claim.",
+    "canon_heading": "Interactive lock hard reap timeout is 180 minutes",
+    "fact": "180",
+    "checker_must_contain": "180",
+    "checker_must_match": ["(?i)\\b180\\b"],
+    "checker_must_not_match": []
+  }
+}
