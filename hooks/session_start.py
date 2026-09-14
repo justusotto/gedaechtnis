@@ -64,8 +64,12 @@ def _readable(raw, base=None) -> Path | None:
         return None
 
 
-def boot_chain(entrypoints, max_hops=MAX_IMPORT_HOPS):
-    """-> (total_bytes, n_files) for the closure of `entrypoints` under @-import.
+def boot_chain_files(entrypoints, max_hops=MAX_IMPORT_HOPS):
+    """-> [(path, size_bytes)] for the closure of `entrypoints` under @-import.
+
+    The walk `boot_chain` sums, exposed so a caller that needs to NAME the chain's members (the
+    maintenance hook's byte arm) does not write a second @-import resolver. Two answers to "what
+    does a session load" inside one package is the duplicated-fact failure this package records.
 
     The entrypoints are COUNTED: they are loaded into the session as surely as anything they
     pull in, and a boot cost that omits them is not the boot cost. Deduplicated by realpath, so
@@ -96,13 +100,19 @@ def boot_chain(entrypoints, max_hops=MAX_IMPORT_HOPS):
         if not nxt:
             break
         frontier = nxt
-    total = 0
-    for p in seen:
+    members = []
+    for p in sorted(seen):
         try:
-            total += p.stat().st_size
+            members.append((p, p.stat().st_size))
         except OSError:                          # vanished between the walk and the stat
             pass
-    return total, len(seen)
+    return members
+
+
+def boot_chain(entrypoints, max_hops=MAX_IMPORT_HOPS):
+    """-> (total_bytes, n_files), the boot-cost fact's own two numbers."""
+    members = boot_chain_files(entrypoints, max_hops)
+    return sum(size for _, size in members), len(members)
 
 
 def sh(args, cwd=None, timeout=8):
@@ -166,6 +176,16 @@ def main() -> None:
     if boot_files:
         lines.append(f"- boot: {boot_bytes:,} B across {boot_files} files (@-import chain) — the user-level "
                      "CLAUDE.md, this repo's, and everything they @-import, transitively. A measurement, not a budget.")
+    # What the previous session end computed about upkeep. Read, never recomputed: measuring the
+    # vault at session START would delay the first prompt for something that changed at the end of
+    # the last one. Says nothing at all when nothing fired — see maintenance.facts_lines.
+    try:
+        import maintenance
+        _m = maintenance.read_state()
+        if _m:
+            lines.extend(maintenance.facts_lines(_m))
+    except Exception:                                  # a maintenance bug must not cost a session its facts
+        pass
     ops = config.owner_pages_status()                  # None unless config.json names a script
     if ops:
         rc, out, err = sh([config.python(), str(ops), "--json"], timeout=8)
