@@ -36,6 +36,8 @@ DEFAULTS = {
     "boot_budget_bytes": 20000,
     "boot_budget_warn_bytes": 20000,
     "boot_budget_warn_lines": 200,
+    "boot_file_budget_bytes": 32000,
+    "boot_file_warn_bytes": 28000,
     "compaction_floor_share": 0.4,
     "role_soft_limits_lines": {
         "Map": 100, "Vision": 150, "Position": 250, "Course": 300,

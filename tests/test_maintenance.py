@@ -709,3 +709,46 @@ def test_a_cleanup_bundle_receipt_is_not_reported_as_unsearchable(world):
     blind = [f["path"] for f in state_doc(world)["unsearchable"]["files"]]
     assert "Proj/Canon.md" in blind, blind                  # the arm ran and can see a real file
     assert not any(f.startswith("Cleanup/") for f in blind), blind
+
+
+# ------------------------------------------------- the Boot-file arms, in production ----
+def test_a_stale_boot_file_REACHES_THE_SESSION(world):
+    """★ The question this arc has learned to ask of every new function: what calls it in
+    production, and which test goes red if nothing does?
+
+    `bootfile.py` has its own 16 tests, and every one of them calls it directly — which is exactly
+    how row R3 shipped a compaction seam no hook invoked, with a green suite. This drives the real
+    Stop hook and then the real SessionStart hook, and asserts the words land in what a session is
+    actually handed."""
+    v = world["vault"]
+    (v / "Proj" / "Kernel.md").write_text("# Boot\n")
+    (v / "Proj" / "Position.md").write_text("# Position\n")
+    git(v, "add", "-A")
+    git(v, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "boot and body")
+    (v / "Proj" / "Position.md").write_text("# Position\n\nthe region has moved on\n")
+    git(v, "add", "--", "Proj/Position.md")
+    git(v, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "body moves",
+        "--", "Proj/Position.md")
+    set_last(world)
+    run_stop(world)
+    ctx = run_session_start(world)
+    assert "Proj/Kernel.md is STALE" in ctx, ctx
+    assert "Proj/Position.md moved after it did" in ctx
+
+
+def test_a_fresh_boot_file_says_NOTHING(world):
+    """And the control that makes the test above mean something: the same machinery, one commit
+    apart, produces no line at all. A maintenance line printed every session is a line every
+    session learns to skip."""
+    v = world["vault"]
+    (v / "Proj" / "Kernel.md").write_text("# Boot\n")
+    (v / "Proj" / "Position.md").write_text("# Position\n")
+    git(v, "add", "-A")
+    git(v, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "boot and body")
+    set_last(world)
+    run_stop(world)
+    ctx = run_session_start(world)
+    assert "STALE" not in ctx
+    assert "Boot file:" not in ctx
+    # POSITIVE CONTROL: the arm ran and wrote its section, so the silence is a verdict.
+    assert "boot_file" in state_doc(world), state_doc(world).keys()

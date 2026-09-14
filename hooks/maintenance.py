@@ -72,6 +72,7 @@ import limits
 import session_start
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import archive
+import bootfile
 import recall
 from common import read_input, log, guarded, VAULT, STATE
 
@@ -346,8 +347,17 @@ def compute(state: dict, cwd: str, day: str) -> dict:
     }
 
     blind = unsearchable_files()
+    # The Boot-file arms. NOT cleanup arms: a region that has outgrown its boot payload is not
+    # untidy, and a stale Boot file is not a threshold being approached — it is a summary that
+    # reads as current while contradicting the bodies it was distilled from.
+    stale, boot_unchecked = bootfile.stale_boot_files(VAULT)
+    boot = {"graduation": bootfile.graduation_candidates(VAULT)[:EVIDENCE_CAP],
+            "oversize": bootfile.oversize_boot_files(VAULT)[:EVIDENCE_CAP],
+            "stale": stale[:EVIDENCE_CAP],
+            "unchecked": boot_unchecked[:EVIDENCE_CAP]}
 
     return {
+        "boot_file": boot,
         "computed": day,
         # NOT a cleanup arm: it is not a matter of tidiness and no threshold is being approached.
         # A file here is one the search has already stopped reading, and the only thing that must
@@ -404,6 +414,23 @@ def facts_lines(doc: dict) -> list[str]:
                    f"{(blind.get('files') or [{}])[0].get('ceiling', 0):,} B search ceiling and are "
                    f"NOT searched — an answer inside one is unreachable, which is not the same as "
                    f"absent: {names}" + (f", and {more} more" if more > 0 else "") + ".")
+    boot = doc.get("boot_file") or {}
+    for g in boot.get("graduation") or []:
+        largest = ", ".join(f"{m['path']} ({m['bytes']:,} B)" for m in g.get("largest") or [])
+        out.append(f"- Boot file: {g['region']} carries {g['bytes']:,} B of memory with no Boot "
+                   f"file, over a {g['threshold']:,} B budget. Largest: {largest}. A Boot file "
+                   f"would replace these in what a session loads; writing one is a judgment about "
+                   f"what matters, so nothing has been written.")
+    for f in boot.get("oversize") or []:
+        out.append(f"- Boot file: {f['path']} is {f['bytes']:,} B — {f['state']} "
+                   f"(warn {f['warn']:,} B, budget {f['threshold']:,} B).")
+    for s in boot.get("stale") or []:
+        out.append(f"- Boot file: {s['path']} is STALE — {', '.join(s['moved'])} moved after it "
+                   f"did, so it summarises a state the region has left. It is still loaded every "
+                   f"session and nothing else contradicts it.")
+    for u in boot.get("unchecked") or []:
+        out.append(f"- Boot file: freshness could NOT be checked, so read it as UNCHECKED, never "
+                   f"as fresh: {u}.")
     unchecked = []
     for label, group in (("cleanup", cleanup), ("synthesis", synth)):
         for name, arm in (group.get("arms") or {}).items():
@@ -573,6 +600,15 @@ def main() -> None:
     # after this session end rather than as it was before — a measurement taken before the act it
     # is meant to reflect reports a problem that has already been fixed.
     compacted = compact_vault()
+    # The Boot file's own window, against the BOOT budget rather than the memory-file bound. Its
+    # paths join the same commit: a compaction that is not committed leaves the vault permanently
+    # dirty, and dirt of that kind makes other machinery defer rather than announce itself.
+    rolled = bootfile.roll_window(VAULT)
+    for r in rolled:
+        compacted.append({"path": r["path"], "entries": r["entries"],
+                          "paths": [r["path"]] + r["segments"]})
+        log("maintenance", f"Boot file {r['path']} rolled: {r['entries']} entry(ies) moved, "
+                           f"{r['bytes_before']} -> {r['bytes_after']} B")
     commit_compaction(inp, compacted)
     doc = dict(state)
     doc.update(compute(state, cwd, day))

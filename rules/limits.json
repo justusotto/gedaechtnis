@@ -9,6 +9,12 @@
   "boot_budget_warn_bytes": 20000,
   "_boot_budget_warn_bytes": "Warn on the edit that crosses this; refuse growth only past boot_budget_bytes. A door that first speaks at the moment it refuses has never given anyone a chance to act.",
 
+  "boot_file_budget_bytes": 32000,
+  "_boot_file_budget_bytes": "The largest a region's Boot file (Kernel.md) may become before its rolling window compacts it — an 8k-token budget at the bytes/4 rule of thumb. It is a NUMBER here because in the vault this grew from it was PROSE ('budget <=8k tokens'), and prose is what three of that vault's own Boot files drifted 50-70% past while a status table printed OVER for weeks and nothing acted. A threshold a machine can read is a threshold a machine can enforce.",
+
+  "boot_file_warn_bytes": 28000,
+  "_boot_file_warn_bytes": "Speak at this size; compact only past the budget. A door that first speaks at the moment it refuses has never given anyone a chance to act.",
+
   "compaction_floor_share": 0.4,
   "_compaction_floor_share": "Compaction stops once the boot chain is at or below this share of the budget, rather than emptying the file. Measured against what our own boot-file graduations achieved (0.1-0.6).",
 
