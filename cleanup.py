@@ -62,6 +62,7 @@ import maintenance                                                        # noqa
 VAULT = config.VAULT
 BUNDLE_DIR = "Cleanup"
 README_NAME = "README-what-went-where.html"
+BOOT_FILE = "Kernel.md"          # the window's file; see the skip in `propose`
 
 # `**Last revisited:** 2026-08-01`, `Last revisited: 2026-08-01`, and the spellings in between.
 LAST_REVISITED_RE = re.compile(r"Last revisited[:*\s]+([0-9]{4}-[0-9]{2}-[0-9]{2})?", re.I)
@@ -80,13 +81,15 @@ def lines_of(text: str) -> int:
 
 
 def split_entries(text: str) -> tuple[str, list[str]]:
-    """(head, entries) where each entry is its raw text INCLUDING its leading `\\n## `.
+    """`archive.split_entries` — the package's ONE entry splitter.
 
-    The same split `archive.py` uses, for the same reason: an entry is the unit a heading owns, and
-    re-joining head + entries reproduces the file byte for byte. That property is what lets the
-    conservation check be an equality rather than an approximation."""
-    parts = text.split("\n## ")
-    return parts[0], ["\n## " + p for p in parts[1:]]
+    This was a second copy, and it split naively on `\\n## `. Row R6's third reviewer reproduced
+    what that does here: a duplicate entry containing a fenced code block with a `## ` line inside
+    it was "deduplicated" by this applier, and the fence was torn — the closer orphaned, a
+    fence-interior line promoted to a live heading. In a tool that applies straight away and never
+    asks. Re-joining head + entries still reproduces the file byte for byte, which is what lets the
+    conservation check be an equality."""
+    return archive.split_entries(text)
 
 
 def heading_of(entry: str) -> str:
@@ -186,6 +189,16 @@ def propose(day: str | None = None) -> dict:
         # into an archive segment stays valid"). Rewriting one to drop a duplicate would break
         # exactly the promise the archive exists to make.
         if archive.is_sidecar(path.stem):
+            continue
+        if path.name == BOOT_FILE:
+            # ★ A BOOT FILE BELONGS TO THE WINDOW AND TO NOTHING ELSE. Its sections are named and
+            # structural, not chronological, and this pass has no concept of the window its author
+            # declares — so a "duplicate" or an oversize fold here would move a standing constraint
+            # out of the one file every session loads, unattended and without asking. The same rule
+            # `maintenance.compact_vault` follows, for the same reason, found in the same review.
+            #
+            # It is not enough that `role_soft_limits_lines` happens to carry no `Kernel` key today:
+            # nothing declared that it must not, and a table is one edit from acquiring one.
             continue
         try:
             rel = str(path.relative_to(vault))

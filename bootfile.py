@@ -262,34 +262,10 @@ def _rel(vault: Path, path: Path) -> str:
 
 
 def split_entries(text: str) -> tuple[str, list[str]]:
-    """(head, entries) splitting on a `## ` heading, but NEVER inside a fenced code block.
-
-    ★ A fence is content, not structure. The reviewer built a window entry containing a code fence
-    with a `## ` line inside it and watched the fence torn across the live file and the archive —
-    the opener carried off, the orphaned closing fence promoted to a spurious live heading.
-    Byte-preserving and structurally corrupting, which is the same spirit as the defect this row
-    was rejected for twice.
-
-    ★ It SLICES the original string rather than reassembling one. The first version joined lines
-    back together with `"\n"` and lost a byte per entry — caught by the round-trip property test
-    rather than by review, which is the only reason it is not in the archive of somebody's memory.
-    `head + "".join(entries) == text` is an identity here, and that is what makes the compaction's
-    conservation check an equality instead of an approximation.
-
-    An entry keeps the newline that precedes its heading, because that is the unit `archive.py`
-    splits on (`\n## `) and a mismatch there would break its retry-deduplication."""
-    fence, offsets, pos = False, [], 0
-    for line in text.splitlines(keepends=True):
-        if not fence and line.startswith("## "):
-            offsets.append(pos - 1 if pos and text[pos - 1] == "\n" else pos)
-        stripped = line.lstrip()
-        if stripped.startswith("```") or stripped.startswith("~~~"):
-            fence = not fence
-        pos += len(line)
-    if not offsets:
-        return text, []
-    bounds = offsets + [len(text)]
-    return text[:offsets[0]], [text[a:b] for a, b in zip(bounds, bounds[1:])]
+    """`archive.split_entries` — the package's ONE entry splitter. This module had its own for two
+    review rounds; the third found the same fence-blind split still live in three other callers,
+    which is what moved the definition rather than the fix."""
+    return _archive().split_entries(text)
 
 
 WINDOW_OPEN = "<!-- gedaechtnis:window -->"

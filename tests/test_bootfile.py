@@ -285,13 +285,19 @@ def test_the_SAME_SECOND_case_which_a_timestamp_comparison_gets_wrong(mod, vault
     silently reported as fresh."""
     boot = vault / "Proj" / "Kernel.md"
     body = vault / "Proj" / "Position.md"
+    # BOTH commits are pinned to one explicit timestamp. Relying on them landing in the same
+    # second by accident made this test pass alone and fail in the suite, where the two commits
+    # straddled a second boundary — a flaky fixture, caught by its own guard below rather than by
+    # producing a wrong verdict.
+    when = "2026-09-15T12:00:00"
+    env = dict(os.environ, GIT_AUTHOR_DATE=when, GIT_COMMITTER_DATE=when)
     boot.write_text("# Boot\n")
     body.write_text("# Position\n")
-    commit_all(vault, "together")
+    git(vault, "add", "-A")
+    subprocess.run(["git", "-C", str(vault), "-c", "user.name=t", "-c", "user.email=t@t",
+                    "commit", "-q", "-m", "together"], env=env, check=True)
     body.write_text("# Position\n\nmoved on\n")
     git(vault, "add", "--", "Proj/Position.md")
-    when = time.strftime("%Y-%m-%dT%H:%M:%S")
-    env = dict(os.environ, GIT_AUTHOR_DATE=when, GIT_COMMITTER_DATE=when)
     subprocess.run(["git", "-C", str(vault), "-c", "user.name=t", "-c", "user.email=t@t",
                     "commit", "-q", "-m", "same second", "--", "Proj/Position.md"],
                    env=env, check=True)
@@ -490,3 +496,84 @@ def test_the_splitter_round_trips_every_byte(mod):
         # slicing splitter that put the newline on the WRONG side would still round-trip.
         for e in entries:
             assert e.startswith("\n## ") or window.startswith(e), repr(e[:20])
+
+
+# ------------------------------------------- the third REJECT: two more doors ----
+# Both SIDES of the fence are large on purpose: under a naive split the entry becomes two chunks of
+# ~700 B each, which cannot share a 900 B segment, so the boundary is FORCED to fall inside the
+# fence. Sized smaller, the two halves travelled together and a naive implementation passed — the
+# same way the first fence test in this file was decorative.
+FENCED_ENTRY = ("\n## an entry with a fence\n" + "y" * 700
+                + "\n```\n## this is not a heading\n```\n" + "y" * 700 + "\n")
+
+
+def test_a_fence_survives_a_SEGMENT_BOUNDARY_in_the_archive(mod, vault):
+    """★ The third reviewer's second finding. `bootfile` kept the fenced entry whole and handed it
+    to `archive.append_entries`, which RE-SPLIT the joined text naively for its own segment
+    rollover — so the moment a segment boundary fell inside a fenced entry, the fence was torn
+    across two archive files. Harmless while everything lands in one segment, which is exactly why
+    the suite never saw it: the fixture kept the fenced entry newest, so it never travelled.
+
+    The splitter is the package's one definition now, and the archive uses it too."""
+    archive = mod._archive()
+    live = vault / "Proj" / "Kernel.md"
+    live.write_text("# Boot\n")
+    # A segment limit small enough that the boundary MUST fall between these entries.
+    payload = ("".join(f"\n## filler {i}\n" + "z" * 300 + "\n" for i in range(3))
+               + FENCED_ENTRY
+               + "".join(f"\n## after {i}\n" + "z" * 300 + "\n" for i in range(3)))
+    archive.append_entries(live, payload, limit=900)
+    segs = archive.segments(live)
+    assert len(segs) > 1, "the fixture never crossed a segment boundary; it proves nothing"
+    for s in segs:
+        body = s.read_text(encoding="utf-8")
+        assert body.count("```") % 2 == 0, f"{s.name} holds half a fence"
+    holder = [s for s in segs if "an entry with a fence" in s.read_text(encoding="utf-8")]
+    assert len(holder) == 1
+    assert "## this is not a heading" in holder[0].read_text(encoding="utf-8")
+
+
+def test_the_CLEANUP_pass_never_touches_a_boot_file(mod, vault, tmp_path):
+    """★ The third reviewer's first finding, and the fourth door. `cleanup.py` walks the same memory
+    files, had its OWN naive splitter, and applies straight away without asking — so a duplicated
+    entry inside a Boot file was "deduplicated" with a torn fence, unattended.
+
+    A Boot file belongs to the window and to nothing else."""
+    import importlib.util
+    boot = vault / "Proj" / "Kernel.md"
+    dup = "\n## a repeated entry\n\nthe same words twice\n"
+    boot.write_text("# Boot\n\n## Standing constraints\n\nNEVER.\n" + dup + dup)
+    before = boot.read_text()
+    script = tmp_path / "cleanup_probe.py"
+    script.write_text(
+        "import json, sys\n"
+        f"sys.path.insert(0, {str(PLUGIN)!r})\n"
+        "import cleanup\n"
+        "print(json.dumps([p['path'] for p in cleanup.propose()['proposals']]))\n",
+        encoding="utf-8")
+    env = dict(os.environ, GEDAECHTNIS_VAULT=str(vault),
+               GEDAECHTNIS_STATE_DIR=str(tmp_path / "state"),
+               GEDAECHTNIS_FLEET_ROSTER=str(tmp_path / "no-roster.md"),
+               GEDAECHTNIS_USER_MEMORY=str(tmp_path / "no-user-memory.md"),
+               GEDAECHTNIS_CONFIG=str(tmp_path / "no-config.json"))
+    # POSITIVE CONTROL: an ordinary file with the same duplicate IS proposed, so the silence about
+    # the Boot file is a rule and not a pass that found nothing.
+    (vault / "Proj" / "Canon.md").write_text("# Canon\n" + dup + dup)
+    p = subprocess.run([sys.executable, "-B", str(script)], capture_output=True, text=True,
+                       env=env, timeout=120)
+    assert p.returncode == 0, p.stderr
+    paths = json.loads(p.stdout)
+    assert "Proj/Canon.md" in paths, paths
+    assert not any(x.endswith("Kernel.md") for x in paths), paths
+    assert boot.read_text() == before
+
+
+def test_every_splitter_in_the_package_is_the_SAME_ONE(mod):
+    """The rule that would have prevented three review rounds. Four modules each split on
+    `\\n## `; each tore a fence; each was fixed one at a time. A grep is the cheapest guard against
+    a fifth copy appearing."""
+    for name in ("archive.py", "cleanup.py", "bootfile.py", "hooks/maintenance.py"):
+        src = (PLUGIN / name).read_text(encoding="utf-8")
+        code = "\n".join(l for l in src.splitlines()
+                         if not l.lstrip().startswith("#") and '"""' not in l)
+        assert 'split("\\n## ")' not in code, f"{name} has its own entry splitter again"
