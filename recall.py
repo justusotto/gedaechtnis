@@ -73,7 +73,10 @@ import config  # noqa: E402  (every path is resolved there)
 
 SKIP_DIRS = {".git", "__pycache__", "node_modules", ".obsidian", ".trash"}
 # Not memory: work queues and lane notice outboxes, at any depth. Excluded unless asked for.
-NON_MEMORY_DIRS = frozenset({"Pharos", "Channels"})
+# `Cleanup` is a RECEIPT, not memory: row R2's cleanup pass moves what it removes into a dated
+# bundle there so the move is reversible and visible in a file manager. A search that read it would
+# hand back the duplicate entry the pass had just removed, with no way to tell which copy is live.
+NON_MEMORY_DIRS = frozenset({"Pharos", "Channels", "Cleanup"})
 # Not memory either: the vault's own generated evidence about itself — see the docstring's
 # "Generated views are not memory either." A separate set (and flag) from NON_MEMORY_DIRS because
 # the reason is different: queues restate the vault's vocabulary without answering anything,

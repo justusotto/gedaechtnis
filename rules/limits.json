@@ -33,6 +33,9 @@
   "max_memory_file_bytes": 500000,
   "_max_memory_file_bytes": "The largest any memory file is allowed to become — a live role file is COMPACTED once it passes this, and an archive segment is SEALED and a new one opened before it would cross it. ONE number for both, because they are one rule: no memory file grows to where the search stops reading it. Deliberately a QUARTER of max_searchable_file_bytes — the margin is the point, not the equality, since a file allowed to sit AT the search ceiling is one oversized append from the cliff, and the failure is silent: the file simply stops being searched. Row R3, on row S0 measured at year 3: tool recall 0.00 at high load with Aporia.md at 7,001,112 B, Canon.md 6,887,434, Errata.md 6,807,646 and Patterns.md 6,872,157 — all LIVE files, none of them archives.",
 
+  "stale_entry_days": 56,
+  "_stale_entry_days": "An entry carrying a `Last revisited:` date older than this is REPORTED by the cleanup pass and never moved. Eight weeks, the interval the vault this grew from used for the same check. It is the one cleanup finding with no automatic action, deliberately: an unanswered question is not untidiness, and a pass that filed it away would hide the only thing on the list the reader actually has to do something about.",
+
   "cleanup_trigger_days": 14,
   "cleanup_trigger_commits": 300,
   "synthesis_trigger_days": 14,

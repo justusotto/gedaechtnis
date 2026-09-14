@@ -204,9 +204,20 @@ def header_for(live: Path) -> str:
             "segment stays valid.\n")
 
 
-def compact_file(live: Path, limit: int | None = None, floor_share: float = 0.4) -> int:
+def compact_file(live: Path, limit: int | None = None, floor_share: float = 0.4,
+                 measure=None) -> int:
     """Move the OLDEST entries out of an over-large LIVE file into its archive segments, until it
     is under `floor_share` of the limit. Returns entries moved. Nothing is deleted.
+
+    `measure` is the UNIT the limit is expressed in, and defaults to bytes. Row R2's cleanup pass
+    needs the same movement against a LINE limit — the per-role soft limits are written in lines,
+    because that is the unit the guidance they come from uses and because bytes-per-line varies by
+    more than 2x across real role files. Passing `measure=lambda s: s.count(chr(10)) + 1` compacts
+    a file against its line limit through this one implementation rather than a second copy of the
+    idempotence, segment-splitting and atomic-write reasoning below, which is where a duplicate
+    would drift first. The SEGMENT limit stays in bytes whatever `measure` is: a segment is bounded
+    by what the search can read, which is a byte fact and has nothing to do with the unit that
+    decided the live file was too long.
 
     ## Why this exists, measured rather than reasoned
 
@@ -221,22 +232,30 @@ def compact_file(live: Path, limit: int | None = None, floor_share: float = 0.4)
     The floor is the same idea as the boot window's: compact to a share of the limit rather than
     emptying the file, because a role file compacted to nothing is a region with no live state.
     """
+    byte_mode = measure is None
     limit = segment_limit() if limit is None else limit
-    try:
-        if live.stat().st_size <= limit:
+    if byte_mode:
+        measure = lambda s: len(s.encode("utf-8"))  # noqa: E731
+        try:
+            if live.stat().st_size <= limit:
+                return 0
+        except OSError:
             return 0
+    try:
+        text = live.read_text(encoding="utf-8")
     except OSError:
         return 0
-    text = live.read_text(encoding="utf-8")
+    if not byte_mode and measure(text) <= limit:
+        return 0
     parts = text.split("\n## ")
     head, entries_ = parts[0], parts[1:]
     if not entries_:
         return 0                     # a head with no entries: there is nothing to move
     target = limit * floor_share
-    size = len(text.encode("utf-8"))
+    size = measure(text)
     moved, removed = 0, 0
     while moved < len(entries_) and size - removed > target:
-        removed += len(("\n## " + entries_[moved]).encode("utf-8"))
+        removed += measure("\n## " + entries_[moved])
         moved += 1
     if not moved:
         return 0
@@ -274,7 +293,10 @@ def compact_file(live: Path, limit: int | None = None, floor_share: float = 0.4)
         except OSError:
             pass
     if outgoing:
-        append_entries(live, "".join(outgoing), limit=limit)
+        # `limit` here is the SEGMENT limit, always in bytes. Handing a line limit to the
+        # segment roll would size segments in the wrong unit — a 200-"byte" segment per line
+        # limit, one entry per file.
+        append_entries(live, "".join(outgoing), limit=limit if byte_mode else None)
     atomic_write(live, head + ("\n## " + "\n## ".join(entries_[moved:]) if entries_[moved:] else "\n"))
     return moved
 

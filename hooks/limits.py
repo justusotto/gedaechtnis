@@ -43,6 +43,7 @@ DEFAULTS = {
     },
     "max_searchable_file_bytes": 2000000,
     "max_memory_file_bytes": 500000,
+    "stale_entry_days": 56,
     "cleanup_trigger_days": 14,
     "cleanup_trigger_commits": 300,
     "synthesis_trigger_days": 14,

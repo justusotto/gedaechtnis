@@ -502,3 +502,45 @@ def test_POSITIVE_CONTROL_the_old_write_path_really_does_lose_the_file(live, tmp
     after = len(victim.read_bytes())
     assert after < before, "truncate-and-write did NOT lose data; the threat model is wrong"
     assert after <= 4, f"expected the file gutted, got {after} B"
+
+
+# ------------------------------------------------------- the `measure` seam ----
+def count_lines(text: str) -> int:
+    return text.count("\n") + (0 if text.endswith("\n") else 1) if text else 0
+
+
+def test_compaction_can_be_driven_by_LINES_not_only_bytes(live):
+    """Row R2's cleanup pass compacts against the per-role LINE limits, through this seam.
+
+    The limits are written in lines because that is the unit their guidance uses, and because
+    bytes-per-line varies by more than 2x across real role files — a byte budget silently means a
+    different number of lines in a terse file than in a discursive one."""
+    live.write_text("# Position\n" + "".join(f"\n## Day {i}\n\nline\n" for i in range(40)),
+                    encoding="utf-8")
+    moved = archive.compact_file(live, limit=10, floor_share=0.4, measure=count_lines)
+    assert moved > 0
+    assert count_lines(live.read_text(encoding="utf-8")) <= 10
+    seg = archive.segments(live)
+    assert seg and "## Day 0" in seg[0].read_text(encoding="utf-8")
+
+
+def test_a_line_limit_does_NOT_become_the_segment_size(live):
+    """The negative control on the same seam, and the mistake it exists to catch.
+
+    `compact_file` passes its limit straight to `append_entries` as the SEGMENT limit. Handing a
+    line limit (10) through unchanged would size segments in bytes at 10 — one entry per file, a
+    hundred segments where one was wanted, and every link into the archive pointing at a file that
+    is about to be superseded. A segment is bounded by what the SEARCH can read, which is a byte
+    fact and has nothing to do with the unit that decided the live file was too long."""
+    live.write_text("# Position\n" + "".join(f"\n## Day {i}\n\nline\n" for i in range(40)),
+                    encoding="utf-8")
+    archive.compact_file(live, limit=10, floor_share=0.4, measure=count_lines)
+    assert len(archive.segments(live)) == 1, [s.name for s in archive.segments(live)]
+
+
+def test_under_its_line_limit_a_file_is_untouched(live):
+    live.write_text("# Position\n\n## Day 1\n\nline\n", encoding="utf-8")
+    before = live.read_text(encoding="utf-8")
+    assert archive.compact_file(live, limit=100, floor_share=0.4, measure=count_lines) == 0
+    assert live.read_text(encoding="utf-8") == before
+    assert archive.segments(live) == []
