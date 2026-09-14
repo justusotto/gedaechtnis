@@ -102,7 +102,10 @@ COMMON_TERM_SHARE = 0.05
 # measurement can attribute a change to one half of it — see the module docstring.
 RANKINGS = ("a-prime", "length-only", "flat")
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.*\S)\s*$")
-ARCHIVE_RE = re.compile(r"-(archive|fixed|resolved)$", re.I)
+# The trailing segment number is R3's doing: `Position-archive-2` is an archive as surely as
+# `Position-archive`. A segmentation scheme whose files the search no longer recognises as
+# archives would reproduce the very defect segmentation was built to fix, in a new costume.
+ARCHIVE_RE = re.compile(r"-(archive|fixed|resolved)(?:-\d+)?$", re.I)
 
 # Words that would match half the vault and rank nothing. Kept short on purpose: a stoplist that
 # grows starts eating the domain terms a question is actually about.
@@ -123,7 +126,20 @@ def terms(question: str) -> list[str]:
     return out
 
 
-def md_files(vault: Path, include_queues: bool = False, include_generated: bool = False):
+def md_files(vault: Path, include_queues: bool = False, include_generated: bool = False,
+             skipped: list | None = None):
+    """Every searchable .md under the vault.
+
+    ★ `skipped` is where a file TOO LARGE TO SEARCH is recorded, and passing one is how a caller
+    stops being lied to. A file over MAX_FILE_BYTES is not searched — a search that reads a 100 MB
+    file is not a search — and until R3 that was the end of it: the file was dropped, `search()`
+    returned nothing, and the caller saw "the vault does not know that", which is bit-for-bit what
+    it sees when the answer was never written down. Those are opposite situations. Row S0 measured
+    the cost: at day 365 under heavy use, 100% of held-out answers were unreachable this way, and
+    nothing anywhere said so.
+
+    The list is OPTIONAL and defaults to None so no existing caller changes behaviour; the ones
+    that show a human an answer pass one."""
     for dirpath, dirnames, filenames in os.walk(vault):
         dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS and not d.startswith(".git")
                              and (include_queues or d not in NON_MEMORY_DIRS)
@@ -132,8 +148,13 @@ def md_files(vault: Path, include_queues: bool = False, include_generated: bool 
             if name.endswith(".md"):
                 p = Path(dirpath) / name
                 try:
-                    if p.is_file() and not p.is_symlink() and p.stat().st_size <= MAX_FILE_BYTES:
+                    if not p.is_file() or p.is_symlink():
+                        continue
+                    size = p.stat().st_size
+                    if size <= MAX_FILE_BYTES:
                         yield p
+                    elif skipped is not None:
+                        skipped.append((str(p.relative_to(vault)), size))
                 except OSError:
                     continue
 
@@ -171,7 +192,8 @@ def score(heading: str, body: str, pats: list) -> list[int]:
 
 
 def search(vault: Path, question: str, include_queues: bool = False,
-           ranking: str = "a-prime", include_generated: bool = False) -> tuple[list[dict], list[str]]:
+           ranking: str = "a-prime", include_generated: bool = False,
+           skipped: list | None = None) -> tuple[list[dict], list[str]]:
     """Every matching entry, best first. The caller decides how many to print — the count of
     what was NOT printed is part of the answer, so it is never truncated here.
 
@@ -187,7 +209,8 @@ def search(vault: Path, question: str, include_queues: bool = False,
     if not want:
         return hits, want
     pats = patterns(want)
-    for path in md_files(vault, include_queues=include_queues, include_generated=include_generated):
+    for path in md_files(vault, include_queues=include_queues, include_generated=include_generated,
+                         skipped=skipped):
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
@@ -267,6 +290,26 @@ def render(hits: list[dict], want: list[str], question: str, max_bytes: int, tot
     return "\n\n".join(out) + "\n" + footer
 
 
+def skip_notice(skipped: list) -> str:
+    """What was NOT read, on the same surface as what was.
+
+    A STRUCTURAL REFUSAL TO BE SILENT, not a log line: the failure class here is the one where
+    nothing breaks, and the reassuring output ("no results") is the wrong one. No amount of care at
+    the call site catches that, because there is nothing at the call site to catch.
+
+    It STATES, and does not advise. What to do about an unsearchable file is a separate decision,
+    and an empty list prints nothing at all — silence has to stay possible or the notice is noise.
+    """
+    if not skipped:
+        return ""
+    lines = [f"\n⚠ {len(skipped)} file(s) were NOT searched — larger than the "
+             f"{MAX_FILE_BYTES:,} B ceiling. An answer inside one of these is unreachable by this "
+             f"search, which is not the same as absent:"]
+    for rel, size in sorted(skipped, key=lambda s: -s[1]):
+        lines.append(f"    {rel} — {size:,} B")
+    return "\n".join(lines)
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Search the vault and print the matching entries verbatim.")
     ap.add_argument("question", nargs="+", help="the question, in plain words")
@@ -289,9 +332,13 @@ def main(argv=None) -> int:
         print(f"recall: no vault at {vault} — run init.py to create one.", file=sys.stderr)
         return 2
     question = " ".join(a.question)
+    skipped: list = []
     hits, want = search(vault, question, include_queues=a.include_queues, ranking=a.rank,
-                        include_generated=a.include_generated)
+                        include_generated=a.include_generated, skipped=skipped)
     print(render(hits[: max(1, a.limit)], want, question, max(500, a.max_bytes), len(hits)))
+    notice = skip_notice(skipped)
+    if notice:
+        print(notice)
     return 0
 
 

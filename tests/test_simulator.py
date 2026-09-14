@@ -141,17 +141,45 @@ def test_wikilink_health_is_one_when_every_target_exists(sandbox):
     assert resolved == total
 
 
-def test_wikilink_health_falls_when_compaction_moves_a_target(sandbox):
-    """POSITIVE: the naive rolling window breaks links, and the harness sees it.
+def test_compaction_keeps_the_knowledge_reachable_but_breaks_the_LITERAL_link(sandbox):
+    """R3 SUPERSEDES the assertion this test used to make.
 
-    This is the evidence handed to row R3 (archive seams), not a defect to be patched here."""
+    It previously asserted that `wikilink_health` FALLS after compaction, which was the right
+    reading of the defect it was written to hand to this row. R3 changes what happens and what is
+    measured, so both halves are asserted here:
+
+      * `wikilink_health` credits the whole `<Stem>` family, because the entry IS still there under
+        a byte-identical heading in a file the search reads. It must NOT fall.
+      * `wikilink_literal` requires the heading in the named file itself — what a person following
+        `[[Position#H]]` in an editor sees. It DOES fall, and that residual is real.
+
+    Asserting only the first would be the instrument agreeing with whoever last edited it."""
     grow(sandbox, 60)
     before_resolved, before_total = sim.wikilink_health(sandbox)
     assert before_resolved == before_total
-    sim.compact(sandbox, budget=25_000)
+    assert sim.wikilink_literal(sandbox) == (before_resolved, before_total)
+    moved = sim.compact(sandbox, budget=25_000)
+    assert moved > 0, "the fixture compacted nothing, so this check is VACUOUS"
     after_resolved, after_total = sim.wikilink_health(sandbox)
     assert after_total == before_total, "links were deleted, not just broken"
-    assert after_resolved < before_resolved
+    assert after_resolved == before_resolved, "the knowledge stopped being reachable"
+    lit_resolved, lit_total = sim.wikilink_literal(sandbox)
+    assert lit_total == before_total
+    assert lit_resolved < before_resolved, "the literal residual vanished — check the instrument"
+
+
+def test_wikilink_health_still_reports_a_genuinely_broken_link(sandbox):
+    """The negative control for the family rule: crediting a link to the `<Stem>` family must not
+    make the checker vacuous. A heading in NO file of the family still fails."""
+    grow(sandbox, 20)
+    good_resolved, good_total = sim.wikilink_health(sandbox)
+    assert good_resolved == good_total
+    path = sandbox.role(sim.BOOT_STEM)
+    path.write_text(path.read_text(encoding="utf-8")
+                    + "\n\nsee [[Position#a heading that was never written]]\n", encoding="utf-8")
+    bad_resolved, bad_total = sim.wikilink_health(sandbox)
+    assert bad_total == good_total + 1
+    assert bad_resolved == good_resolved, "a link to a nonexistent heading was counted as resolved"
 
 
 # ------------------------------------------------- the silent recall cliff ----

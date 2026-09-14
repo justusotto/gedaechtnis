@@ -42,6 +42,7 @@ DEFAULTS = {
         "Aporia": 200, "Errata": 400, "Annales": 500, "Canon": 800,
     },
     "max_searchable_file_bytes": 2000000,
+    "max_memory_file_bytes": 500000,
     "cleanup_trigger_days": 14,
     "cleanup_trigger_commits": 300,
     "synthesis_trigger_days": 14,

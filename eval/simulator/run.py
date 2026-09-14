@@ -94,6 +94,7 @@ sys.path.insert(0, str(PLUGIN / "hooks"))
 sys.path.insert(0, str(PLUGIN / "eval"))
 
 import session_start  # noqa: E402  the plugin's own boot measurement; never reimplemented
+import archive        # noqa: E402  the plugin's own archive seam; never reimplemented (R3)
 from recall_bench import run as bench  # noqa: E402  the plugin's own recall scorer
 
 # Snapshot days. Years 2 and 3 are here on the owner's instruction (2026-09-14): "then also test
@@ -301,7 +302,6 @@ def compact(sb: Sandbox, budget: int, floor_share: float = 0.4) -> int:
     if boot <= budget:
         return 0
     live = sb.role(BOOT_STEM)
-    arch = live.with_name(f"{BOOT_STEM}-archive.md")
     text = live.read_text(encoding="utf-8")
     parts = text.split("\n## ")
     head, entries_ = parts[0], parts[1:]
@@ -321,12 +321,22 @@ def compact(sb: Sandbox, budget: int, floor_share: float = 0.4) -> int:
         return 0
     live.write_text(head + ("\n## " + "\n## ".join(entries_[moved:]) if entries_[moved:] else "\n"),
                     encoding="utf-8")
-    if not arch.exists():
-        arch.write_text(f"# {sb.region} — Position (archive)\n\n"
-                        "Narrative the boot file compacted away. Headings are byte-identical "
-                        "to the ones they had in the live file.\n", encoding="utf-8")
-    with open(arch, "a", encoding="utf-8") as fh:
-        fh.write("".join("\n## " + e for e in entries_[:moved]))
+    # R3: the archive is SEGMENTED, and the segmentation is the package's own (`archive.py`), not a
+    # copy living in the harness. That is the whole point of the re-run — a simulator that measured
+    # its own private implementation of the fix would measure nothing about the product.
+    archive.append_entries(live, "".join("\n## " + e for e in entries_[:moved]))
+    return moved
+
+
+def compact_oversize(sb: Sandbox) -> int:
+    """The SIZE-driven half, over every role file in the region — the boot window watches what a
+    session pays to boot, and nothing watched what the search can still read. Row R3; see
+    `archive.compact_file` for the year-3 measurement that produced it."""
+    moved = 0
+    for path in sorted((sb.vault / sb.region).glob("*.md")):
+        if archive.is_sidecar(path.stem):
+            continue                      # a segment is sealed; it is never itself compacted
+        moved += archive.compact_file(path)
     return moved
 
 
@@ -337,12 +347,51 @@ def wikilink_health(sb: Sandbox) -> tuple[int, int]:
     region = sb.vault / sb.region
     headings: dict = {}
     for path in sorted(region.glob("*.md")):
-        headings[path.stem] = set(HEADING_RE.findall(path.read_text(encoding="utf-8")))
+        found = set(HEADING_RE.findall(path.read_text(encoding="utf-8")))
+        # UNION, never assignment. `sorted(glob)` yields `Position-archive.md` BEFORE `Position.md`,
+        # so a plain assignment on the live file wiped out the segments' contribution that had just
+        # been credited to the same stem — and the measurement read 0/59 where the true answer was
+        # every link resolving. Found by probing the number, not by reading the loop.
+        headings.setdefault(path.stem, set()).update(found)
+        # R3: a link is written as `[[Position#H]]` and compaction moves H into a SEGMENT. The
+        # entry is still there, under a byte-identical heading, in a file the search reads — so
+        # the link's meaning ("the entry titled H in the Position family") is still satisfied.
+        # Crediting it to the live stem as well is what keeps this a measure of whether the
+        # KNOWLEDGE is reachable, rather than a measure of which file it happens to sit in.
+        # It does NOT make the checker vacuous: a heading in no file of the family still fails,
+        # which `test_wikilink_health_still_reports_a_genuinely_broken_link` pins.
+        if archive.is_sidecar(path.stem):
+            headings.setdefault(archive.live_stem_of(path.stem), set()).update(found)
     resolved = total = 0
     for path in sorted(region.glob("*.md")):
         for stem, heading in WIKILINK_RE.findall(path.read_text(encoding="utf-8")):
             total += 1
             if heading.strip() in headings.get(stem.strip(), ()):
+                resolved += 1
+    return resolved, total
+
+
+def wikilink_literal(sb: Sandbox) -> tuple[int, int]:
+    """(resolved, total) under LITERAL resolution — the heading must be in the named file itself.
+
+    ★ This exists so the fix cannot hide behind the instrument. `wikilink_health` credits a link to
+    the whole `<Stem>` family, because after segmentation the entry IS still reachable and the
+    search does read it; that is the right measure of whether the KNOWLEDGE survived. But a person
+    reading the vault in an editor, or any tool that follows `[[Position#H]]` to `Position.md`
+    alone, still sees a dangling link once H has moved into a segment. That residual is REAL, and a
+    single number that had been quietly redefined to exclude it would be the instrument agreeing
+    with whoever last edited it. Both numbers are reported; the gap between them is the residual.
+    """
+    region = sb.vault / sb.region
+    literal: dict = {}
+    for path in sorted(region.glob("*.md")):
+        literal.setdefault(path.stem, set()).update(
+            HEADING_RE.findall(path.read_text(encoding="utf-8")))
+    resolved = total = 0
+    for path in sorted(region.glob("*.md")):
+        for stem, heading in WIKILINK_RE.findall(path.read_text(encoding="utf-8")):
+            total += 1
+            if heading.strip() in literal.get(stem.strip(), ()):
                 resolved += 1
     return resolved, total
 
@@ -424,12 +473,17 @@ def located(sb: Sandbox, q: dict) -> dict:
     `test_boot_recall_counts_only_what_is_in_the_import_chain` on 2026-09-14.
 
     The expected location is read off disk rather than assumed: the live file first (it is the
-    authority when both carry the heading), then the archive sibling. A heading in neither is left
-    pointing at the live file, so it scores as the genuine miss it is."""
+    authority when both carry the heading), then the archive segments. A heading in none of them is
+    left pointing at the live file, so it scores as the genuine miss it is.
+
+    ★ R3: the archive is SEGMENTED, so "the archive sibling" is now a LIST. Left unchanged, this
+    helper would look in `<Stem>-archive.md` alone and score every entry in `-archive-2` and beyond
+    as a miss — reporting tool recall 0.00 for a vault that had in fact kept every answer and could
+    find it. That is the instrument bug S0 already paid for once, in the same function; the rule it
+    earned is that a measurement of a moved thing must be re-derived when the moving changes."""
     rel, _, heading = q["expected"].partition("#")
     live = sb.vault / rel
-    arch = live.with_name(f"{live.stem}-archive.md")
-    for path in (live, arch):
+    for path in [live] + archive.segments(live):
         try:
             if heading in HEADING_RE.findall(path.read_text(encoding="utf-8")):
                 return {**q, "expected": f"{path.relative_to(sb.vault)}#{heading}"}
@@ -483,6 +537,7 @@ def simulate(load: str, kind: str, horizon: int, budget: int, seed: int = 7,
                 carry_other -= author.entry(author.rng.choice(OTHER_STEMS), ENTRY_B)
             if compaction and (cadence == 0 or day % cadence == 0):
                 compactions += compact(sb, budget)
+                compactions += compact_oversize(sb)
             if day in SNAPSHOTS or day == horizon:
                 snaps[day] = snapshot(sb, author, day, n_questions, limit, seed)
                 if verbose:
@@ -491,7 +546,8 @@ def simulate(load: str, kind: str, horizon: int, budget: int, seed: int = 7,
                           f"({s['boot_tokens']:>6,} tok)  recent: boot"
                           f"{fmt(s['boot_recall_recent'], 5)} tool{fmt(s['tool_recall_recent'], 5)}"
                           f"  all: boot{fmt(s['boot_recall'], 5)} tool{fmt(s['tool_recall'], 5)}"
-                          f"  links{fmt(s['wikilink_health'], 5)}", flush=True)
+                          f"  links{fmt(s['wikilink_health'], 5)}"
+                          f" (literal{fmt(s['wikilink_literal'], 5)})", flush=True)
         result = {
             "load": load, "curve": kind, "horizon": horizon, "budget": budget, "seed": seed,
             "cadence": cadence, "compaction": compaction, "provenance": provenance,
@@ -535,6 +591,7 @@ def snapshot(sb: Sandbox, author: Author, day: int, n_questions: int, limit: int
     u_rec, u_bytes = tool_recall(sb, uniform, limit)
     r_rec, _ = tool_recall(sb, recent, limit)
     resolved, total = wikilink_health(sb)
+    lit_resolved, lit_total = wikilink_literal(sb)
     return {
         "day": day,
         "boot_bytes": hooked,
@@ -556,6 +613,11 @@ def snapshot(sb: Sandbox, author: Author, day: int, n_questions: int, limit: int
         "n_questions_recent": len(recent),
         "wikilink_health": round(resolved / total, 4) if total else 1.0,
         "wikilinks": [resolved, total],
+        # The residual, reported beside the headline so the fix cannot hide behind the instrument:
+        # `health` asks whether the knowledge is still REACHABLE (the family), `literal` whether the
+        # link still lands in the file it names — which is what a person in an editor follows.
+        "wikilink_literal": round(lit_resolved / lit_total, 4) if lit_total else 1.0,
+        "wikilinks_literal": [lit_resolved, lit_total],
         "oversize": oversize(sb),
         "unsearchable": unsearchable(sb),
     }

@@ -30,6 +30,9 @@
   "max_searchable_file_bytes": 2000000,
   "_max_searchable_file_bytes": "recall.py will not look inside a file larger than this, and says nothing when it skips one. Row S0 measured what that does: at medium load, day 365, 46% of held-out answers were already unreachable by tool call, and at high load 100% were -- because the rolling window pours every compacted entry into ONE growing archive file that crosses this ceiling. The number is here so a later row can read it rather than rediscover it; the fix is a SEGMENTED archive (row R3), not a larger ceiling.",
 
+  "max_memory_file_bytes": 500000,
+  "_max_memory_file_bytes": "The largest any memory file is allowed to become — a live role file is COMPACTED once it passes this, and an archive segment is SEALED and a new one opened before it would cross it. ONE number for both, because they are one rule: no memory file grows to where the search stops reading it. Deliberately a QUARTER of max_searchable_file_bytes — the margin is the point, not the equality, since a file allowed to sit AT the search ceiling is one oversized append from the cliff, and the failure is silent: the file simply stops being searched. Row R3, on row S0 measured at year 3: tool recall 0.00 at high load with Aporia.md at 7,001,112 B, Canon.md 6,887,434, Errata.md 6,807,646 and Patterns.md 6,872,157 — all LIVE files, none of them archives.",
+
   "cleanup_trigger_days": 14,
   "cleanup_trigger_commits": 300,
   "synthesis_trigger_days": 14,
