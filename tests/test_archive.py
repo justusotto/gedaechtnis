@@ -306,3 +306,30 @@ def test_an_entry_is_never_cut_in_half_by_a_segment_boundary(live):
         for block in body.split("\n## ")[1:]:
             assert block.strip(), "an empty entry block means a boundary fell mid-entry"
             assert "\n" in block, block[:80]
+
+
+def test_a_single_entry_larger_than_the_segment_limit_gets_its_own_segment(live):
+    """Finding 3. An entry bigger than the whole limit cannot be made to fit, and it is never split
+    — half an entry reads as a whole one. What it MUST do is land in a segment of its own rather
+    than be glued onto a full one, so the overshoot is exactly that entry and never accumulates."""
+    limit = 2000
+    archive.append_entries(live, "\n## small\n" + "s" * 1500 + "\n", limit=limit)
+    archive.append_entries(live, "\n## enormous\n" + "E" * 5000 + "\n", limit=limit)
+    segs = archive.segments(live)
+    assert len(segs) == 2, [s.name for s in segs]
+    assert segs[0].stat().st_size <= limit + 200
+    assert "enormous" in segs[1].read_text(encoding="utf-8")
+    assert "enormous" not in segs[0].read_text(encoding="utf-8")
+
+
+def test_an_oversized_entry_does_not_make_the_NEXT_segment_oversized_too(live):
+    """The residual named honestly: the huge entry's own segment is over the limit, and the next
+    append must open a fresh segment rather than pile onto it — otherwise one bad entry poisons
+    every segment after it."""
+    limit = 2000
+    archive.append_entries(live, "\n## enormous\n" + "E" * 5000 + "\n", limit=limit)
+    archive.append_entries(live, "\n## after\n" + "a" * 100 + "\n", limit=limit)
+    segs = archive.segments(live)
+    assert len(segs) == 2, [s.name for s in segs]
+    assert segs[1].stat().st_size < limit
+    assert "after" in segs[1].read_text(encoding="utf-8")

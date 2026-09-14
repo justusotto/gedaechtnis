@@ -22,6 +22,7 @@ import pytest
 
 PLUGIN = Path(__file__).resolve().parents[1]
 HOOKS = PLUGIN / "hooks"
+PLUGIN_ROOT = PLUGIN
 
 
 def git(vault: Path, *args: str) -> str:
@@ -501,3 +502,57 @@ def test_an_ordinary_vault_says_nothing_about_the_search_ceiling(world):
     sys.path.insert(0, str(HOOKS))
     import maintenance
     assert "NOT searched" not in "\n".join(maintenance.facts_lines(doc))
+
+
+# ---------------------------------- compaction actually RUNS in production (R3, finding 1) ----
+def test_the_stop_hook_compacts_an_oversize_memory_file(world):
+    """★ The test whose absence let a whole row ship a fix nothing called.
+
+    Every other test in the R3 set exercised `archive.compact_file` directly, so all of them were
+    green while no hook invoked it — the acceptance evidence described the simulator's own calls,
+    not the product. This asserts the PRODUCTION path: run the Stop hook, and an oversize memory
+    file is smaller afterwards with its entries in a segment."""
+    world["limits_file"].write_text(json.dumps(dict(LIMITS, max_memory_file_bytes=4000)))
+    live = world["vault"] / "Proj" / "Canon.md"
+    live.write_text("# Canon\n" + "".join(f"\n## entry {i}\n" + "b" * 400 + "\n" for i in range(60)))
+    before = live.stat().st_size
+    assert before > 4000
+    run_stop(world)                      # first run creates state
+    run_stop(world)
+    assert live.stat().st_size < before, "the Stop hook did not compact anything"
+    assert live.stat().st_size <= 4000
+    segs = sorted(p.name for p in (world["vault"] / "Proj").glob("Canon-archive*.md"))
+    assert segs, "entries were removed from the live file and are in no segment"
+    moved = "".join((world["vault"] / "Proj" / s).read_text() for s in segs)
+    assert "## entry 0" in moved
+
+
+def test_the_stop_hook_leaves_a_healthy_vault_untouched(world):
+    """Negative control. Compaction that fires on a healthy file would hollow out every region in
+    the vault — a worse failure than the one it fixes."""
+    live = world["vault"] / "Proj" / "Canon.md"
+    live.write_text("# Canon\n\n## one entry\nshort\n")
+    before = live.read_bytes()
+    run_stop(world)
+    run_stop(world)
+    assert live.read_bytes() == before
+    assert list((world["vault"] / "Proj").glob("Canon-archive*.md")) == []
+
+
+def test_a_retried_compaction_after_a_crash_does_not_duplicate(world):
+    """Finding 2. The crash window is: the archive write lands, the live truncation never runs. A
+    retry then recomputes the same oldest entries and would append them a second time."""
+    sys.path.insert(0, str(PLUGIN_ROOT))
+    import archive as arch
+    live = world["vault"] / "Proj" / "Canon.md"
+    live.write_text("# Canon\n" + "".join(f"\n## entry {i}\n" + "c" * 400 + "\n" for i in range(60)))
+    text = live.read_text()
+    parts = text.split("\n## ")
+    # replay exactly the half that survives such a crash: the archive append, no live rewrite
+    arch.append_entries(live, "".join("\n## " + e for e in parts[1:40]), limit=4000)
+    arch.compact_file(live, limit=4000)          # the retry
+    headings = []
+    for s in arch.segments(live):
+        headings += [l for l in s.read_text().splitlines() if l.startswith("## ")]
+    assert len(headings) == len(set(headings)), \
+        f"{len(headings) - len(set(headings))} heading(s) duplicated by the retry"

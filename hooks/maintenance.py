@@ -60,6 +60,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config
 import limits
 import session_start
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import archive
 from common import read_input, log, guarded, VAULT, STATE
 
 STATE_FILE = "maintenance.json"
@@ -410,6 +412,38 @@ def facts_lines(doc: dict) -> list[str]:
     return out
 
 
+# -------------------------------------------------------------- compaction ----
+def compact_vault() -> list[dict]:
+    """Keep every memory file under the bound that decides whether the search can read it.
+
+    ★ THIS IS THE HALF THAT MAKES THE REST OF ROW R3 REAL. The seam (`archive.py`) and the year-3
+    measurement that justified it both existed before this function did, and the row's acceptance
+    evidence was produced by the SIMULATOR calling `archive.compact_file` directly — so for an
+    actual installed vault nothing compacted anything and the files went on growing exactly as
+    before. A fix that no hook calls is a fix the product does not have; the row's own review
+    caught it, which is the same failure class the row exists to hunt, arriving at the level of the
+    row's delivery rather than its code.
+
+    It is a NO-OP on a healthy vault: `compact_file` returns 0 for any file under the bound, so a
+    vault that never grows one is never written to. A sealed segment is never itself compacted —
+    that would move bytes twice and break the links into it.
+    """
+    moved = []
+    for region in regions():
+        for path in sorted(region.glob("*.md")):
+            if archive.is_sidecar(path.stem):
+                continue
+            try:
+                n = archive.compact_file(path)
+            except (OSError, ValueError) as e:
+                log("maintenance", f"compaction FAILED for {path}: {e.__class__.__name__}: {e}")
+                continue
+            if n:
+                moved.append({"path": str(path.relative_to(VAULT)), "entries": n})
+                log("maintenance", f"compacted {n} entry(ies) out of {path.relative_to(VAULT)}")
+    return moved
+
+
 # ------------------------------------------------------------------- main ----
 def main() -> None:
     inp = read_input()
@@ -429,8 +463,13 @@ def main() -> None:
         log("maintenance", f"first run: state created at {state_path()}, nothing evaluated")
         return
 
+    # Compact BEFORE measuring, so the state file and the facts line describe the vault as it is
+    # after this session end rather than as it was before — a measurement taken before the act it
+    # is meant to reflect reports a problem that has already been fixed.
+    compacted = compact_vault()
     doc = dict(state)
     doc.update(compute(state, cwd, day))
+    doc["compacted"] = compacted
     doc["version"] = SCHEMA_VERSION
     new = json.dumps(doc, indent=1, sort_keys=True) + "\n"
     old = None

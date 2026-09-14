@@ -173,9 +173,34 @@ def compact_file(live: Path, limit: int | None = None, floor_share: float = 0.4)
         moved += 1
     if not moved:
         return 0
-    # Write the archive FIRST. If the process dies between the two writes, the entries exist twice
-    # — which a reader can see and resolve. The other order loses them outright.
-    append_entries(live, "".join("\n## " + e for e in entries_[:moved]), limit=limit)
+    # Write the archive FIRST: if the process dies between the two writes the entries exist twice,
+    # and duplication is recoverable where loss is not.
+    #
+    # ★ BUT "recoverable" is not "handled", and the honest version of this is IDEMPOTENCE. A retry
+    # after that crash re-reads the still-oversize live file, recomputes the same oldest entries and
+    # appends them a SECOND time — so the naive ordering argument silently compounds the damage it
+    # was defending. Before appending, the chunk already present at the tail of the newest segment
+    # is skipped, which makes a retried compaction a no-op rather than a duplicator.
+    # PER ENTRY, not per chunk. A first attempt compared the whole chunk against the segment tail,
+    # which only catches a retry that recomputed byte-identical output — and a retry need not: the
+    # live file it re-reads may have changed, so it moves a different number of entries and the
+    # overlap is partial. Filtering entry by entry handles both, and an entry is identified by its
+    # exact text, so a legitimately superseded entry sharing a heading is not mistaken for a copy.
+    outgoing = ["\n## " + e for e in entries_[:moved]]
+    existing = segments(live)
+    if existing:
+        try:
+            # EVERY segment, not the last few. A crash mid-compaction can leave the moved entries
+            # spread over several freshly-opened segments, and a window of the newest two silently
+            # missed the rest — which is how this guard failed its own test on the first attempt.
+            # The scan costs one read of the archive, paid only on a compaction, which fires only
+            # when a file is over the bound; correctness is worth more here than the read.
+            already = "".join(s.read_text(encoding="utf-8") for s in existing)
+            outgoing = [e for e in outgoing if e not in already]
+        except OSError:
+            pass
+    if outgoing:
+        append_entries(live, "".join(outgoing), limit=limit)
     live.write_text(head + ("\n## " + "\n## ".join(entries_[moved:]) if entries_[moved:] else "\n"),
                     encoding="utf-8")
     return moved
