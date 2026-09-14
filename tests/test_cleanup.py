@@ -306,20 +306,40 @@ def test_running_twice_changes_nothing_the_second_time(world):
     assert not changed, changed
 
 
-def test_a_file_changed_between_the_scan_and_the_apply_is_left_untouched(world):
+INTERLEAVE = """
+import json, sys
+sys.path.insert(0, {plugin!r})
+import cleanup
+from pathlib import Path
+f = Path(sys.argv[1])
+found = cleanup.propose()
+f.write_text(sys.argv[2], encoding="utf-8")        # somebody else edits between scan and apply
+print(json.dumps({{"found": [p["kind"] for p in found["proposals"]],
+                   "receipt": cleanup.apply(found)}}))
+"""
+
+
+def test_a_file_changed_between_the_scan_and_the_apply_is_left_untouched(world, tmp_path):
     """The one destructive mistake this module could make: removing entry number 3 after somebody
-    else moved a different entry into that position. The apply re-reads and compares."""
-    sys.path.insert(0, str(PLUGIN))
-    os.environ.update(world["env"])
+    else moved a different entry into that position. The apply re-reads and compares.
+
+    The interleaving runs in its OWN process. An earlier version did it in the test process with
+    `os.environ.update` and an `importlib.reload`, which passed alone and failed in the suite: the
+    env it injected outlived the test and the limits module's cache did too, so every later test in
+    that process read a different vault. A test that changes the world for its neighbours is a
+    harness bug however green it is on its own."""
     f = world["vault"] / "Proj" / "Canon.md"
     f.write_text("# Canon\n" + DUP + DUP)
-    import importlib
-    import cleanup as mod
-    importlib.reload(mod)
-    found = mod.propose()
-    assert [p["kind"] for p in found["proposals"]] == ["duplicate"]
-    f.write_text("# Canon\n" + ENTRY + "\n## Innocent\n\nnot a duplicate\n")   # changed underneath
-    receipt = mod.apply(found)
+    script = tmp_path / "interleave.py"
+    script.write_text(INTERLEAVE.format(plugin=str(PLUGIN)), encoding="utf-8")
+    p = subprocess.run([sys.executable, "-B", str(script), str(f),
+                        "# Canon\n" + ENTRY + "\n## Innocent\n\nnot a duplicate\n"],
+                       capture_output=True, text=True, env=world["env"],
+                       cwd=str(world["repo"]), timeout=120)
+    assert p.returncode == 0, p.stderr
+    out = json.loads(p.stdout)
+    assert out["found"] == ["duplicate"], "the scan never reached the file; the test proves nothing"
+    receipt = out["receipt"]
     assert receipt["moved"] == []
     assert any("changed since the scan" in x for x in receipt["failed"])
     assert "Innocent" in f.read_text()
