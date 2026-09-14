@@ -63,12 +63,14 @@ def kinds(doc) -> list[str]:
 
 # ------------------------------------------------------------ the four kinds ----
 def test_a_dead_path_a_dead_sha_a_dead_wikilink_and_a_dead_import_are_all_found(world):
+    # NOT a home-shaped path, even a fabricated one: the publish check refuses those anywhere in
+    # the tree, and it refused this file on its first commit. A fixture is part of what ships.
     boot_file(world, f"""# Project
 
-See /Users/nobody-at-all/missing/file.md for the plan.
+See /no-such-root/missing/file.md for the plan.
 Fixed in commit `deadbee` last week.
 The decision is in [[NoSuchFileAnywhere]].
-@/Users/nobody-at-all/missing/imported.md
+@/no-such-root/missing/imported.md
 """)
     doc = run_stop(world)
     assert kinds(doc) == ["import", "path", "sha", "wikilink"], doc["failures"]
