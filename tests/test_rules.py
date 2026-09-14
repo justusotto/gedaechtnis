@@ -49,14 +49,24 @@ STANDING = [
 ]
 
 
-def assemble(conditions: dict) -> str:
+def _session_start():
     sys.path.insert(0, str(HOOKS))
     import importlib.util
     spec = importlib.util.spec_from_file_location("gedaechtnis_session_start",
                                                   HOOKS / "session_start.py")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    return mod.assemble_rules(RULES_TEXT, conditions)
+    return mod
+
+
+def assemble(conditions: dict) -> str:
+    return _session_start().assemble_rules(RULES_TEXT, conditions)
+
+
+def assemble_text(text: str, conditions: dict) -> str:
+    """The assembler over arbitrary text, for the malformed-sentinel cases the shipped file must
+    never contain and the mechanism must survive anyway."""
+    return _session_start().assemble_rules(text, conditions)
 
 
 # ------------------------------------------------------------ two questions ----
@@ -206,3 +216,60 @@ def test_the_condition_is_computed_from_the_REAL_vault_at_boot(world):
     (world["vault"] / "Proj" / "Kernel.md").write_text("# boot\n")
     with_kernel = boot_context(world)
     assert "**Boot** (`Kernel.md`)" in with_kernel
+
+
+# ----------------------------------------- what the next edit to the rules can break ----
+def test_the_shipped_rules_sentinels_are_balanced_and_never_nested():
+    """A build-time lint on the file itself, because the assembler cannot tell a nested span from
+    a well-formed one and would ship the inner span's markup verbatim into a session's context.
+
+    The mechanism survives both defects (the leftover strip keeps the text and removes the marks),
+    so neither would produce a visible failure — which is exactly why it is linted here instead of
+    left to be noticed. This fires on the NEXT person to add a third conditional paragraph."""
+    opens = RULES_TEXT.count("<!--only-if:")
+    closes = RULES_TEXT.count("<!--/only-if-->")
+    assert opens == closes, f"{opens} open, {closes} close"
+    depth = 0
+    for token in __import__("re").findall(r"<!--/?only-if(?::[a-z_]+)?-->", RULES_TEXT):
+        depth += -1 if token.startswith("<!--/") else 1
+        assert depth in (0, 1), f"nested or unbalanced sentinels: depth {depth}"
+    assert depth == 0
+
+
+def test_a_NESTED_span_leaks_no_markup_and_keeps_its_text():
+    """The reviewer's reproduction, as a test. `re.sub` makes one pass over the original string,
+    so an inner span inside a kept outer one is never reprocessed; before the strip, its raw HTML
+    comments travelled into the model's context."""
+    out = assemble_text("<!--only-if:kernel--> outer <!--only-if:reviewer--> inner "
+                        "<!--/only-if--> tail <!--/only-if-->",
+                        {"kernel": True, "reviewer": False})
+    assert "only-if" not in out and "<!--" not in out
+    assert "outer" in out and "tail" in out
+    assert "inner" in out, "a malformed sentinel must leave a rule IN, never take one out"
+
+
+def test_an_UNCLOSED_span_leaks_no_markup_and_keeps_its_text():
+    out = assemble_text("<!--only-if:kernel--> a rule with no closing sentinel",
+                        {"kernel": False})
+    assert "only-if" not in out and "<!--" not in out
+    assert "a rule with no closing sentinel" in out
+
+
+def test_a_retired_boot_file_inside_a_CLEANUP_BUNDLE_does_not_count(world):
+    """The condition uses `recall`'s exclusion sets, not a dot-check of its own.
+
+    This package's rules say nothing is deleted — a retired file MOVES into a `Cleanup/` bundle,
+    under its original relative path and therefore its original name. A bespoke walk would find
+    that `Kernel.md` and tell a vault with no live boot file about boot files, disagreeing with
+    every other definition in the package (`maintenance.memory_files()` unions exactly those sets).
+    `.git` and `.gedaechtnis` were excluded only because they start with a dot, which is
+    coincidence rather than agreement."""
+    bundle = world["vault"] / "Cleanup" / "2026-09-14" / "removed" / "Proj"
+    bundle.mkdir(parents=True)
+    (bundle / "Kernel.md").write_text("# a retired boot file\n")
+    ctx = boot_context(world)
+    assert "Never delete a vault file" in ctx, "the rules did not reach the session at all"
+    assert "**Boot**" not in ctx, "a bundled, retired boot file was counted as a live one"
+    # POSITIVE CONTROL: a real one in a region still counts, so this is not an arm that says no.
+    (world["vault"] / "Proj" / "Kernel.md").write_text("# boot\n")
+    assert "**Boot** (`Kernel.md`)" in " ".join(boot_context(world).split())

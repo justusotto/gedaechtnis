@@ -299,6 +299,12 @@ def no_memory_line(cwd: str) -> str:
 
 
 ONLY_IF_RE = re.compile(r"<!--only-if:([a-z_]+)-->(.*?)<!--/only-if-->", re.S)
+# Any sentinel the pass above did not consume — one that is unclosed, or nested inside a span that
+# was kept, since `re.sub` makes ONE pass over the original string and never revisits what it
+# emitted. Such a marker would otherwise travel verbatim into the model's context. Stripping it
+# KEEPS the surrounding text, which is the same safe direction as an unknown condition name: a
+# malformed sentinel leaves a rule in, never takes one out.
+LEFTOVER_SENTINEL_RE = re.compile(r"<!--/?only-if(?::[a-z_]+)?-->")
 
 
 def rules_conditions() -> dict[str, bool]:
@@ -315,9 +321,22 @@ def rules_conditions() -> dict[str, bool]:
       than silence: it invites the model to invent a substitute."""
     plugin = Path(__file__).resolve().parent.parent
     has_kernel = False
+    # ★ THE EXCLUSIONS ARE recall's, not a dot-check of our own. A retired boot file legitimately
+    # ends up inside a `Cleanup/` bundle — this package's own rules say nothing is deleted, it is
+    # moved there — and a bespoke walk would then report a boot file to a vault that, by every
+    # other definition in this package (`maintenance.memory_files()` unions exactly these four
+    # sets), no longer has one. `.git` and `.gedaechtnis` were excluded only because they happen
+    # to start with a dot, which is coincidence rather than agreement.
+    try:
+        sys.path.insert(0, str(plugin))
+        import recall
+        skip = (set(recall.SKIP_DIRS) | set(recall.NON_MEMORY_DIRS)
+                | set(recall.GENERATED_DIRS) | set(recall.REMOVED_DIRS))
+    except Exception:
+        skip = {".git", "Cleanup", "Pharos", "Channels", ".gedaechtnis"}
     try:
         for dirpath, dirnames, filenames in os.walk(VAULT):
-            dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+            dirnames[:] = [d for d in dirnames if d not in skip and not d.startswith(".")]
             if "Kernel.md" in filenames:
                 has_kernel = True
                 break
@@ -332,10 +351,19 @@ def assemble_rules(text: str, conditions: dict[str, bool]) -> str:
 
     An UNKNOWN condition name is KEPT, never dropped. A typo in a sentinel would otherwise delete
     a rule from every session silently, which is the one failure this mechanism must not be able
-    to cause — and the direction of that default is the only thing protecting it."""
+    to cause — and the direction of that default is the only thing protecting it.
+
+    Spans do NOT nest, and a malformed one is survivable rather than fatal. `re.sub` makes one
+    pass over the original string, so a span inside a kept span is never reprocessed and an
+    unclosed span never matches at all; either way the raw HTML comment would ship into a model's
+    context. Both are stripped afterwards, keeping the text. **A consequence worth knowing before
+    editing the rules: the sentinel syntax cannot be shown literally in the rules prose**, because
+    this strip would eat it. A test lints the shipped file for balance and nesting so a bad edit
+    fails at build time rather than reaching a session."""
     def keep(m):
         return m.group(2) if conditions.get(m.group(1), True) else ""
     out = ONLY_IF_RE.sub(keep, text)
+    out = LEFTOVER_SENTINEL_RE.sub("", out)
     out = re.sub(r"\n{3,}", "\n\n", out)
     return "\n".join(line.rstrip() for line in out.splitlines()).strip()
 
