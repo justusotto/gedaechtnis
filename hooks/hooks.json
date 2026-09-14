@@ -122,6 +122,17 @@
         ]
       }
     ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -B \"${CLAUDE_PLUGIN_ROOT}\"/hooks/subagent_stop.py",
+            "timeout": 60
+          }
+        ]
+      }
+    ],
     "WorktreeCreate": [
       {
         "hooks": [

@@ -236,6 +236,74 @@ def touched_paths(sid: str) -> list[str]:
     return [p for p in t if isinstance(p, str)] if isinstance(t, list) else []
 
 
+# ---- WHO inside the session wrote it: the parent's own hand, or one of its subagents ----
+# A subagent's tool calls run under the PARENT's session id — `chore.py` sees one `session_id`
+# for both, so `touched` alone cannot say which. But every tool-call payload made by a subagent
+# carries `agent_id` (and `agent_type`), and the parent's own calls carry neither; measured live
+# 2026-09-14 against a PreToolUse/PostToolUse/SubagentStop dump. That field is the attribution,
+# so it is recorded at write time, split into two disjoint records:
+#
+#   agent_touched[<agent_id>]  the paths THAT subagent wrote
+#   direct_touched             the paths the parent wrote with its own hand
+#
+# SubagentStop commits the first minus the second. The subtraction is the point: a background
+# subagent runs while the parent keeps editing, so a file BOTH of them wrote is a file whose
+# working-tree content is partly the parent's in-flight, possibly half-finished edit — and git
+# cannot split one file between two authors. Committing it at SubagentStop would do to the parent
+# exactly what a partition-wide sweep once did to a sibling session. So it is left alone and the
+# parent's own Stop takes it.
+
+def record_agent_touched(sid: str, agent_id: str, rel: str) -> None:
+    """Note that a SUBAGENT of this session wrote one vault-relative path, under its agent id."""
+    def add(doc: dict) -> None:
+        a = doc.get("agent_touched")
+        if not isinstance(a, dict):
+            a = {}
+        lst = a.get(agent_id)
+        if not isinstance(lst, list):
+            lst = []
+        if rel not in lst:
+            lst.append(rel)
+        a[agent_id] = lst
+        doc["agent_touched"] = a
+    update_session_state(sid, add)
+
+
+def record_direct_touched(sid: str, rel: str) -> None:
+    """Note that the session itself — not a subagent of it — wrote one vault-relative path."""
+    def add(doc: dict) -> None:
+        d = doc.get("direct_touched")
+        if not isinstance(d, list):
+            d = []
+        if rel not in d:
+            d.append(rel)
+        doc["direct_touched"] = d
+    update_session_state(sid, add)
+
+
+def _session_doc(sid: str) -> dict:
+    try:
+        doc = json.loads(session_state_path(sid).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return doc if isinstance(doc, dict) else {}
+
+
+def agent_touched_paths(sid: str, agent_id: str) -> list[str]:
+    """The vault paths ONE subagent of this session wrote, or [] — [] never means "commit all"."""
+    a = _session_doc(sid).get("agent_touched")
+    if not isinstance(a, dict):
+        return []
+    lst = a.get(agent_id)
+    return [p for p in lst if isinstance(p, str)] if isinstance(lst, list) else []
+
+
+def direct_touched_paths(sid: str) -> list[str]:
+    """The vault paths the session wrote with its OWN hand (no subagent), or []."""
+    d = _session_doc(sid).get("direct_touched")
+    return [p for p in d if isinstance(p, str)] if isinstance(d, list) else []
+
+
 # ---- was this write a CREATION? the PreToolUse gate is the only place that can still see ----
 # A PostToolUse chore runs after the file exists, so it cannot tell a new file from an edited one.
 # The gate, which runs immediately before the same tool call, can: it stamps one tiny marker per
