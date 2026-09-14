@@ -408,14 +408,58 @@ def test_no_marker_means_no_commit_and_the_cleanup_still_happens(world):
 
 
 # ---------------------------------------------------------- the bundle ----
-def test_the_bundle_is_not_searchable_memory(world):
+SEARCH_BUNDLE = """
+import sys
+sys.path.insert(0, {plugin!r})
+import recall
+from pathlib import Path
+v = Path(sys.argv[1])
+for flag in (False, True):                      # default, and "search everything"
+    hits = [str(p) for p in recall.md_files(v, include_queues=flag)]
+    print(flag, any("Cleanup" in h for h in hits), len(hits))
+"""
+
+
+def test_the_bundle_is_not_searchable_memory_EVEN_WITH_include_queues(world, tmp_path):
     """A receipt the search reads hands back the duplicate the pass just removed, with nothing to
-    say which copy is live. `Cleanup` is in recall's non-memory directories for that reason."""
-    sys.path.insert(0, str(PLUGIN))
-    import recall
-    assert "Cleanup" in recall.NON_MEMORY_DIRS
+    say which copy is live.
+
+    The `include_queues` half is the finding, not the flourish. `Cleanup` first went into
+    `NON_MEMORY_DIRS` beside `Pharos` and `Channels` — which are excluded BY DEFAULT and come back
+    with `--include-queues`. That is right for a work queue, which a user may deliberately want to
+    search, and never right here: "search everything" must not resurrect content the user's own
+    cleanup removed. It has its own unconditional set now."""
     f = world["vault"] / "Proj" / "Canon.md"
     f.write_text("# Canon\n" + DUP + DUP)
     run(world)
-    found = list(recall.md_files(world["vault"]))
-    assert not any("Cleanup" in str(p) for p in found), found
+    assert (world["vault"] / "Cleanup").is_dir(), "the bundle was never written; the test is vacuous"
+    script = tmp_path / "search.py"
+    script.write_text(SEARCH_BUNDLE.format(plugin=str(PLUGIN)), encoding="utf-8")
+    p = subprocess.run([sys.executable, "-B", str(script), str(world["vault"])],
+                       capture_output=True, text=True, env=world["env"], timeout=120)
+    assert p.returncode == 0, p.stderr
+    for line in p.stdout.strip().splitlines():
+        flag, saw_bundle, n_hits = line.split()
+        assert saw_bundle == "False", f"the bundle was searched with include_queues={flag}"
+        assert int(n_hits) > 0, "no file was searched at all; the assertion above proves nothing"
+
+
+# ----------------------------------------------------- the guard on the guard ----
+def test_the_real_vault_guard_would_notice_a_write(tmp_path):
+    """The positive control for `conftest.py`'s session fixture.
+
+    A guard whose comparison cannot change is a guard that passes forever. This builds a real git
+    repository, fingerprints it, writes one file, and asserts the fingerprint moved — so the
+    session assertion is known to be capable of failing, rather than assumed to be."""
+    from conftest import fingerprint
+    v = tmp_path / "vault"
+    v.mkdir()
+    subprocess.run(["git", "init", "-q", str(v)], check=True)
+    (v / "Map.md").write_text("# x\n")
+    git(v, "add", "-A")
+    git(v, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "root")
+    before = fingerprint(v)
+    assert before is not None
+    (v / "Canon.md").write_text("# Canon\n")           # exactly what a stray test would do
+    assert fingerprint(v) != before
+    assert fingerprint(tmp_path / "no-such-vault") is None

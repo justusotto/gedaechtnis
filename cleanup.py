@@ -111,7 +111,7 @@ def detect_duplicates(rel: str, text: str) -> list[dict]:
                 "kind": "duplicate", "action": "move", "path": rel,
                 "heading": heading_of(e), "index": i, "first_index": seen[key], "text": e,
                 "why": f"byte-identical to an earlier entry under the same heading in {rel}",
-                "surviving_copy": f"{rel} (the first of the {len(entries)} entries, unchanged)",
+                "surviving_copy": f"{rel}, entry {seen[key] + 1}, unchanged",
             })
         else:
             seen[key] = i

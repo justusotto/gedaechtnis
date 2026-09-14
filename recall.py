@@ -73,10 +73,18 @@ import config  # noqa: E402  (every path is resolved there)
 
 SKIP_DIRS = {".git", "__pycache__", "node_modules", ".obsidian", ".trash"}
 # Not memory: work queues and lane notice outboxes, at any depth. Excluded unless asked for.
-# `Cleanup` is a RECEIPT, not memory: row R2's cleanup pass moves what it removes into a dated
-# bundle there so the move is reversible and visible in a file manager. A search that read it would
-# hand back the duplicate entry the pass had just removed, with no way to tell which copy is live.
-NON_MEMORY_DIRS = frozenset({"Pharos", "Channels", "Cleanup"})
+NON_MEMORY_DIRS = frozenset({"Pharos", "Channels"})
+# REMOVED content, and the only set here excluded UNCONDITIONALLY. Row R2's cleanup pass moves what
+# it takes out of a live file into a dated bundle under `Cleanup/`, so the move is reversible and
+# visible in a file manager. A search that read it would hand back the very duplicate the pass had
+# just removed, with nothing to say which copy is live.
+#
+# ★ It is NOT in NON_MEMORY_DIRS, and that is the correction rather than the tidiness. Those are
+# excluded BY DEFAULT and come back with `--include-queues`, which is right for a work queue — a
+# user may deliberately search one. It is never right here: "search everything" must not resurrect
+# content the user's own cleanup removed. A member of a defaultable set is one flag away from
+# being wrong, and nothing would have said so.
+REMOVED_DIRS = frozenset({"Cleanup"})
 # Not memory either: the vault's own generated evidence about itself — see the docstring's
 # "Generated views are not memory either." A separate set (and flag) from NON_MEMORY_DIRS because
 # the reason is different: queues restate the vault's vocabulary without answering anything,
@@ -161,6 +169,7 @@ def md_files(vault: Path, include_queues: bool = False, include_generated: bool 
     that show a human an answer pass one."""
     for dirpath, dirnames, filenames in os.walk(vault):
         dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS and not d.startswith(".git")
+                             and d not in REMOVED_DIRS
                              and (include_queues or d not in NON_MEMORY_DIRS)
                              and (include_generated or d not in GENERATED_DIRS))
         for name in sorted(filenames):

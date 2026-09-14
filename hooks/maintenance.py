@@ -450,7 +450,8 @@ def memory_files() -> list[Path]:
         import recall
     except Exception:
         return []
-    skip_dirs = set(recall.SKIP_DIRS) | set(recall.NON_MEMORY_DIRS) | set(recall.GENERATED_DIRS)
+    skip_dirs = (set(recall.SKIP_DIRS) | set(recall.NON_MEMORY_DIRS)
+                 | set(recall.GENERATED_DIRS) | set(recall.REMOVED_DIRS))
     out = []
     try:
         for dirpath, dirnames, filenames in os.walk(VAULT):
