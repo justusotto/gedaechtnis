@@ -179,7 +179,10 @@ class Sandbox:
             "# User memory\n\nNothing here yet.\n", encoding="utf-8")
         self.repo.mkdir(parents=True, exist_ok=True)
         run(["git", "init", "-q", "."], cwd=self.repo)
-        run(["git", "config", "user.email", "sim@example.invalid"], cwd=self.repo)
+        # Deliberately not an address. `tools/publish_check.py` refuses ANY email-shaped string in
+        # the tree, and it is right to: the rule that keeps a maintainer's address out of a public
+        # repo cannot carry an exception for addresses that happen to be fake. git takes this.
+        run(["git", "config", "user.email", "sim"], cwd=self.repo)
         run(["git", "config", "user.name", "sim"], cwd=self.repo)
         (self.repo / "README.md").write_text("sandbox\n", encoding="utf-8")
         run(["git", "add", "README.md"], cwd=self.repo)
@@ -591,6 +594,35 @@ def ab(budgets: list, loads: list, curves: list, horizon: int, seeds: int,
                     runs.append(simulate(load, kind, horizon, budget, seed=seed,
                                          n_questions=n_questions, limit=limit, verbose=verbose,
                                          max_daily_bytes=max_daily_bytes))
+    out = aggregate(runs, budgets)
+    out.update({"loads": loads, "curves": curves, "horizon": horizon, "seeds": seeds})
+    return out
+
+
+def noise_floor(runs: list, metric: str) -> float:
+    """The metric's noise floor: the mean, over CELLS, of that metric's spread across SEEDS.
+
+    ★ This is a repeat of the CONTROL, and nothing else is. The first version of this function
+    took the spread across every cell in an arm — which pools `low`, `medium` and `high` loads and
+    three curves together, so it measured the DESIGN FACTORS, not noise. It returned 0.4737 on a
+    0-to-1 metric, i.e. a "floor" that swallows any result the experiment could ever produce, and
+    it would have done so silently while still printing a winner. A cell repeated under a
+    different seed, and only that, tells you what the instrument's own wobble is.
+    (Global kernel: "measure the floor with a repeat of the CONTROL, per metric".)"""
+    cells: dict = {}
+    for r in runs:
+        final = r["snapshots"][max(r["snapshots"])]
+        v = final.get(metric)
+        if v is not None:
+            cells.setdefault((r["budget"], r["load"], r["curve"]), []).append(v)
+    spreads = [statistics.pstdev(v) for v in cells.values() if len(v) > 1]
+    return round(statistics.mean(spreads), 4) if spreads else 0.0
+
+
+def aggregate(runs: list, budgets: list) -> dict:
+    """Arms, floors, ladder and winner from a list of cell results. Pure, so a saved run can be
+    re-aggregated without re-simulating (`--reaggregate`) — which is what makes a correction to
+    the decision rule cheap enough to actually make."""
     arms = {}
     for budget in budgets:
         cells = [r for r in runs if r["budget"] == budget]
@@ -632,30 +664,64 @@ def ab(budgets: list, loads: list, curves: list, horizon: int, seeds: int,
             "answers_per_1k_tokens": round(
                 statistics.mean(answered) / max(1e-9, statistics.mean(toks) / 1000), 4),
         }
-    floor = max((a["answered_sd"] for a in arms.values()), default=0.0)
-    tool_floor = max((a["tool_recall_sd"] for a in arms.values()), default=0.0)
+    floor = noise_floor(runs, "boot_recall_recent")
+    tool_floor = noise_floor(runs, "tool_recall_recent")
     # The GUARD, applied before the metric: an arm that loses real answers is out, however cheap.
     best_tool = max(a["tool_recall_mean"] for a in arms.values())
     eligible = [a for a in arms.values() if a["tool_recall_mean"] >= best_tool - tool_floor]
     disqualified = [a["budget"] for a in arms.values() if a not in eligible]
     best = max(eligible, key=lambda a: a["answers_per_1k_tokens"])
+
+    # ── THE MARGINAL LADDER, and why the headline metric alone cannot decide this ──────────
+    #
+    # `answers_per_1k_tokens` uses answered = max(boot_recall, tool_recall). Where tool recall
+    # dominates — which it does at every load above `low`, because the boot file is a recent
+    # window over ONE role file while the vault holds everything — `answered` barely moves with
+    # the budget, and the metric collapses to 1/tokens. A metric that always prefers the smallest
+    # candidate offered is not choosing a budget; it is reporting that its numerator is flat.
+    # Saying so is the finding. The ladder below is what remains readable: what the NEXT increment
+    # of budget buys in boot recall, and what it costs in tokens, each step compared against the
+    # floor measured above. A step whose gain is under the floor bought nothing measurable.
+    ordered = sorted(arms.values(), key=lambda a: a["budget"])
+    ladder = []
+    for lo, hi in zip(ordered, ordered[1:]):
+        d_recall = round(hi["boot_recall_mean"] - lo["boot_recall_mean"], 4)
+        d_tokens = round(hi["boot_tokens_mean"] - lo["boot_tokens_mean"], 1)
+        ladder.append({
+            "from": lo["budget"], "to": hi["budget"],
+            "boot_recall_gain": d_recall,
+            "boot_token_cost": d_tokens,
+            "gain_per_1k_tokens": round(d_recall / (d_tokens / 1000), 4) if d_tokens else None,
+            "readable": bool(abs(d_recall) > floor),
+        })
+    metric_degenerate = all(
+        abs(a["answered_mean"] - best["answered_mean"]) <= floor for a in eligible)
     ties = [a for a in eligible
             if a is not best and abs(a["answered_mean"] - best["answered_mean"]) <= floor]
     cheaper_ties = sorted(a["budget"] for a in ties
                           if a["boot_tokens_mean"] < best["boot_tokens_mean"])
     return {
-        "budgets": budgets, "loads": loads, "curves": curves, "horizon": horizon,
-        "seeds": seeds, "arms": arms,
+        "budgets": budgets, "arms": arms,
         "population": "recent",
         "recent_window_days": RECENT_WINDOW_DAYS,
-        "answered_noise_floor": round(floor, 4),
-        "tool_recall_noise_floor": round(tool_floor, 4),
+        "noise_floor_method": ("mean across cells of the metric's standard deviation across "
+                               "SEEDS — a repeat of the control, never the spread across loads "
+                               "and curves, which are design factors"),
+        "boot_recall_noise_floor": floor,
+        "tool_recall_noise_floor": tool_floor,
         "disqualified_by_guard": disqualified,
         "winner": best["budget"],
         "winner_rule": ("highest answers per 1,000 boot tokens on the `recent` population, among "
                         "arms whose tool recall is within the noise floor of the best arm's; a "
                         "difference in answered recall smaller than the measured noise floor "
                         "counts as no difference, and among tied arms the cheaper budget wins"),
+        "metric_degenerate": metric_degenerate,
+        "metric_degenerate_note": (
+            "every arm's answered recall is within the noise floor of every other's, so the "
+            "headline metric reduces to 1/boot-tokens and will name the smallest budget on the "
+            "ballot whatever it is. Read the marginal ladder, not the winner line."
+            if metric_degenerate else ""),
+        "marginal_ladder": ladder,
         "cheaper_ties": cheaper_ties,
         "runs": runs,
     }
@@ -675,6 +741,11 @@ def main(argv=None) -> int:
     ap.add_argument("--questions", type=int, default=12, help="held-out questions per snapshot")
     ap.add_argument("--limit", type=int, default=3, help="recall@N")
     ap.add_argument("--ab", help="comma-separated budgets; runs the A/B instead of a plain sweep")
+    ap.add_argument("--reaggregate", metavar="JSON",
+                    help="re-run the A/B's AGGREGATION over the cells saved in a previous run's "
+                         "JSON, simulating nothing. For correcting a decision rule without paying "
+                         "for the cells again; the cells themselves are never recomputed, so the "
+                         "re-aggregated result rests on exactly the same measurements.")
     ap.add_argument("--seeds", type=int, default=2, help="seeds per cell in --ab (noise floor)")
     ap.add_argument("--max-daily-bytes", type=int, default=MAX_DAILY_BYTES,
                     help=f"ceiling on one day's writes; a capped cell is SHAPE-LIMITED "
@@ -686,10 +757,29 @@ def main(argv=None) -> int:
     loads = a.load or ["low", "medium", "high", "extra-high"]
     curves = a.curve or list(CURVES)
     t0 = time.time()
-    if a.ab:
-        budgets = [int(x) for x in a.ab.split(",") if x.strip()]
-        out = ab(budgets, loads, curves, a.horizon, a.seeds, a.questions, a.limit,
-                 verbose=not a.quiet, max_daily_bytes=a.max_daily_bytes)
+    if a.ab or a.reaggregate:
+        if a.reaggregate:
+            prior = json.loads(Path(a.reaggregate).read_text(encoding="utf-8"))
+            runs = prior["runs"]
+            # JSON object keys are STRINGS. `aggregate` takes each cell's last snapshot with
+            # max(snapshots), and over {"30","90","180","365"} that is the lexicographic max —
+            # "90". A re-aggregation would then silently report day 90 as the horizon's result:
+            # on the first run of this path, tool recall came back 0.96 instead of 0.51 and the
+            # ladder rested on the wrong day, with nothing anywhere saying so. Restore the ints.
+            for r in runs:
+                r["snapshots"] = {int(k): v for k, v in r["snapshots"].items()}
+            budgets = sorted({r["budget"] for r in runs})
+            out = aggregate(runs, budgets)
+            out["reaggregated_from"] = a.reaggregate
+            loads = sorted({r["load"] for r in runs})
+            curves = sorted({r["curve"] for r in runs})
+            a.horizon = max(r["horizon"] for r in runs)
+            a.seeds = len({r["seed"] for r in runs})
+            print(f"RE-AGGREGATED from {a.reaggregate} — {len(runs)} saved cells, nothing simulated")
+        else:
+            budgets = [int(x) for x in a.ab.split(",") if x.strip()]
+            out = ab(budgets, loads, curves, a.horizon, a.seeds, a.questions, a.limit,
+                     verbose=not a.quiet, max_daily_bytes=a.max_daily_bytes)
         print(f"\nBoot-budget A/B — {a.horizon} d, loads {'/'.join(loads)}, "
               f"curves {'/'.join(curves)}, {a.seeds} seed(s) per cell, "
               f"population `recent` (last {RECENT_WINDOW_DAYS} days)")
@@ -700,13 +790,32 @@ def main(argv=None) -> int:
             print(f"{m['budget']:>9,}{m['boot_tokens_mean']:>10,.0f}{m['boot_recall_mean']:>10.2f}"
                   f"{m['tool_recall_mean']:>10.2f}{m['answered_mean']:>10.2f}"
                   f"{m['answers_per_1k_tokens']:>12.3f}{m['wikilink_health_mean']:>8.2f}"
-                  f"{m['compactions_mean']:>13.1f}")
-        print(f"\nnoise floors (max sd across arms): answered {out['answered_noise_floor']} · "
+                  f"{m['compactions_mean']:>13.1f}"
+                  # The SHAPE-LIMITED marking has to reach the READER of the decision, not only
+                  # the JSON. The plain sweep printed it per row and this table did not, so an
+                  # arm whose mean included capped, non-faithful cells looked exactly like one
+                  # that did not — on the single table this row exists to produce.
+                  + (f"   SHAPE-LIMITED: {m['shape_limited_cells']} of {m['n_cells']} cells capped"
+                     if m["shape_limited_cells"] else ""))
+        print(f"\nnoise floors ({out['noise_floor_method']}):")
+        print(f"  boot recall {out['boot_recall_noise_floor']} · "
               f"tool recall {out['tool_recall_noise_floor']}")
         if out["disqualified_by_guard"]:
             print(f"disqualified by the recall guard: "
                   f"{', '.join(f'{b:,}' for b in out['disqualified_by_guard'])}")
-        print(f"WINNER: {out['winner']:,} B — {out['winner_rule']}")
+        print("\nmarginal ladder — what the NEXT increment of budget buys, and costs:")
+        print(f"  {'step':>18}{'boot recall gain':>19}{'boot token cost':>18}"
+              f"{'gain/1k tok':>13}   readable?")
+        for st in out["marginal_ladder"]:
+            g = st["gain_per_1k_tokens"]
+            print(f"  {st['from']:>7,} -> {st['to']:>6,}{st['boot_recall_gain']:>19.4f}"
+                  f"{st['boot_token_cost']:>18,.0f}"
+                  f"{('%.4f' % g) if g is not None else '—':>13}   "
+                  + ("yes" if st["readable"] else
+                     f"NO — gain under the floor ({out['boot_recall_noise_floor']})"))
+        print(f"\nWINNER: {out['winner']:,} B — {out['winner_rule']}")
+        if out["metric_degenerate"]:
+            print(f"  ★ BUT THE METRIC IS DEGENERATE HERE: {out['metric_degenerate_note']}")
         if out["cheaper_ties"]:
             print(f"  cheaper arms tied within the noise floor: "
                   f"{', '.join(f'{b:,}' for b in out['cheaper_ties'])}")

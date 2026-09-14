@@ -112,9 +112,21 @@ def test_compaction_stays_quiet_under_budget(sandbox):
 
 
 def test_compaction_stops_at_the_floor_and_never_empties_the_boot_file(sandbox):
+    """The assertion is on WHERE it stops, not merely that something is left.
+
+    The earlier version asserted only `boot_bytes() > 0` and "a heading remains" — which an
+    off-by-one moving a single entry, or one overshooting to near-empty, would both have passed
+    unchanged, under this very name."""
     grow(sandbox, 60)
-    sim.compact(sandbox, budget=25_000, floor_share=0.4)
-    assert sandbox.boot_bytes() > 0
+    budget, floor_share = 25_000, 0.4
+    sim.compact(sandbox, budget=budget, floor_share=floor_share)
+    boot = sandbox.boot_bytes()
+    floor = budget * floor_share
+    assert boot <= budget, "did not come under budget"
+    # It stops on the first move that puts it at or below the floor, so it lands within about one
+    # entry of it: never far under (over-compaction) and never still near the budget (under-).
+    assert floor - 2 * sim.ENTRY_B <= boot <= floor + 2 * sim.ENTRY_B, (
+        f"stopped at {boot} B, which is not near the floor of {floor:.0f} B")
     assert sim.HEADING_RE.findall(sandbox.role(sim.BOOT_STEM).read_text(encoding="utf-8"))
 
 
@@ -173,6 +185,84 @@ def test_unsearchable_is_empty_for_an_ordinary_vault(sandbox):
     """NEGATIVE control for the same check."""
     grow(sandbox, 20)
     assert sim.unsearchable(sandbox) == []
+
+
+# --------------------------------------------------------- the oversize arm ----
+
+def test_oversize_flags_a_role_file_past_its_soft_limit(sandbox):
+    """POSITIVE control for `oversize()`, which previously had only a negative one.
+
+    The suite asserted an empty list on an empty vault and never once showed the function firing —
+    exactly the shape this file's preamble warns about, and a function that has only ever returned
+    `[]` is not known to be able to return anything else."""
+    stem, limit = "Canon", sim.SOFT_LIMITS["Canon"]
+    path = sandbox.role(stem)
+    before = len(path.read_text(encoding="utf-8").splitlines())
+    assert before <= limit and sim.oversize(sandbox) == [], "fixture starts over limit"
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write("\n".join(f"line {i}" for i in range(limit - before + 1)) + "\n")
+    flagged = sim.oversize(sandbox)
+    assert [f["stem"] for f in flagged] == [stem]
+    assert flagged[0]["limit"] == limit and flagged[0]["lines"] > limit
+
+
+def test_oversize_stays_quiet_at_exactly_the_limit(sandbox):
+    """NEGATIVE control at the BOUNDARY, not merely on an empty vault: a file sitting exactly ON
+    its limit must not alarm, so the comparison is `>` and cannot drift to `>=`."""
+    stem, limit = "Canon", sim.SOFT_LIMITS["Canon"]
+    path = sandbox.role(stem)
+    before = len(path.read_text(encoding="utf-8").splitlines())
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write("\n".join(f"line {i}" for i in range(limit - before)) + "\n")
+    assert len(path.read_text(encoding="utf-8").splitlines()) == limit
+    assert sim.oversize(sandbox) == []
+
+
+# ------------------------------------------------------- the A/B guard ----
+
+def test_ab_guard_disqualifies_a_cheap_arm_that_loses_real_answers(monkeypatch):
+    """POSITIVE control for the recall GUARD, which had no coverage at all: the mechanism was
+    provably correct and provably untested, so an edit could have killed it with the suite green.
+
+    A cheap arm that cannot answer must LOSE to a costlier one that can, even though the cheap arm
+    wins the answers-per-token metric outright. `simulate` is stubbed so the two arms differ in
+    exactly the two numbers the rule reads."""
+    arms = {1_000: (0.30, 500), 5_000: (0.90, 3_000)}   # budget -> (tool recall, boot tokens)
+
+    def fake(load, kind, horizon, budget, seed=7, **kw):
+        rec, toks = arms[budget]
+        snap = {"boot_bytes": toks * 4, "boot_tokens": toks, "boot_recall_recent": 0.0,
+                "tool_recall_recent": rec, "boot_recall": 0.0, "tool_recall": rec,
+                "wikilink_health": 1.0, "oversize": [], "unsearchable": []}
+        return {"load": load, "curve": kind, "budget": budget, "seed": seed, "compactions": 0,
+                "shape_limited": False, "snapshots": {horizon: snap}}
+
+    monkeypatch.setattr(sim, "simulate", fake)
+    out = sim.ab([1_000, 5_000], ["low"], ["linear"], horizon=30, seeds=2,
+                 n_questions=4, limit=3)
+    assert out["disqualified_by_guard"] == [1_000]
+    assert out["winner"] == 5_000
+    assert out["arms"]["1000"]["answers_per_1k_tokens"] > out["arms"]["5000"]["answers_per_1k_tokens"], \
+        "the cheap arm must win the metric, or this test is not exercising the GUARD"
+
+
+def test_ab_guard_stays_quiet_when_both_arms_answer_equally(monkeypatch):
+    """NEGATIVE control: with recall tied, nothing is disqualified and the CHEAPER arm wins."""
+    arms = {1_000: (0.90, 500), 5_000: (0.90, 3_000)}
+
+    def fake(load, kind, horizon, budget, seed=7, **kw):
+        rec, toks = arms[budget]
+        snap = {"boot_bytes": toks * 4, "boot_tokens": toks, "boot_recall_recent": 0.0,
+                "tool_recall_recent": rec, "boot_recall": 0.0, "tool_recall": rec,
+                "wikilink_health": 1.0, "oversize": [], "unsearchable": []}
+        return {"load": load, "curve": kind, "budget": budget, "seed": seed, "compactions": 0,
+                "shape_limited": False, "snapshots": {horizon: snap}}
+
+    monkeypatch.setattr(sim, "simulate", fake)
+    out = sim.ab([1_000, 5_000], ["low"], ["linear"], horizon=30, seeds=2,
+                 n_questions=4, limit=3)
+    assert out["disqualified_by_guard"] == []
+    assert out["winner"] == 1_000
 
 
 # ------------------------------------------------------------ recall halves ----
@@ -260,10 +350,35 @@ def test_ab_reports_a_measured_noise_floor_and_a_winner(tmp_path):
                  n_questions=6, limit=3)
     assert out["winner"] in (20_000, 25_000)
     assert out["population"] == "recent"
-    assert out["answered_noise_floor"] >= 0.0
+    assert out["boot_recall_noise_floor"] >= 0.0
+    assert out["tool_recall_noise_floor"] >= 0.0
     assert set(out["arms"]) == {"20000", "25000"}
     for arm in out["arms"].values():
         assert arm["n_cells"] == 2
+    # The ladder is the readable half when the headline metric goes degenerate, so it must exist
+    # and must say, per step, whether the gain cleared the floor.
+    assert [(s["from"], s["to"]) for s in out["marginal_ladder"]] == [(20_000, 25_000)]
+    assert isinstance(out["marginal_ladder"][0]["readable"], bool)
+
+
+def test_noise_floor_is_measured_across_seeds_not_across_design_factors():
+    """The floor must come from a REPEAT OF THE CONTROL. Two cells that differ only by seed define
+    it; two cells that differ by LOAD do not, and pooling them inflates the floor until it swallows
+    every result the experiment can produce.
+
+    This is pinned because it actually happened on 2026-09-14: the first version pooled across
+    loads and curves and reported a floor of 0.4737 on a 0-to-1 metric, while still printing a
+    winner as though the number meant something."""
+    def cell(load, seed, value):
+        return {"budget": 25_000, "load": load, "curve": "linear", "seed": seed,
+                "horizon": 30, "snapshots": {30: {"boot_recall_recent": value}}}
+
+    # Same load, two seeds, 0.10 apart -> the instrument's own wobble is 0.05.
+    # A second load sits far away (0.90); it must NOT enter the floor.
+    runs = [cell("low", 7, 0.10), cell("low", 8, 0.20),
+            cell("high", 7, 0.90), cell("high", 8, 0.90)]
+    floor = sim.noise_floor(runs, "boot_recall_recent")
+    assert floor == pytest.approx(0.025), f"floor {floor} was contaminated by the load factor"
 
 
 def test_json_output_round_trips(tmp_path):
