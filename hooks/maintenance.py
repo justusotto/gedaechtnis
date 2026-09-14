@@ -240,6 +240,42 @@ def oversize_role_files() -> list[dict]:
     return out
 
 
+def unsearchable_files() -> list[dict]:
+    """Memory files the search will not look inside, because they are over its own ceiling.
+
+    ★ This arm exists because the failure is SILENT and the symptom is REASSURING. `recall.md_files`
+    skips an oversize file, `search()` returns nothing, and the caller reads "the vault does not
+    know that" — which is indistinguishable from the answer never having been written down. Row S0
+    measured what that costs: at year 3 under heavy use, every held-out answer was unreachable this
+    way and no surface anywhere said so.
+
+    It is a MEASUREMENT of a fact, not a threshold anyone tuned: the ceiling belongs to `recall.py`
+    and is read from the limits file rather than repeated here. R3 makes the files small enough that
+    this should stay empty — and this arm is what will say so if it ever stops being true, which is
+    the half of the fix that survives a future change to the compactor."""
+    ceiling = int(limits.get("max_searchable_file_bytes"))
+    out = []
+    try:
+        candidates = list(VAULT.rglob("*.md"))
+    except OSError:
+        return []
+    for md in candidates:
+        try:
+            rel = md.relative_to(VAULT)
+        except ValueError:
+            continue
+        if any(part.startswith(".") for part in rel.parts):
+            continue
+        try:
+            size = md.stat().st_size
+        except OSError:
+            continue
+        if size > ceiling:
+            out.append({"path": str(rel), "bytes": size, "ceiling": ceiling})
+    out.sort(key=lambda r: -r["bytes"])
+    return out
+
+
 def boot_chain_now(cwd: str) -> tuple[int, int, list[dict]]:
     """(bytes, files, the largest members) for the chain this session actually booted with.
 
@@ -299,8 +335,14 @@ def compute(state: dict, cwd: str, day: str) -> dict:
         "events": {"fired": bool(events), "events": events[:EVIDENCE_CAP], "checked": ev_checked},
     }
 
+    blind = unsearchable_files()
+
     return {
         "computed": day,
+        # NOT a cleanup arm: it is not a matter of tidiness and no threshold is being approached.
+        # A file here is one the search has already stopped reading, and the only thing that must
+        # never happen is that it goes unmentioned.
+        "unsearchable": {"files": blind[:EVIDENCE_CAP], "n_files": len(blind)},
         "cleanup": {"due": any(a["fired"] for a in cleanup_arms.values()), "arms": cleanup_arms},
         "synthesis": {"due": any(a["fired"] for a in synthesis_arms.values()),
                       "arms": synthesis_arms},
@@ -344,6 +386,14 @@ def facts_lines(doc: dict) -> list[str]:
         if ev.get("fired"):
             why.append("; ".join(ev.get("events") or []))
         out.append("- Maintenance: a synthesis pass is due — " + "; ".join(why) + ".")
+    blind = (doc.get("unsearchable") or {})
+    if blind.get("n_files"):
+        names = ", ".join(f"{f['path']} ({f['bytes']:,} B)" for f in blind.get("files") or [])
+        more = blind["n_files"] - len(blind.get("files") or [])
+        out.append(f"- Maintenance: {blind['n_files']} memory file(s) are larger than the "
+                   f"{(blind.get('files') or [{}])[0].get('ceiling', 0):,} B search ceiling and are "
+                   f"NOT searched — an answer inside one is unreachable, which is not the same as "
+                   f"absent: {names}" + (f", and {more} more" if more > 0 else "") + ".")
     unchecked = []
     for label, group in (("cleanup", cleanup), ("synthesis", synth)):
         for name, arm in (group.get("arms") or {}).items():

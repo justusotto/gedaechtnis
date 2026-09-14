@@ -470,3 +470,34 @@ def test_a_real_git_vault_reports_checked(world):
     sys.path.insert(0, str(HOOKS))
     import maintenance
     assert "UNCHECKED" not in "\n".join(maintenance.facts_lines(doc))
+
+
+# --------------------------------------- the search ceiling, named rather than silent ----
+def test_a_file_over_the_search_ceiling_is_NAMED(world, tmp_path):
+    """F1's acceptance condition: the ceiling itself may rise, but a skip must never again be
+    silent. Positive control."""
+    limits_file = world["limits_file"]
+    limits_file.write_text(json.dumps(dict(LIMITS, max_searchable_file_bytes=5000)))
+    big = world["vault"] / "Proj" / "Errata.md"
+    big.write_text("# Errata\n" + "z" * 20000)
+    run_stop(world)
+    run_stop(world)
+    doc = state_doc(world)
+    assert doc["unsearchable"]["n_files"] >= 1
+    assert any(f["path"] == "Proj/Errata.md" for f in doc["unsearchable"]["files"]), doc
+    sys.path.insert(0, str(HOOKS))
+    import maintenance
+    text = "\n".join(maintenance.facts_lines(doc))
+    assert "Proj/Errata.md" in text and "NOT searched" in text, text
+
+
+def test_an_ordinary_vault_says_nothing_about_the_search_ceiling(world):
+    """Negative control. Silence has to stay possible, or the notice is noise and is skipped the
+    one time it matters."""
+    run_stop(world)
+    run_stop(world)
+    doc = state_doc(world)
+    assert doc["unsearchable"]["n_files"] == 0
+    sys.path.insert(0, str(HOOKS))
+    import maintenance
+    assert "NOT searched" not in "\n".join(maintenance.facts_lines(doc))
