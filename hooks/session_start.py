@@ -185,7 +185,11 @@ def main() -> None:
         if _m:
             lines.extend(maintenance.facts_lines(_m))
     except Exception:                                  # a maintenance bug must not cost a session its facts
-        pass
+        # ...but it must not vanish either. Every other guarded block in this package logs before
+        # it swallows (`common.guarded`); a bare `pass` here would drop a DUE cleanup with nothing
+        # anywhere to distinguish that from nothing having fired.
+        import traceback as _tb
+        log("hook-errors", "session_start/maintenance: " + _tb.format_exc().replace("\n", " | "))
     ops = config.owner_pages_status()                  # None unless config.json names a script
     if ops:
         rc, out, err = sh([config.python(), str(ops), "--json"], timeout=8)

@@ -225,10 +225,20 @@ def test_byte_arm_fires_when_an_imported_file_blows_the_budget(world):
 
 
 def test_byte_arm_quiet_when_the_same_file_is_not_imported(world):
-    """The v7.6 repair, ported by construction: a file outside the chain cannot move the number."""
+    """The v7.6 repair, ported by construction: a file outside the chain cannot move the number.
+
+    ★ The fixture PUTS THE REAL PATH IN THE TEXT, in prose rather than as an @-import line. The
+    first draft wrote a sentence that never named the file at all, and a test like that cannot
+    fail: loosening `IMPORT_LINE_RE` (dropping its anchors, or `.match()` → `.search()`) left it
+    green both times, because there was nothing in the fixture for a broken parser to latch onto.
+    A negative control has to place the bait where a regression would take it — and `.match()`
+    anchors at position 0 whatever the pattern says, so the path must lead its line. With prose in
+    front of it the bait is unreachable and the control is decorative; with the path leading, a
+    pattern that stops requiring the `@` picks it up and the test goes red."""
     big = world["tmp"] / "big.md"
     big.write_text("y" * 30000)
-    (world["repo"] / "CLAUDE.md").write_text("# project\nthe file @-is mentioned but not imported\n")
+    (world["repo"] / "CLAUDE.md").write_text(
+        f"# project\n{big} — named at the START of a line, deliberately with no leading `@`\n")
     run_stop(world)
     run_stop(world)
     arm = state_doc(world)["cleanup"]["arms"]["boot_bytes"]
@@ -418,3 +428,45 @@ def test_a_young_vault_reports_no_topology_events(world, tmp_path):
                    capture_output=True, text=True, env=env, timeout=60, check=False)
     arm = json.loads(state.read_text())["synthesis"]["arms"]["events"]
     assert arm["fired"] is False, arm
+
+
+# ------------------------------------------- a failed check is UNCHECKED, never zero ----
+def test_a_vault_that_is_not_a_git_repo_reports_UNCHECKED_not_zero(world, tmp_path):
+    """The reviewer's finding, pinned. A git-backed arm returns 0 when the command fails and 0 when
+    the vault was genuinely quiet — opposite facts, identical output. Here the vault is a directory
+    with no `.git` at all and 30 fresh entries in it: the counts are meaningless, and what must NOT
+    happen is that they read as a healthy quiet vault."""
+    vault = tmp_path / "notgit"
+    (vault / "Proj").mkdir(parents=True)
+    (vault / "Proj" / "Map.md").write_text("# m\n")
+    (vault / "Proj" / "Errata.md").write_text(
+        "# Errata\n" + "".join(f"## entry {i}\nbody\n" for i in range(30)))
+    env = dict(world["env"], GEDAECHTNIS_VAULT=str(vault))
+    state = Path(world["state"]) / "maintenance.json"
+    state.write_text(json.dumps({"version": 1, "created": days_ago(2),
+                                 "last_cleanup": days_ago(2), "last_synthesis": days_ago(2)}))
+    subprocess.run([sys.executable, "-B", str(HOOKS / "maintenance.py")],
+                   input=json.dumps({"session_id": "s", "cwd": str(world["repo"])}),
+                   capture_output=True, text=True, env=env, timeout=60, check=False)
+    doc = json.loads(state.read_text())
+    assert doc["cleanup"]["arms"]["volume"]["checked"] is False
+    assert doc["synthesis"]["arms"]["entries"]["checked"] is False
+    # and it must SAY so, rather than let an unmeasured arm pass for a quiet one
+    sys.path.insert(0, str(HOOKS))
+    import maintenance
+    text = "\n".join(maintenance.facts_lines(doc))
+    assert "UNCHECKED" in text and "could NOT be measured" in text, text
+
+
+def test_a_real_git_vault_reports_checked(world):
+    """The negative control for the control: an ordinary vault must not be labelled UNCHECKED, or
+    the notice is noise and the distinction it carries is worthless."""
+    set_last(world, cleanup=days_ago(2), synthesis=days_ago(2))
+    run_stop(world)
+    doc = state_doc(world)
+    assert doc["cleanup"]["arms"]["volume"]["checked"] is True
+    assert doc["synthesis"]["arms"]["entries"]["checked"] is True
+    assert doc["synthesis"]["arms"]["events"]["checked"] is True
+    sys.path.insert(0, str(HOOKS))
+    import maintenance
+    assert "UNCHECKED" not in "\n".join(maintenance.facts_lines(doc))

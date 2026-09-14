@@ -100,23 +100,37 @@ def first_run_state(day: str) -> dict:
 
 # ------------------------------------------------------------------- git -----
 def sh(args, timeout=20) -> tuple[int, str]:
+    """(rc, stdout). A non-zero rc is LOGGED, because of what the callers do with it.
+
+    Every git-backed arm returns 0 or [] when its command fails, and 0 is also what it returns when
+    the vault genuinely had no activity. Those are opposite facts with identical output: a missing
+    git, a VAULT that is not a repository, a corrupted `.git` or a timeout all render as a
+    perfectly healthy quiet vault. The arms cannot distinguish them — but they can refuse to be
+    silent about it, and `checked` below carries the distinction into the state file so a reader
+    is never shown a zero that was never actually counted."""
     try:
         p = subprocess.run(args, capture_output=True, text=True, stdin=subprocess.DEVNULL,
                            timeout=timeout)
+        if p.returncode != 0:
+            log("maintenance", f"git check FAILED rc={p.returncode}: {' '.join(args[:6])} "
+                               f"— the arm using it reports UNCHECKED, not zero")
         return p.returncode, p.stdout
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError) as e:
+        log("maintenance", f"git check FAILED ({e.__class__.__name__}): {' '.join(args[:6])} "
+                           f"— the arm using it reports UNCHECKED, not zero")
         return 1, ""
 
 
-def substantive_commits(since: str) -> tuple[int, int]:
-    """(substantive, total) vault commits since `since`. The bare date would undercount — a
+def substantive_commits(since: str) -> tuple[int, int, bool]:
+    """(substantive, total, checked) vault commits since `since`. `checked` is False when the git
+    command itself failed — the counts are then meaningless and must never be read as zero. The bare date would undercount — a
     `--since=YYYY-MM-DD` with no time component is read as that date's current clock time — so the
     00:00:00 is explicit, exactly as the vault learned to write it."""
     rc, out = sh(["git", "-C", str(VAULT), "log", f"--since={since} 00:00:00", "--format=%s"])
     if rc != 0:
-        return 0, 0
+        return 0, 0, False
     subjects = [l for l in out.splitlines() if l.strip()]
-    return sum(1 for s in subjects if not s.startswith(BOOKKEEPING_SUBJECTS)), len(subjects)
+    return (sum(1 for s in subjects if not s.startswith(BOOKKEEPING_SUBJECTS)), len(subjects), True)
 
 
 # ---------------------------------------------------------------- regions ----
@@ -138,7 +152,7 @@ def regions() -> list[Path]:
     return sorted(found)
 
 
-def new_region_entries(since: str) -> int:
+def new_region_entries(since: str) -> tuple[int, bool]:
     """`## ` headings added to any region's Errata.md / Patterns.md since `since`.
 
     A unified diff's file header is `+++ b/…`, which cannot match the four characters `+## `, so
@@ -150,15 +164,15 @@ def new_region_entries(since: str) -> int:
             if p.is_file():
                 files.append(str(p.relative_to(VAULT)))
     if not files:
-        return 0
+        return 0, True                      # no region files is a real, checked answer of zero
     rc, out = sh(["git", "-C", str(VAULT), "log", f"--since={since} 00:00:00", "--format=", "-p",
                   "--", *files], timeout=40)
     if rc != 0:
-        return 0
-    return sum(1 for line in out.splitlines() if line.startswith("+## "))
+        return 0, False
+    return sum(1 for line in out.splitlines() if line.startswith("+## ")), True
 
 
-def topology_events(since: str) -> list[str]:
+def topology_events(since: str) -> tuple[list[str], bool]:
     """New top-level vault surfaces since `since`. A surface is NEW when it has no commit before
     the date — a directory that merely gained a file today is not a new surface, and the negative
     control for this arm is exactly that case."""
@@ -169,12 +183,14 @@ def topology_events(since: str) -> list[str]:
     # TO, and the arm reports nothing rather than everything.
     rc0, prior_any = sh(["git", "-C", str(VAULT), "log", "-1", "--format=%H",
                          f"--before={since} 00:00:00"])
-    if rc0 != 0 or not prior_any.strip():
-        return []
+    if rc0 != 0:
+        return [], False
+    if not prior_any.strip():
+        return [], True                     # checked, and correctly nothing: the vault is young
     rc, out = sh(["git", "-C", str(VAULT), "log", f"--since={since} 00:00:00", "--diff-filter=A",
                   "--name-only", "--format="], timeout=40)
     if rc != 0:
-        return []
+        return [], False
     tops = set()
     for line in out.splitlines():
         line = line.strip()
@@ -189,7 +205,7 @@ def topology_events(since: str) -> list[str]:
                          f"--before={since} 00:00:00", "--", top + "/"])
         if rc2 == 0 and not prior.strip():
             events.append(f"new top-level surface `{top}/`")
-    return events
+    return events, True
 
 
 # ------------------------------------------------------------------- size ----
@@ -252,7 +268,7 @@ def compute(state: dict, cwd: str, day: str) -> dict:
     cleanup_days = days_between(str(state.get("last_cleanup", day)), day)
     synth_days = days_between(str(state.get("last_synthesis", day)), day)
 
-    substantive, total = substantive_commits(str(state.get("last_cleanup", day)))
+    substantive, total, vol_checked = substantive_commits(str(state.get("last_cleanup", day)))
     oversize = oversize_role_files()
     boot_bytes, boot_files, biggest = boot_chain_now(cwd)
 
@@ -263,23 +279,24 @@ def compute(state: dict, cwd: str, day: str) -> dict:
     cleanup_arms = {
         "time": {"fired": cleanup_days is not None and cleanup_days >= d_days,
                  "days": cleanup_days, "threshold": d_days},
-        "volume": {"fired": substantive >= d_commits, "commits": substantive,
-                   "total_commits": total, "threshold": d_commits},
+        "volume": {"fired": vol_checked and substantive >= d_commits, "commits": substantive,
+                   "total_commits": total, "threshold": d_commits, "checked": vol_checked},
         "size_lines": {"fired": bool(oversize), "files": oversize[:EVIDENCE_CAP],
                        "n_files": len(oversize)},
         "boot_bytes": {"fired": boot_bytes > budget, "bytes": boot_bytes,
                        "n_files": boot_files, "threshold": budget, "largest": biggest},
     }
 
-    entries = new_region_entries(str(state.get("last_synthesis", day)))
-    events = topology_events(str(state.get("last_synthesis", day)))
+    entries, ent_checked = new_region_entries(str(state.get("last_synthesis", day)))
+    events, ev_checked = topology_events(str(state.get("last_synthesis", day)))
     s_days = limits.get("synthesis_trigger_days")
     s_entries = limits.get("synthesis_trigger_entries")
     synthesis_arms = {
         "time": {"fired": synth_days is not None and synth_days >= s_days,
                  "days": synth_days, "threshold": s_days},
-        "entries": {"fired": entries >= s_entries, "entries": entries, "threshold": s_entries},
-        "events": {"fired": bool(events), "events": events[:EVIDENCE_CAP]},
+        "entries": {"fired": ent_checked and entries >= s_entries, "entries": entries,
+                    "threshold": s_entries, "checked": ent_checked},
+        "events": {"fired": bool(events), "events": events[:EVIDENCE_CAP], "checked": ev_checked},
     }
 
     return {
@@ -327,6 +344,17 @@ def facts_lines(doc: dict) -> list[str]:
         if ev.get("fired"):
             why.append("; ".join(ev.get("events") or []))
         out.append("- Maintenance: a synthesis pass is due — " + "; ".join(why) + ".")
+    unchecked = []
+    for label, group in (("cleanup", cleanup), ("synthesis", synth)):
+        for name, arm in (group.get("arms") or {}).items():
+            if isinstance(arm, dict) and arm.get("checked") is False:
+                unchecked.append(f"{label}/{name}")
+    if unchecked:
+        # NOT a quiet arm. A measurement that could not be taken is reported as UNMEASURED rather
+        # than as a zero — the zero is indistinguishable from a healthy vault, which is the whole
+        # failure class this hook was ported to end.
+        out.append("- Maintenance: " + ", ".join(unchecked) + " could NOT be measured this session "
+                   "(the vault git command failed); read them as UNCHECKED, never as zero.")
     if out:
         out.append(f"- Maintenance state: {state_path()} (computed at the last session end).")
     return out
