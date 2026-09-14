@@ -363,3 +363,130 @@ def test_no_private_vocabulary_travelled(mod):
     owner = "just" + "us"
     for leaked in ("atlas", "speculum", "mnemosyne", "cursus", "lustrum", owner):
         assert leaked not in src, leaked
+
+
+# ------------------------------------ the second REJECT, and its two siblings ----
+GENERIC_PROBE = """
+import json, sys
+sys.path.insert(0, {hooks!r})
+import maintenance
+print(json.dumps([m["path"] for m in maintenance.compact_vault()]))
+"""
+
+
+def test_THE_GENERIC_COMPACTOR_NEVER_TOUCHES_A_BOOT_FILE(vault, tmp_path):
+    """★ The defect this row was rejected for the SECOND time, and it was never in this module.
+
+    `maintenance.compact_vault` is R3's generic compactor: it walks every memory file and moves the
+    OLDEST `## ` sections of anything over `max_memory_file_bytes`. It has no concept of a Boot
+    file, no concept of the declared window, and `main()` runs it BEFORE `roll_window` — so for any
+    Boot file over the generic bound the unsafe compactor got there first and deleted the standing
+    constraints the careful one had just been built to protect. The reviewer reproduced the original
+    wipe through this door, against the fixed module.
+
+    One compactor per file class, and this asserts the generic one declines.
+
+    Driven in a SUBPROCESS, for the reason this file has now learned three times: `common.VAULT` is
+    resolved ONCE per process, so an in-process import of `maintenance` reads whichever vault the
+    first import in that process saw — and passes alone while failing in the suite.
+    """
+    limits_file = tmp_path / "gen-limits.json"
+    limits_file.write_text(json.dumps({**LIMITS, "max_memory_file_bytes": 1500}))
+    boot = vault / "Proj" / "Kernel.md"
+    boot.write_text(real_boot_file(n_resume=40, marker=False))     # the normal, unmigrated state
+    role = vault / "Proj" / "Position.md"
+    role.write_text("# Position\n" + "".join(f"\n## day {i}\n" + "x" * 200 + "\n"
+                                            for i in range(20)))
+    assert boot.stat().st_size > 1500 and role.stat().st_size > 1500
+    before, role_before = boot.read_text(), role.stat().st_size
+
+    script = tmp_path / "probe.py"
+    script.write_text(GENERIC_PROBE.format(hooks=str(HOOKS)), encoding="utf-8")
+    env = dict(os.environ, GEDAECHTNIS_VAULT=str(vault),
+               GEDAECHTNIS_STATE_DIR=str(tmp_path / "state"),
+               GEDAECHTNIS_LIMITS=str(limits_file),
+               GEDAECHTNIS_FLEET_ROSTER=str(tmp_path / "no-roster.md"),
+               GEDAECHTNIS_USER_MEMORY=str(tmp_path / "no-user-memory.md"),
+               GEDAECHTNIS_CONFIG=str(tmp_path / "no-config.json"))
+    p = subprocess.run([sys.executable, "-B", str(script)], capture_output=True, text=True,
+                       env=env, timeout=120)
+    assert p.returncode == 0, p.stderr
+    moved = json.loads(p.stdout)
+
+    assert boot.read_text() == before, "the generic compactor rewrote a Boot file"
+    assert "NEVER delete a memory file." in boot.read_text()
+    # POSITIVE CONTROL: it DID compact the ordinary role file beside it, so the refusal above is
+    # about the Boot file and not about a compactor that did nothing at all.
+    assert any(m.endswith("Position.md") for m in moved), moved
+    assert role.stat().st_size < role_before
+    assert (vault / "Proj" / "Position-archive.md").is_file()
+
+
+def test_a_code_FENCE_inside_the_window_is_not_torn(mod, vault):
+    """A fence is content, not structure. The reviewer built a window entry containing a fenced
+    block with a `## ` line inside it and watched the fence torn across live and archive — the
+    opener carried off, the orphaned closing fence promoted to a spurious live heading.
+    Byte-preserving, and structurally corrupting in the same spirit as the defect above.
+
+    ★ The fenced entry is LAST on purpose, and the first version of this test was decorative
+    without that. The window always keeps its newest entry, so a fence-blind split — which sees the
+    fenced entry as TWO — moves the opening half and keeps the closing half, tearing it exactly at
+    the boundary. With the entry placed anywhere else, both halves travel together and a
+    fence-blind implementation passes the test."""
+    boot = vault / "Proj" / "Kernel.md"
+    fenced = ("\n## an entry with a fence\n\n```\n## this is not a heading\n```\n"
+              + "x" * 400 + "\n")
+    # The FIXED part is deliberately larger than the whole target, so the loop cannot reach it by
+    # moving window entries and runs all the way to its stop-one-short bound. Without that it
+    # stopped early, both halves of the fence travelled together, and a fence-blind implementation
+    # passed this test — which is how the first version of it was decorative.
+    boot.write_text("# Boot\n\n## Standing constraints\n\nNEVER. " + "n" * 1600 + "\n\n"
+                    + WINDOW_OPEN + "\n"
+                    + "".join(f"\n## real {i}\n" + "x" * 400 + "\n" for i in range(6))
+                    + fenced
+                    + WINDOW_CLOSE + "\n\n## Pointer map\n\nbodies\n")
+    mod.roll_window(vault)
+    seg = (vault / "Proj" / "Kernel-archive.md").read_text()
+    live = boot.read_text()
+    # EACH file balanced, not just the pair: a tear leaves one fence on each side, and the two
+    # halves sum to an even number however badly it went.
+    assert live.count("```") % 2 == 0, "the live file holds half a fence"
+    assert seg.count("```") % 2 == 0, "the archive holds half a fence"
+    # And the fenced entry stayed whole, in one file, with its own heading.
+    holder = seg if "an entry with a fence" in seg else live
+    assert holder.count("```") == 2 and "## this is not a heading" in holder
+    # POSITIVE CONTROL: the window did move something, so none of this is "nothing happened".
+    assert "## real 0" in seg
+
+
+def test_a_differently_spelled_vault_path_does_not_crash(mod, vault, tmp_path):
+    """`/tmp` against `/private/tmp` on macOS: two spellings of one directory. `relative_to` raises
+    on that, and the reviewer reproduced the crash. Nothing in production reaches it today — which
+    is the kind of latent break that surfaces under a symlinked worktree at the worst moment."""
+    (vault / "Proj" / "Kernel.md").write_text("# Boot\n")
+    link = tmp_path / "vault-by-another-name"
+    link.symlink_to(vault)
+    assert mod.oversize_boot_files(link) == []            # no crash, and no false finding
+    stale, unchecked = mod.stale_boot_files(link)
+    assert isinstance(stale, list) and isinstance(unchecked, list)
+
+
+def test_the_splitter_round_trips_every_byte(mod):
+    """`head + "".join(entries)` must reproduce the window EXACTLY, because that identity is what
+    makes the compaction's byte conservation an equality rather than an approximation. A splitter
+    that drops a separator loses a blank line per entry, forever, invisibly."""
+    for window in (
+        "\n## a\nbody\n\n## b\nbody\n",
+        "preamble\n\n## a\nbody\n",
+        "## a\nbody\n",                                   # no leading newline
+        "\n## a\n\n```\n## not a heading\n```\n\n## b\n",
+        "no headings at all\n",
+        "",
+    ):
+        head, entries = mod.split_entries(window)
+        assert head + "".join(entries) == window, repr(window)
+        # And each entry keeps the newline before its heading, because `\n## ` is the unit
+        # `archive.py` splits on — a mismatch there breaks its retry-deduplication silently, and a
+        # slicing splitter that put the newline on the WRONG side would still round-trip.
+        for e in entries:
+            assert e.startswith("\n## ") or window.startswith(e), repr(e[:20])

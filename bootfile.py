@@ -161,7 +161,7 @@ def graduation_candidates(vault: Path) -> list[dict]:
             continue
         total, members = region_payload(region)
         if total > budget():
-            out.append({"region": str(region.relative_to(vault)), "bytes": total,
+            out.append({"region": _rel(vault, region), "bytes": total,
                         "threshold": budget(), "largest": members})
     out.sort(key=lambda r: -r["bytes"])
     return out
@@ -187,7 +187,7 @@ def oversize_boot_files(vault: Path) -> list[dict]:
             state = "WARN"
         else:
             continue
-        out.append({"path": str(f.relative_to(vault)), "bytes": n, "state": state,
+        out.append({"path": _rel(vault, f), "bytes": n, "state": state,
                     "threshold": budget(), "warn": warn_bytes()})
     out.sort(key=lambda r: -r["bytes"])
     return out
@@ -222,7 +222,7 @@ def stale_boot_files(vault: Path) -> tuple[list[dict], list[str]]:
         f = region / BOOT_FILE
         if not f.is_file():
             continue
-        rel_boot = str(f.relative_to(vault))
+        rel_boot = _rel(vault, f)
         own = _last_commit(vault, rel_boot)
         if own is None:
             unchecked.append(f"{rel_boot} (never committed, or git could not be read)")
@@ -232,7 +232,7 @@ def stale_boot_files(vault: Path) -> tuple[list[dict], list[str]]:
             body = region / name
             if not body.is_file():
                 continue
-            rel = str(body.relative_to(vault))
+            rel = _rel(vault, body)
             when = _last_commit(vault, rel)
             if when is None or when == own:
                 continue
@@ -244,6 +244,52 @@ def stale_boot_files(vault: Path) -> tuple[list[dict], list[str]]:
         if moved:
             stale.append({"path": rel_boot, "moved": moved})
     return stale, unchecked
+
+
+def _rel(vault: Path, path: Path) -> str:
+    """`path` relative to `vault`, tolerating two spellings of the same directory.
+
+    `regions()` may return paths spelled as the module's own VAULT while the caller passed an
+    equal-but-differently-spelled path — `/tmp` against `/private/tmp` on macOS is the everyday
+    case — and `Path.relative_to` raises on that. The reviewer reproduced the crash; nothing in
+    production reaches it today, which is exactly the kind of latent break that surfaces under a
+    symlinked worktree at the worst moment."""
+    import os
+    try:
+        return str(path.relative_to(vault))
+    except ValueError:
+        return os.path.relpath(str(path), str(vault))
+
+
+def split_entries(text: str) -> tuple[str, list[str]]:
+    """(head, entries) splitting on a `## ` heading, but NEVER inside a fenced code block.
+
+    ★ A fence is content, not structure. The reviewer built a window entry containing a code fence
+    with a `## ` line inside it and watched the fence torn across the live file and the archive —
+    the opener carried off, the orphaned closing fence promoted to a spurious live heading.
+    Byte-preserving and structurally corrupting, which is the same spirit as the defect this row
+    was rejected for twice.
+
+    ★ It SLICES the original string rather than reassembling one. The first version joined lines
+    back together with `"\n"` and lost a byte per entry — caught by the round-trip property test
+    rather than by review, which is the only reason it is not in the archive of somebody's memory.
+    `head + "".join(entries) == text` is an identity here, and that is what makes the compaction's
+    conservation check an equality instead of an approximation.
+
+    An entry keeps the newline that precedes its heading, because that is the unit `archive.py`
+    splits on (`\n## `) and a mismatch there would break its retry-deduplication."""
+    fence, offsets, pos = False, [], 0
+    for line in text.splitlines(keepends=True):
+        if not fence and line.startswith("## "):
+            offsets.append(pos - 1 if pos and text[pos - 1] == "\n" else pos)
+        stripped = line.lstrip()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            fence = not fence
+        pos += len(line)
+    if not offsets:
+        return text, []
+    bounds = offsets + [len(text)]
+    return text[:offsets[0]], [text[a:b] for a, b in zip(bounds, bounds[1:])]
 
 
 WINDOW_OPEN = "<!-- gedaechtnis:window -->"
@@ -317,8 +363,7 @@ def roll_window(vault: Path) -> list[dict]:
                                      f"nothing outside them will ever be moved"})
             continue
         fixed, window, tail = parts
-        chunks = window.split("\n## ")
-        head, entries_ = chunks[0], chunks[1:]
+        head, entries_ = split_entries(window)
         if not entries_:
             moved.append({"path": f["path"], "entries": 0, "bytes_before": before,
                           "bytes_after": before, "segments": [],
@@ -332,7 +377,7 @@ def roll_window(vault: Path) -> list[dict]:
         # `compact_file`'s floor does not bind when a file has few large entries — measured by the
         # reviewer, who watched a single 39,000 B entry compact a file to 36 bytes.
         while n < len(entries_) - 1 and size - removed > target:
-            removed += len(("\n## " + entries_[n]).encode("utf-8"))
+            removed += len(entries_[n].encode("utf-8"))
             n += 1
         if not n:
             moved.append({"path": f["path"], "entries": 0, "bytes_before": before,
@@ -340,10 +385,10 @@ def roll_window(vault: Path) -> list[dict]:
                           "skipped": "its window's entries are too large to move even one without "
                                      "emptying it"})
             continue
-        outgoing = ["\n## " + e for e in entries_[:n]]
+        outgoing = entries_[:n]
         try:
             archive.append_entries(live, "".join(outgoing))
-            kept = "\n## " + "\n## ".join(entries_[n:]) if entries_[n:] else "\n"
+            kept = "".join(entries_[n:]) if entries_[n:] else "\n"
             archive.atomic_write(live, fixed + head + kept + tail)
         except (OSError, ValueError) as e:
             moved.append({"path": f["path"], "entries": 0, "bytes_before": before,

@@ -533,6 +533,24 @@ def compact_vault() -> list[dict]:
     for path in sorted(memory_files()):
         if archive.is_sidecar(path.stem):
             continue
+        if path.name == bootfile.BOOT_FILE:
+            # ★ A BOOT FILE BELONGS TO `bootfile.roll_window` AND TO NOTHING ELSE. This generic
+            # compactor moves a file's OLDEST `## ` sections, which is right for a role file that
+            # grows chronologically and catastrophic for a Boot file, whose sections are named and
+            # structural: it deletes `## Standing constraints` — binding NEVER rules — out of the
+            # one file every session loads, and nothing afterwards disagrees.
+            #
+            # Row R6 built the safe path (a window the file's author DECLARES between two markers)
+            # and its reviewer found this door still open beside it, reproducing the original wipe
+            # through here: `main` runs this function FIRST, so for any Boot file over the generic
+            # bound the unsafe compactor got there before the careful one. One compactor per file
+            # class, and this one does not own this class.
+            #
+            # The cost is named rather than hidden: a Boot file that declares no window now stays
+            # large. That is the intended trade — it is REPORTED every session, with the reason and
+            # the two marker lines to add, and a large always-loaded file is a bill, while a
+            # silently deleted standing rule is a wrong answer nobody can see.
+            continue
         if True:
             try:
                 n = archive.compact_file(path)
