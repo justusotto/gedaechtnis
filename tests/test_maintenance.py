@@ -671,3 +671,41 @@ def test_a_file_ALREADY_over_the_search_ceiling_is_still_compacted(world):
     run_stop(world)
     assert live.stat().st_size <= 4000, "a file past the search ceiling was never compacted"
     assert state_doc(world)["compacted"], "compaction happened but was not recorded"
+
+
+# ------------------------------------------------- the population both arms walk ----
+def test_a_cleanup_bundle_receipt_is_not_a_role_file(world):
+    """★ The bundle mirrors the vault's own relative paths, so a removed `Canon` entry lands at
+    `Cleanup/<date>/removed/<region>/Canon.md` — SAME STEM as the file it came out of. Both this
+    arm and the unsearchable arm used to walk the vault themselves, with no directory rules at all,
+    and a reviewer reproduced the consequence: a bundle receipt reported as an oversize role file,
+    indistinguishable from the live file it mirrors, on the owner-facing status surface. Every stem
+    in the limits table eventually acquires such a receipt, and the bundle only grows."""
+    live = world["vault"] / "Proj" / "Position.md"
+    live.write_text("live\n" * 12)                          # limit is 10 in the fixture
+    receipt = world["vault"] / "Cleanup" / "2026-09-14" / "removed" / "Proj" / "Position.md"
+    receipt.parent.mkdir(parents=True)
+    receipt.write_text("removed\n" * 50)
+    set_last(world)
+    run_stop(world)
+    flagged = [f["path"] for f in state_doc(world)["cleanup"]["arms"]["size_lines"]["files"]]
+    # POSITIVE CONTROL first: the arm did run and did see the real file. Without this line the
+    # assertion below passes just as well against an arm that looked at nothing.
+    assert "Proj/Position.md" in flagged, flagged
+    assert not any(f.startswith("Cleanup/") for f in flagged), flagged
+
+
+def test_a_cleanup_bundle_receipt_is_not_reported_as_unsearchable(world):
+    """Same population, same reason. A receipt over the search ceiling is not a memory file the
+    search declined to read — it is content the user's own cleanup removed."""
+    big = world["vault"] / "Cleanup" / "2026-09-14" / "removed" / "Proj" / "Canon.md"
+    big.parent.mkdir(parents=True)
+    big.write_text("x" * (int(LIMITS.get("max_searchable_file_bytes", 2_000_000)) + 10)
+                   if "max_searchable_file_bytes" in LIMITS else "x" * 2_000_010)
+    live = world["vault"] / "Proj" / "Canon.md"
+    live.write_text("y" * 2_000_010)
+    set_last(world)
+    run_stop(world)
+    blind = [f["path"] for f in state_doc(world)["unsearchable"]["files"]]
+    assert "Proj/Canon.md" in blind, blind                  # the arm ran and can see a real file
+    assert not any(f.startswith("Cleanup/") for f in blind), blind

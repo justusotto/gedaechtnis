@@ -224,21 +224,24 @@ def topology_events(since: str) -> tuple[list[str], bool]:
 # ------------------------------------------------------------------- size ----
 def oversize_role_files() -> list[dict]:
     """Role files over their per-role LINE limit. A stem with no entry in the table has no line
-    limit and is never flagged by this arm — that is the table's meaning, not an omission."""
+    limit and is never flagged by this arm — that is the table's meaning, not an omission.
+
+    ★ THE POPULATION IS `memory_files()`, not a bare `rglob`. This arm and `unsearchable_files()`
+    each walked the vault themselves, so none of the directory rules applied to either — and row
+    R2's cleanup bundle mirrors the vault's own relative paths, which means the copy of a removed
+    entry lands at `Cleanup/<date>/removed/<region>/Canon.md`, with the SAME STEM as the file it
+    came out of. A reviewer reproduced the result: a 50-line bundle receipt was reported as an
+    oversize `Canon`, indistinguishable from the live file it mirrors, on the owner-facing status
+    surface this arm feeds. Every stem in the limits table will eventually acquire such a receipt,
+    and the bundle only ever grows."""
     table = limits.get("role_soft_limits_lines")
     if not isinstance(table, dict) or not table:
         return []
     out = []
-    try:
-        candidates = list(VAULT.rglob("*.md"))
-    except OSError:
-        return []
-    for md in candidates:
+    for md in memory_files():
         try:
             rel = md.relative_to(VAULT)
         except ValueError:
-            continue
-        if any(part.startswith(".") for part in rel.parts):
             continue
         limit = table.get(md.stem)
         if not isinstance(limit, int):
@@ -268,16 +271,10 @@ def unsearchable_files() -> list[dict]:
     the half of the fix that survives a future change to the compactor."""
     ceiling = int(limits.get("max_searchable_file_bytes"))
     out = []
-    try:
-        candidates = list(VAULT.rglob("*.md"))
-    except OSError:
-        return []
-    for md in candidates:
+    for md in memory_files():                    # the same population, for the same reason
         try:
             rel = md.relative_to(VAULT)
         except ValueError:
-            continue
-        if any(part.startswith(".") for part in rel.parts):
             continue
         try:
             size = md.stat().st_size
