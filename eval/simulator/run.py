@@ -42,8 +42,11 @@ Nothing here re-derives a number the plugin already computes.
   low         one quiet repo, 3 sessions/week: 2,000 B/session across role files, 500 B/session in
               the boot file. The PER-SESSION rates are MEASURED (three vault regions, 2026-09-11);
               the cadence is assumed.
-  medium      MEASURED: Sinica/ChongjuTrainer day 7->30 = 144,764 B / 23 d = 6,294 B/day region;
-              Position.md 671 B/commit x 3.2 commits/day = 2,147 B/day boot file.
+  medium      MEASURED, on the busiest region of the vault this plugin was developed against,
+              day 7->30 of that project: 144,764 B / 23 d = 6,294 B/day across role files;
+              Position.md 671 B/commit x 3.2 commits/day = 2,147 B/day in the boot file. It is one
+              project's rate, not a population estimate — it is here because a measured rate from
+              one real vault beats an invented one, not because it is typical.
   high        PROJECTED, 4x medium.       extra-high  PROJECTED, 12x medium ("fast and wild").
   none        zero growth. The NEGATIVE CONTROL arm: a harness that only ever sees a vault cross
               its budget cannot tell you whether crossing it is what triggered anything.
@@ -65,8 +68,8 @@ offered as the CONTROL that shows why the plan does not use one.
   - It does not model a user reading, editing or reorganising anything. Growth is append-only.
   - It writes no prose a model wrote. Entries are generated from a seeded RNG, so recall is
     measured against synthetic text whose vocabulary is uniform — an easier corpus than a real
-    vault. Treat tool_recall as an UPPER bound, and the real number as the recall bench's
-    (42/60 on the live vault, 2026-09-10).
+    vault. Treat tool_recall as an UPPER bound: on a real vault the recall bench scores well
+    below it (42 of 60 questions, 2026-09-10).
   - It never touches the real vault or the real state directory: every path comes from a temp
     sandbox through the plugin's own env seam (GEDAECHTNIS_VAULT / _STATE_DIR / _CONFIG / HOME).
 """
@@ -100,7 +103,7 @@ CURVES = ("linear", "exponential", "bursty")
 LOADS = {
     "none": (0.0, 0.0, "control: no growth"),
     "low": (2000 * 3 / 7, 500 * 3 / 7, "projected from MEASURED per-session rates"),
-    "medium": (6294.0, 2147.0, "MEASURED (ChongjuTrainer, day 7->30)"),
+    "medium": (6294.0, 2147.0, "MEASURED (one active project, day 7->30)"),
     "high": (6294.0 * 4, 2147.0 * 4, "projected, 4x medium"),
     "extra-high": (6294.0 * 12, 2147.0 * 12, "projected, 12x medium"),
 }
@@ -145,8 +148,8 @@ class Sandbox:
 
     Every path the plugin could reach is redirected through its documented env seam, and the
     sandbox root is a fresh temp directory per run: no test, and no run of this harness, can read
-    or write the machine's real vault or state directory. (Global/Errata: "a test suite that
-    writes the application's REAL sidecar makes its own verdict depend on the machine's state".)
+    or write the machine's real vault or state directory: a test suite that writes the
+    application's REAL sidecar makes its own verdict depend on the machine's state.
     """
 
     def __init__(self, root: Path, region: str = "project"):

@@ -49,8 +49,8 @@ def grow(sb, n, stem=sim.BOOT_STEM, seed=1, day=1):
 def test_sandbox_never_touches_the_real_state(sandbox, tmp_path):
     """Every path the plugin resolves under this env must be inside tmp_path.
 
-    The rule this enforces (Global/Errata): a test suite that writes the application's REAL
-    sidecar makes its own verdict depend on the machine's state."""
+    The rule this enforces: a test suite that writes the application's REAL sidecar makes its
+    own verdict depend on the machine's state."""
     env = sandbox.env
     for key in ("GEDAECHTNIS_VAULT", "GEDAECHTNIS_STATE_DIR", "GEDAECHTNIS_CONFIG",
                 "GEDAECHTNIS_USER_MEMORY", "HOME"):
