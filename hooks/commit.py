@@ -145,26 +145,37 @@ def staged_of(paths: list[str]) -> list[str]:
     return [p for p in out.split("\0") if p]
 
 
-def main() -> None:
-    inp = read_input()
+def auto_commit(inp: dict, select, subject_for, tag: str = "") -> None:
+    """The whole commit, parameterised by WHICH of the session's paths this invocation owns.
+
+    `select(sid, prefixes)` returns the vault-relative candidate paths; everything after it —
+    the off switch, the lane fail-safe, the dirty intersection, the explicit `git add --`, the
+    read-back pathspec, the logging — is identical for every caller, and deliberately so. The
+    Stop hook passes the session's touched set; `subagent_stop.py` passes one subagent's paths
+    minus the parent's own. There is exactly one implementation of the vault's git law here, and
+    a second entry point that copied it would be a second thing to keep correct.
+
+    `tag` is an extra field for the log line (e.g. the agent id), so `commit.log` stays the one
+    place a reader goes to find out what was committed and on whose behalf."""
     cwd = inp.get("cwd") or os.getcwd()
     sid = inp.get("session_id", "-")
+    pre = f"sid={sid}" + (f" {tag}" if tag else "")
     if not config.flag("auto_commit", True):
-        log("commit", f"sid={sid} cwd={cwd} auto_commit=off action=staged-nothing exit=clean")
+        log("commit", f"{pre} cwd={cwd} auto_commit=off action=staged-nothing exit=clean")
         return
     lane, prefixes, marker = lane_for(cwd)
     if not lane or not prefixes:
         # The fail-safe. One line, outside the vault, and no commit: an unknown lane has no
         # partition, and a hook that guesses one commits somebody else's work under this name.
-        log("commit", f"sid={sid} lane=UNKNOWN cwd={cwd} marker={marker or 'none'} "
+        log("commit", f"{pre} lane=UNKNOWN cwd={cwd} marker={marker or 'none'} "
                       f"action=staged-nothing exit=clean")
         return
     if not (VAULT / ".git").exists():
-        log("commit", f"sid={sid} lane={lane} vault={VAULT} not-a-git-repo action=staged-nothing")
+        log("commit", f"{pre} lane={lane} vault={VAULT} not-a-git-repo action=staged-nothing")
         return
-    mine = [p for p in touched_paths(sid) if path_in_partition(p, prefixes)]
+    mine = [p for p in select(sid, prefixes) if path_in_partition(p, prefixes)]
     if not mine:
-        return                                        # this session wrote nothing here: say nothing
+        return                                        # nothing of ours here: say nothing
     dirty = dirty_paths()
     to_stage = [p for p in mine if is_dirty(p, dirty)]
     if not to_stage:
@@ -172,29 +183,35 @@ def main() -> None:
         # session that edited the same file stopped first and carried both sets of edits. That
         # is the designed outcome, not a failure, but it is logged so a reader can tell it from
         # a session whose work vanished.
-        log("commit", f"sid={sid} lane={lane} nothing-left-to-commit "
+        log("commit", f"{pre} lane={lane} nothing-left-to-commit "
                       f"(already committed elsewhere): {' '.join(mine)}")
         return
     for i in range(0, len(to_stage), CHUNK):
         rc, _out, err = git(["add", "--", *to_stage[i:i + CHUNK]])
         if rc != 0:
-            log("commit", f"sid={sid} lane={lane} stage FAILED rc={rc} detail={err[:200]!r}")
+            log("commit", f"{pre} lane={lane} stage FAILED rc={rc} detail={err[:200]!r}")
     paths = staged_of(to_stage)
     if not paths:
-        log("commit", f"sid={sid} lane={lane} commit SKIPPED (nothing staged) "
+        log("commit", f"{pre} lane={lane} commit SKIPPED (nothing staged) "
                       f"left-uncommitted={' '.join(to_stage)}")
         return
-    subject = f"session-end auto-commit: [{lane}] {time.strftime('%Y-%m-%d')}"
+    subject = subject_for(lane)
     rc, _out, err = git(["-c", f"user.name={GIT_NAME}", "-c", f"user.email={GIT_EMAIL}",
                          "commit", "-q", "-m", subject, "--", *paths], timeout=60)
     if rc == 0:
-        log("commit", f"sid={sid} lane={lane} committed={len(paths)} subject={subject!r}")
+        log("commit", f"{pre} lane={lane} committed={len(paths)} subject={subject!r}")
     else:
         # Honest about its own failure: the log is where a reader goes to find out what the hook
         # did, and a swallowed refusal there is worse than the failure it hides.
-        log("commit", f"sid={sid} lane={lane} commit FAILED rc={rc} paths={len(paths)} "
+        log("commit", f"{pre} lane={lane} commit FAILED rc={rc} paths={len(paths)} "
                       f"detail={err[:200]!r}")
-        log("commit", f"sid={sid} lane={lane} uncommitted-after-failure: {' '.join(paths)}")
+        log("commit", f"{pre} lane={lane} uncommitted-after-failure: {' '.join(paths)}")
+
+
+def main() -> None:
+    auto_commit(read_input(),
+                lambda sid, _prefixes: touched_paths(sid),
+                lambda lane: f"session-end auto-commit: [{lane}] {time.strftime('%Y-%m-%d')}")
 
 
 if __name__ == "__main__":

@@ -16,7 +16,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))   # logstore/importer, imported LAZILY below
 from common import (read_input, context, log, expand, under, vault_rel, fleet_repos, VAULT, STATE, guarded,
                     lane_for, path_in_partition, region_of_repo, repo_root_of, shared_surface,
-                    record_touched, was_created, record_created, release_filelock, ROLE_STEMS)
+                    record_touched, record_agent_touched, record_direct_touched,
+                    was_created, record_created, release_filelock, ROLE_STEMS)
 import names
 import context_economy
 
@@ -278,6 +279,15 @@ def do_write(inp: dict) -> None:
     # instead committed "everything dirty in the partition" would sweep a sibling session's
     # half-written file, which is the one collision class actually measured in this vault.
     record_touched(sid, rel)
+    # WHO inside the session wrote it. A subagent's tool call carries `agent_id`; the parent's own
+    # calls carry none. Splitting the record here — and only here, where the evidence exists — is
+    # what lets SubagentStop commit that subagent's paths without touching the parent's in-flight
+    # ones. Both records are additive: `touched` above stays the parent Stop's authority unchanged.
+    agent_id = inp.get("agent_id")
+    if isinstance(agent_id, str) and agent_id:
+        record_agent_touched(sid, agent_id, rel)
+    else:
+        record_direct_touched(sid, rel)
     notes = []
     row_note = log_session_edit(rel, p)
     if row_note:

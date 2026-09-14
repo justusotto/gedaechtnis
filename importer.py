@@ -42,7 +42,7 @@ import logstore
 from logstore import VAULT, STEMS
 
 SKIP_TOP = ("Concilium", "Pharos", "Channels", "Workflows", "Limen")
-SIDECAR = re.compile(r"-(archive|fixed|resolved)$")
+SIDECAR = re.compile(r"-(archive|fixed|resolved)(?:-\d+)?$")   # `-archive-2`: a segment is a sidecar too (R3)
 
 # The stem a memory entry came from decides what KIND of thing it is. This is the whole of the
 # generalisation from `ledger.py`'s lane kinds: a Canon entry is a decision wherever it lives.

@@ -217,7 +217,7 @@ def escape_rate() -> dict:
 
 # ------------------------------------------------------------------ 3. live counter ----
 
-ROLE_PATH = re.compile(r"(?:^|/)(?:" + "|".join(STEMS) + r")(?:-archive|-fixed|-resolved)?\.md$")
+ROLE_PATH = re.compile(r"(?:^|/)(?:" + "|".join(STEMS) + r")(?:(?:-archive|-fixed|-resolved)(?:-\d+)?)?\.md$")
 
 
 def is_live_role_path(path: str) -> bool:

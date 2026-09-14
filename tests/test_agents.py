@@ -13,7 +13,7 @@ import pytest
 
 PLUGIN = Path(__file__).resolve().parents[1]
 AGENTS = PLUGIN / "agents"
-EXPECTED = {"memory-debriefer", "memory-reviewer"}
+EXPECTED = {"memory-debriefer", "memory-reviewer", "memory-cleaner"}
 CORE_SIX = ("Map", "Position", "Canon", "Patterns", "Errata", "Aporia")
 
 
@@ -32,7 +32,7 @@ def body(path: Path) -> str:
     return path.read_text(encoding="utf-8").split("---\n", 2)[2]
 
 
-def test_both_agents_exist_and_are_registered():
+def test_every_agent_exists_and_is_registered():
     assert {p.stem for p in AGENTS.glob("*.md")} == EXPECTED
     manifest = json.loads((PLUGIN / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
     # 2026-09-10: the `agents` manifest key is GONE on purpose — Claude Code's validator rejected

@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "what": "Cross-vendor model-tier correspondence. A memory vault's agent definitions name a model by its HOME vendor's id; running those agents on another vendor's harness needs a tier map, or every agent silently collapses onto whatever the session happens to run.",
+  "how": "A tier is a rough capability/price band, not an equivalence. Entries are a starting point for routing, never a claim that two models behave alike. Availability is NOT recorded here: it is per-account and is checked against the live model list when the map is applied, so a model absent from a plan falls back to the harness default instead of pinning an id that errors.",
+  "tiers": {
+    "frontier": {"anthropic": "fable", "openai": "gpt-6-astra"},
+    "high":     {"anthropic": "opus",   "openai": "gpt-5.6-sol"},
+    "standard": {"anthropic": "sonnet", "openai": "gpt-5.6-terra"},
+    "small":    {"anthropic": "haiku",  "openai": "gpt-5.6-luna"}
+  },
+  "caveats": {
+    "small": "The small-tier pairing is provisional: the OpenAI side is newer than the Anthropic model it stands in for and may be stronger than the band suggests. Re-check before relying on it for a cost-sensitive route."
+  }
+}

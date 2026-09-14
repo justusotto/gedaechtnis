@@ -12,7 +12,8 @@ import pytest
 
 PLUGIN = Path(__file__).resolve().parents[1]
 COMMANDS = PLUGIN / "commands"
-EXPECTED = {"gedaechtnis-status", "gedaechtnis-recall", "gedaechtnis-debrief"}
+EXPECTED = {"gedaechtnis-status", "gedaechtnis-recall", "gedaechtnis-debrief",
+            "gedaechtnis-cleanup"}
 
 
 def frontmatter(path: Path) -> dict:
@@ -32,7 +33,7 @@ def body(path: Path) -> str:
 
 
 # ------------------------------------------------------------------ the command files ----
-def test_the_three_commands_exist_and_are_registered():
+def test_every_command_exists_and_is_registered():
     names = {p.stem for p in COMMANDS.glob("*.md")}
     assert names == EXPECTED, names
     manifest = json.loads((PLUGIN / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))

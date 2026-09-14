@@ -64,8 +64,12 @@ def _readable(raw, base=None) -> Path | None:
         return None
 
 
-def boot_chain(entrypoints, max_hops=MAX_IMPORT_HOPS):
-    """-> (total_bytes, n_files) for the closure of `entrypoints` under @-import.
+def boot_chain_files(entrypoints, max_hops=MAX_IMPORT_HOPS):
+    """-> [(path, size_bytes)] for the closure of `entrypoints` under @-import.
+
+    The walk `boot_chain` sums, exposed so a caller that needs to NAME the chain's members (the
+    maintenance hook's byte arm) does not write a second @-import resolver. Two answers to "what
+    does a session load" inside one package is the duplicated-fact failure this package records.
 
     The entrypoints are COUNTED: they are loaded into the session as surely as anything they
     pull in, and a boot cost that omits them is not the boot cost. Deduplicated by realpath, so
@@ -96,13 +100,19 @@ def boot_chain(entrypoints, max_hops=MAX_IMPORT_HOPS):
         if not nxt:
             break
         frontier = nxt
-    total = 0
-    for p in seen:
+    members = []
+    for p in sorted(seen):
         try:
-            total += p.stat().st_size
+            members.append((p, p.stat().st_size))
         except OSError:                          # vanished between the walk and the stat
             pass
-    return total, len(seen)
+    return members
+
+
+def boot_chain(entrypoints, max_hops=MAX_IMPORT_HOPS):
+    """-> (total_bytes, n_files), the boot-cost fact's own two numbers."""
+    members = boot_chain_files(entrypoints, max_hops)
+    return sum(size for _, size in members), len(members)
 
 
 def sh(args, cwd=None, timeout=8):
@@ -166,6 +176,20 @@ def main() -> None:
     if boot_files:
         lines.append(f"- boot: {boot_bytes:,} B across {boot_files} files (@-import chain) — the user-level "
                      "CLAUDE.md, this repo's, and everything they @-import, transitively. A measurement, not a budget.")
+    # What the previous session end computed about upkeep. Read, never recomputed: measuring the
+    # vault at session START would delay the first prompt for something that changed at the end of
+    # the last one. Says nothing at all when nothing fired — see maintenance.facts_lines.
+    try:
+        import maintenance
+        _m = maintenance.read_state()
+        if _m:
+            lines.extend(maintenance.facts_lines(_m))
+    except Exception:                                  # a maintenance bug must not cost a session its facts
+        # ...but it must not vanish either. Every other guarded block in this package logs before
+        # it swallows (`common.guarded`); a bare `pass` here would drop a DUE cleanup with nothing
+        # anywhere to distinguish that from nothing having fired.
+        import traceback as _tb
+        log("hook-errors", "session_start/maintenance: " + _tb.format_exc().replace("\n", " | "))
     ops = config.owner_pages_status()                  # None unless config.json names a script
     if ops:
         rc, out, err = sh([config.python(), str(ops), "--json"], timeout=8)
@@ -274,21 +298,94 @@ def no_memory_line(cwd: str) -> str:
             'about it.')
 
 
+ONLY_IF_RE = re.compile(r"<!--only-if:([a-z_]+)-->(.*?)<!--/only-if-->", re.S)
+# Any sentinel the pass above did not consume — one that is unclosed, or nested inside a span that
+# was kept, since `re.sub` makes ONE pass over the original string and never revisits what it
+# emitted. Such a marker would otherwise travel verbatim into the model's context. Stripping it
+# KEEPS the surrounding text, which is the same safe direction as an unknown condition name: a
+# malformed sentinel leaves a rule in, never takes one out.
+LEFTOVER_SENTINEL_RE = re.compile(r"<!--/?only-if(?::[a-z_]+)?-->")
+
+
+def rules_conditions() -> dict[str, bool]:
+    """Which conditional paragraphs of the rules apply to THIS vault.
+
+    A condition is only ever "this paragraph cannot apply here" — never "this user probably does
+    not need to be told". The distinction is the whole safety of the mechanism: a session that is
+    not told a rule does not follow it, and nothing says so afterwards.
+
+    - `kernel` — the vault has at least one boot file. Telling a session about a file class its
+      vault does not contain is describing somebody else's vault.
+    - `reviewer` — the `memory-reviewer` agent is installed. A trimmed install that lacks it
+      cannot route anything to it, and an instruction to use a tool that is not there is worse
+      than silence: it invites the model to invent a substitute."""
+    plugin = Path(__file__).resolve().parent.parent
+    has_kernel = False
+    # ★ THE EXCLUSIONS ARE recall's, not a dot-check of our own. A retired boot file legitimately
+    # ends up inside a `Cleanup/` bundle — this package's own rules say nothing is deleted, it is
+    # moved there — and a bespoke walk would then report a boot file to a vault that, by every
+    # other definition in this package (`maintenance.memory_files()` unions exactly these four
+    # sets), no longer has one. `.git` and `.gedaechtnis` were excluded only because they happen
+    # to start with a dot, which is coincidence rather than agreement.
+    try:
+        sys.path.insert(0, str(plugin))
+        import recall
+        skip = (set(recall.SKIP_DIRS) | set(recall.NON_MEMORY_DIRS)
+                | set(recall.GENERATED_DIRS) | set(recall.REMOVED_DIRS))
+    except Exception:
+        skip = {".git", "Cleanup", "Pharos", "Channels", ".gedaechtnis"}
+    try:
+        for dirpath, dirnames, filenames in os.walk(VAULT):
+            dirnames[:] = [d for d in dirnames if d not in skip and not d.startswith(".")]
+            if "Kernel.md" in filenames:
+                has_kernel = True
+                break
+    except OSError:
+        has_kernel = False
+    return {"kernel": has_kernel,
+            "reviewer": (plugin / "agents" / "memory-reviewer.md").is_file()}
+
+
+def assemble_rules(text: str, conditions: dict[str, bool]) -> str:
+    """The rules with each conditional span kept or dropped, and the seams tidied.
+
+    An UNKNOWN condition name is KEPT, never dropped. A typo in a sentinel would otherwise delete
+    a rule from every session silently, which is the one failure this mechanism must not be able
+    to cause — and the direction of that default is the only thing protecting it.
+
+    Spans do NOT nest, and a malformed one is survivable rather than fatal. `re.sub` makes one
+    pass over the original string, so a span inside a kept span is never reprocessed and an
+    unclosed span never matches at all; either way the raw HTML comment would ship into a model's
+    context. Both are stripped afterwards, keeping the text. **A consequence worth knowing before
+    editing the rules: the sentinel syntax cannot be shown literally in the rules prose**, because
+    this strip would eat it. A test lints the shipped file for balance and nesting so a bad edit
+    fails at build time rather than reaching a session."""
+    def keep(m):
+        return m.group(2) if conditions.get(m.group(1), True) else ""
+    out = ONLY_IF_RE.sub(keep, text)
+    out = LEFTOVER_SENTINEL_RE.sub("", out)
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    return "\n".join(line.rstrip() for line in out.splitlines()).strip()
+
+
 def rules_block(source) -> list[str]:
     """The operating rules, at `startup` only, or [] — see the module docstring.
 
     A source Claude Code did not send (an absent key, a direct invocation) is treated as a
     startup: the failure that matters is a session running with no rules at all, and repeating
-    them on a resume costs only tokens."""
+    them on a resume costs only tokens.
+
+    The text is ASSEMBLED for the vault in front of it rather than shipped whole — see
+    `rules_conditions` for what may vary and, more importantly, for what may not."""
     if (source or "startup") != "startup" or not config.flag("inject_rules", True):
         return []
     rules = Path(__file__).resolve().parent.parent / "rules" / "operating-rules.md"
     try:
-        text = rules.read_text(encoding="utf-8").strip()
+        text = rules.read_text(encoding="utf-8")
     except OSError:                                  # a trimmed install without the rules file
         return []
     return ["", "The operating rules for this vault (from the Gedächtnis plugin; they are how "
-                "you write to it):", "", text]
+                "you write to it):", "", assemble_rules(text, rules_conditions())]
 
 
 if __name__ == "__main__":

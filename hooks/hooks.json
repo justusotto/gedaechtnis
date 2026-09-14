@@ -118,6 +118,22 @@
             "type": "command",
             "command": "python3 -B \"${CLAUDE_PLUGIN_ROOT}\"/hooks/commit.py",
             "timeout": 60
+          },
+          {
+            "type": "command",
+            "command": "python3 -B \"${CLAUDE_PLUGIN_ROOT}\"/hooks/maintenance.py",
+            "timeout": 60
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -B \"${CLAUDE_PLUGIN_ROOT}\"/hooks/subagent_stop.py",
+            "timeout": 60
           }
         ]
       }
