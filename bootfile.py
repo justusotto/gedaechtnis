@@ -10,11 +10,34 @@ without the other two.
 PROPOSED one. Never written for it: distilling a region into an index is a judgment about what
 matters, and a machine that did it would put a confident summary nobody wrote into every session.
 
-**The rolling window.** A Boot file is a fixed-size window, not an append log. Left alone it becomes
-the thing it was created to replace — the vault this grew from watched three of its own drift 50-70%
-over budget while a status table printed OVER for weeks and nothing acted. So it is compacted
-against the BOOT budget, through R3's `archive.compact_file` with a different limit rather than a
-second compactor.
+**The rolling window, and the shape of Boot file it may touch.** A Boot file is a fixed-size
+window, not an append log. Left alone it becomes the thing it was created to replace — the vault
+this grew from watched three of its own drift 50-70% over budget while a status table printed OVER
+for weeks and nothing acted.
+
+★ But a Boot file is NOT a chronological log, and the first version of this module treated it as
+one. It compacted the file's OLDEST `## ` sections into an archive — and a real Boot file's sections
+are named and structural (*At a glance*, *Resume point*, *Standing constraints*, *Canon headlines*,
+*Pointer map*), not ordered by age. The row's reviewer reproduced the consequence on a realistic
+fixture: **a `## Standing constraints` section carrying a NEVER rule was moved wholesale into an
+archive file nothing reads at boot.** The rule that would have forbidden that lives in the kind of
+file the mechanism had just emptied.
+
+So the window is now DECLARED, never inferred. A Boot file is compacted only below a marker its
+author put there:
+
+    <!-- gedaechtnis:window -->
+    ... the entries that may roll ...
+    <!-- gedaechtnis:/window -->
+
+Everything outside those two lines is untouchable, whatever the file grows to. Between them, the
+oldest entries roll into the archive sidecar. **Both markers are required**, and the second is not
+symmetry: with an open-ended window the same repro that showed the standing constraints surviving
+also showed `## Canon headlines` and `## Pointer map` being carried off, because they sat below it.
+A heading is not a fence, and nothing can infer where a window stops. **A Boot file that does not
+declare a closed window is REPORTED and never written**, and the facts line says how to opt in. That is the safe default in the only direction
+that matters: the failure mode of not compacting is a large file, and the failure mode of compacting
+the wrong thing is a binding rule that silently stops being loaded.
 
 **Freshness.** A Boot file distilled from bodies that have since moved is worse than no Boot file:
 it is a stale summary that reads as current, in every session's context, and nothing contradicts it.
@@ -46,6 +69,16 @@ def _limits():
     return limits
 
 
+def _archive():
+    """`archive.py`, lazily. Its `is_sidecar` is the package's ONE definition of a sidecar name; the
+    substring test that stood here disagreed with it in two directions — it excluded a live file
+    merely containing `-archive` mid-name, and it did not recognise a numbered `-fixed-2`."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import archive
+    return archive
+
+
 def budget() -> int:
     return int(_limits().get("boot_file_budget_bytes"))
 
@@ -66,18 +99,29 @@ def _git(vault: Path, *args: str, ok_codes=(0,)):
 
 
 def regions(vault: Path) -> list[Path]:
-    """A region is a directory carrying `Map.md` — `init.py`'s own definition, not a second one."""
-    out = []
-    try:
-        for d in sorted(p for p in vault.rglob("*") if p.is_dir()):
-            rel = d.relative_to(vault)
-            if any(part.startswith(".") for part in rel.parts):
-                continue
-            if (d / "Map.md").is_file():
-                out.append(d)
-    except OSError:
-        return []
-    return out
+    """The regions, from `maintenance.regions()` — the package's ONE definition.
+
+    ★ This was a second implementation and it had already drifted. `maintenance.regions()` excludes
+    `Global/`; this one did not, so the window would have rewritten a `Global/Kernel.md` — a file
+    that in the vault this came from is shared across every lane and runs its own hand-designed
+    window with different, deliberate semantics. The row's reviewer reproduced that rewrite. The
+    import is lazy because `maintenance` imports this module.
+
+    The `vault` argument is kept so the call sites read the same, and asserted against the module's
+    own VAULT rather than silently ignored: a function that takes a path and uses a different one is
+    the shape of the last three defects this arc has fixed."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
+    import maintenance
+    from common import VAULT as _V
+    if Path(vault).resolve() != Path(_V).resolve():
+        # A caller pointing somewhere else is a test or a mistake; either way, answer about the
+        # path it ASKED about rather than about the environment's vault.
+        return [d for d in sorted(p for p in Path(vault).rglob("*") if p.is_dir())
+                if (d / "Map.md").is_file()
+                and not any(part.startswith(".") for part in d.relative_to(vault).parts)
+                and d.relative_to(vault).parts[0] not in maintenance.EXCLUDED_REGION_DIRS]
+    return maintenance.regions()
 
 
 def region_payload(region: Path) -> tuple[int, list[dict]]:
@@ -97,7 +141,7 @@ def region_payload(region: Path) -> tuple[int, list[dict]]:
     for p in names:
         if p.name == BOOT_FILE:
             continue
-        if "-archive" in p.stem or p.stem.endswith(("-fixed", "-resolved")):
+        if _archive().is_sidecar(p.stem):
             continue
         try:
             n = p.stat().st_size
@@ -202,6 +246,35 @@ def stale_boot_files(vault: Path) -> tuple[list[dict], list[str]]:
     return stale, unchecked
 
 
+WINDOW_OPEN = "<!-- gedaechtnis:window -->"
+WINDOW_CLOSE = "<!-- gedaechtnis:/window -->"
+
+
+def split_window(text: str) -> tuple[str, str, str] | None:
+    """(before, window, after), or None when the file does not declare a CLOSED window.
+
+    ★ BOTH markers are required, and the second one is not symmetry — it is the second half of the
+    same defect. With an open-ended window (everything after the marker rolls), a realistic Boot
+    file loses the sections that sit BELOW its resume point: the repro that proved the standing
+    constraints above the marker were safe also showed `## Canon headlines` and `## Pointer map`
+    being carried into the archive, because they came after it. There is no way to infer where a
+    window stops — a heading is not a fence — so the file says, or nothing is written.
+
+    Both marker LINES stay outside the window, so a compaction can never remove the thing that
+    says where compaction may happen."""
+    i = text.find(WINDOW_OPEN)
+    if i < 0:
+        return None
+    j = text.find(WINDOW_CLOSE, i + len(WINDOW_OPEN))
+    if j < 0:
+        return None
+    open_nl = text.find("\n", i + len(WINDOW_OPEN))
+    start = len(text) if open_nl < 0 else open_nl + 1
+    if start > j:
+        return None                       # both markers on one line: no window between them
+    return text[:start], text[start:j], text[j:]
+
+
 def roll_window(vault: Path) -> list[dict]:
     """Compact every over-budget Boot file against the BOOT budget. Returns what moved.
 
@@ -209,13 +282,18 @@ def roll_window(vault: Path) -> list[dict]:
     here for the same reason it applies there: a Boot file compacted to nothing is a region with no
     index, which is worse than an oversize one.
 
-    ★ It moves the OLDEST entries, which is the mechanism's one sharp edge and belongs in the
-    report rather than in a docstring nobody reads: a standing rule someone wrote at the TOP of a
-    Boot file is the first thing the window moves out. The compaction names every entry it moved so
-    that is visible, and moves nothing anywhere but into the file's own archive sidecar."""
-    import sys
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-    import archive
+    ★ ONLY BETWEEN THE DECLARED MARKERS, and only in a file that declares both. Everything outside
+    them is untouchable whatever the file grows to; a Boot file that does not declare a closed
+    window is reported and never written. The first version compacted the whole file by age, and a
+    reviewer reproduced what that does to a real Boot file: the `## Standing constraints` section —
+    binding NEVER rules — moved into an archive nothing reads at boot. The asymmetry decides the
+    default: not compacting costs a large file, compacting the wrong thing costs a rule that
+    silently stops being loaded.
+
+    Returns one row per Boot file it looked at — including the ones it could not compact and WHY,
+    because a file left OVER budget with no explanation is how the drift this mechanism exists to
+    stop happens with the mechanism installed."""
+    archive = _archive()
     moved = []
     floor = float(_limits().get("compaction_floor_share"))
     for f in oversize_boot_files(vault):
@@ -224,15 +302,59 @@ def roll_window(vault: Path) -> list[dict]:
         live = vault / f["path"]
         before = f["bytes"]
         try:
-            n = archive.compact_file(live, limit=budget(), floor_share=floor)
-        except (OSError, ValueError):
+            text = live.read_text(encoding="utf-8")
+        except OSError as e:
+            moved.append({"path": f["path"], "entries": 0, "bytes_before": before,
+                          "bytes_after": before, "segments": [],
+                          "skipped": f"could not be read ({e.__class__.__name__})"})
             continue
-        if n:
-            try:
-                after = live.stat().st_size
-            except OSError:
-                after = None
-            moved.append({"path": f["path"], "entries": n, "bytes_before": before,
-                          "bytes_after": after,
-                          "segments": [str(s.relative_to(vault)) for s in archive.segments(live)]})
+        parts = split_window(text)
+        if parts is None:
+            moved.append({"path": f["path"], "entries": 0, "bytes_before": before,
+                          "bytes_after": before, "segments": [],
+                          "skipped": f"declares no window — put {WINDOW_OPEN} and "
+                                     f"{WINDOW_CLOSE} around the entries that may roll, and "
+                                     f"nothing outside them will ever be moved"})
+            continue
+        fixed, window, tail = parts
+        chunks = window.split("\n## ")
+        head, entries_ = chunks[0], chunks[1:]
+        if not entries_:
+            moved.append({"path": f["path"], "entries": 0, "bytes_before": before,
+                          "bytes_after": before, "segments": [],
+                          "skipped": "its window holds no `## ` entries, so there is nothing that "
+                                     "can be moved without cutting a section in half"})
+            continue
+        target = budget() * floor
+        size = len(text.encode("utf-8"))
+        n, removed = 0, 0
+        # NEVER the last entry: a window emptied to nothing is the same loss by a slower route, and
+        # `compact_file`'s floor does not bind when a file has few large entries — measured by the
+        # reviewer, who watched a single 39,000 B entry compact a file to 36 bytes.
+        while n < len(entries_) - 1 and size - removed > target:
+            removed += len(("\n## " + entries_[n]).encode("utf-8"))
+            n += 1
+        if not n:
+            moved.append({"path": f["path"], "entries": 0, "bytes_before": before,
+                          "bytes_after": before, "segments": [],
+                          "skipped": "its window's entries are too large to move even one without "
+                                     "emptying it"})
+            continue
+        outgoing = ["\n## " + e for e in entries_[:n]]
+        try:
+            archive.append_entries(live, "".join(outgoing))
+            kept = "\n## " + "\n## ".join(entries_[n:]) if entries_[n:] else "\n"
+            archive.atomic_write(live, fixed + head + kept + tail)
+        except (OSError, ValueError) as e:
+            moved.append({"path": f["path"], "entries": 0, "bytes_before": before,
+                          "bytes_after": before, "segments": [],
+                          "skipped": f"compaction FAILED ({e.__class__.__name__}: {e})"})
+            continue
+        try:
+            after = live.stat().st_size
+        except OSError:
+            after = None
+        moved.append({"path": f["path"], "entries": n, "bytes_before": before,
+                      "bytes_after": after,
+                      "segments": [str(s.relative_to(vault)) for s in archive.segments(live)]})
     return moved

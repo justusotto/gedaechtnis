@@ -148,6 +148,11 @@ def substantive_commits(since: str) -> tuple[int, int, bool]:
 
 
 # ---------------------------------------------------------------- regions ----
+# Named so a second module can honour the same exclusion instead of restating it. `bootfile.py`
+# restated it once by omission, and the window then rewrote a file this list exists to protect.
+EXCLUDED_REGION_DIRS = ("Global",)
+
+
 def regions() -> list[Path]:
     """Every vault directory carrying `Map.md` — init.py's own definition of a region, so a vault
     laid out flat and one laid out in umbrellas are both read correctly and neither is named here.
@@ -158,7 +163,7 @@ def regions() -> list[Path]:
             rel = mapfile.relative_to(VAULT)
             if any(part.startswith(".") for part in rel.parts):
                 continue
-            if rel.parts[0] == "Global":
+            if rel.parts[0] in EXCLUDED_REGION_DIRS:
                 continue
             found.append(mapfile.parent)
     except OSError:
@@ -309,7 +314,7 @@ def days_between(earlier: str, later: str) -> int | None:
         return None
 
 
-def compute(state: dict, cwd: str, day: str) -> dict:
+def compute(state: dict, cwd: str, day: str, skipped_rolls: list | None = None) -> dict:
     """Both trigger sets, as data. Pure enough to test: everything it reads is the vault, the
     chain and the limits file; everything it returns is JSON."""
     cleanup_days = days_between(str(state.get("last_cleanup", day)), day)
@@ -351,8 +356,15 @@ def compute(state: dict, cwd: str, day: str) -> dict:
     # untidy, and a stale Boot file is not a threshold being approached — it is a summary that
     # reads as current while contradicting the bodies it was distilled from.
     stale, boot_unchecked = bootfile.stale_boot_files(VAULT)
+    oversize = bootfile.oversize_boot_files(VAULT)
+    # `compute` runs AFTER the window in `main`, so a file still listed here is one the window
+    # declined; the reason is attached where the reader meets the size.
+    skips = {r["path"]: r["skipped"] for r in (skipped_rolls or []) if r.get("skipped")}
+    for f in oversize:
+        if f["path"] in skips:
+            f["skipped"] = skips[f["path"]]
     boot = {"graduation": bootfile.graduation_candidates(VAULT)[:EVIDENCE_CAP],
-            "oversize": bootfile.oversize_boot_files(VAULT)[:EVIDENCE_CAP],
+            "oversize": oversize[:EVIDENCE_CAP],
             "stale": stale[:EVIDENCE_CAP],
             "unchecked": boot_unchecked[:EVIDENCE_CAP]}
 
@@ -422,8 +434,10 @@ def facts_lines(doc: dict) -> list[str]:
                    f"would replace these in what a session loads; writing one is a judgment about "
                    f"what matters, so nothing has been written.")
     for f in boot.get("oversize") or []:
+        why = f.get("skipped")
         out.append(f"- Boot file: {f['path']} is {f['bytes']:,} B — {f['state']} "
-                   f"(warn {f['warn']:,} B, budget {f['threshold']:,} B).")
+                   f"(warn {f['warn']:,} B, budget {f['threshold']:,} B)"
+                   + (f", and it was NOT compacted because {why}." if why else "."))
     for s in boot.get("stale") or []:
         out.append(f"- Boot file: {s['path']} is STALE — {', '.join(s['moved'])} moved after it "
                    f"did, so it summarises a state the region has left. It is still loaded every "
@@ -605,13 +619,19 @@ def main() -> None:
     # dirty, and dirt of that kind makes other machinery defer rather than announce itself.
     rolled = bootfile.roll_window(VAULT)
     for r in rolled:
+        if r.get("skipped"):
+            # An over-budget Boot file that was NOT compacted is the interesting case, not the
+            # quiet one: the drift this mechanism exists to stop happens exactly here, with the
+            # mechanism installed. It is logged, and the facts line says why.
+            log("maintenance", f"Boot file {r['path']} NOT rolled: {r['skipped']}")
+            continue
         compacted.append({"path": r["path"], "entries": r["entries"],
                           "paths": [r["path"]] + r["segments"]})
         log("maintenance", f"Boot file {r['path']} rolled: {r['entries']} entry(ies) moved, "
                            f"{r['bytes_before']} -> {r['bytes_after']} B")
     commit_compaction(inp, compacted)
     doc = dict(state)
-    doc.update(compute(state, cwd, day))
+    doc.update(compute(state, cwd, day, skipped_rolls=rolled))
     doc["compacted"] = compacted
     doc["version"] = SCHEMA_VERSION
     new = json.dumps(doc, indent=1, sort_keys=True) + "\n"

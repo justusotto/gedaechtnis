@@ -46,6 +46,16 @@ def commit_all(v: Path, msg: str) -> None:
 
 @pytest.fixture
 def mod(tmp_path, monkeypatch):
+    """The module under test, pointed at a small limits file.
+
+    ★ The redirect is `LIMITS_PATH`, NOT the environment variable, and the difference cost six
+    failures that appeared only in the full suite. `limits.py` resolves `LIMITS_PATH` ONCE at
+    import time; by the time this fixture runs, some earlier test has already imported it, so
+    setting GEDAECHTNIS_LIMITS afterwards moves nothing and every threshold here silently comes
+    from the SHIPPED file. Alone, this file imported limits first and passed. It is the same
+    import-order trap row R2 hit from the other direction, and the general form is worth carrying:
+    **a module that reads its configuration at import time cannot be reconfigured by environment
+    afterwards — redirect the resolved value, not the input it was resolved from.**"""
     limits_file = tmp_path / "limits.json"
     limits_file.write_text(json.dumps(LIMITS))
     monkeypatch.setenv("GEDAECHTNIS_LIMITS", str(limits_file))
@@ -55,9 +65,13 @@ def mod(tmp_path, monkeypatch):
     spec = importlib.util.spec_from_file_location("gd_bootfile", PLUGIN / "bootfile.py")
     m = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(m)
-    m._limits()._reset_for_tests()
+    lim = m._limits()
+    monkeypatch.setattr(lim, "LIMITS_PATH", limits_file)
+    lim._reset_for_tests()
+    assert m.budget() == LIMITS["boot_file_budget_bytes"], \
+        "the fixture failed to redirect the limits; every threshold below would be the shipped one"
     yield m
-    m._limits()._reset_for_tests()
+    lim._reset_for_tests()
 
 
 @pytest.fixture
@@ -74,6 +88,26 @@ def entries(n: int, size: int = 200, first: str = "") -> str:
     head = "# Boot\n"
     body = (f"\n## {first}\n" + "x" * size + "\n") if first else ""
     return head + body + "".join(f"\n## entry {i}\n" + "x" * size + "\n" for i in range(n))
+
+
+def real_boot_file(n_resume: int = 20, size: int = 200, marker: bool = True) -> str:
+    """A Boot file shaped like one a person writes, which is where the first version broke.
+
+    Named structural sections, NOT a chronological log: an index, a resume point that does grow,
+    a standing-constraints section carrying a NEVER rule, and pointers. The reviewer's repro built
+    exactly this and watched the standing constraints move into an archive nothing reads at boot."""
+    resume = "".join(f"\n## resume {i}\n" + "x" * size + "\n" for i in range(n_resume))
+    return ("# Boot\n\n## At a glance\n\nwhat this region is\n"
+            + "\n## Standing constraints\n\nNEVER delete a memory file.\n"
+            + ("\n" + WINDOW_OPEN + "\n" if marker else "")
+            + resume
+            + ("\n" + WINDOW_CLOSE + "\n" if marker else "")
+            + "\n## Canon headlines\n\nlocked decisions\n"
+            + "\n## Pointer map\n\nwhere the bodies are\n")
+
+
+WINDOW_OPEN = "<!-- gedaechtnis:window -->"
+WINDOW_CLOSE = "<!-- gedaechtnis:/window -->"
 
 
 # ------------------------------------------------------------- graduation ----
@@ -116,25 +150,63 @@ def test_the_payload_excludes_the_boot_file_and_its_archive(mod, vault):
 
 
 # ---------------------------------------------------------- the window ----
-def test_an_over_budget_boot_file_is_compacted_into_its_sidecar(mod, vault):
+def test_an_over_budget_boot_file_is_compacted_BELOW_ITS_MARKER(mod, vault):
     boot = vault / "Proj" / "Kernel.md"
-    boot.write_text(entries(20, 200, first="A STANDING RULE"))
-    before = boot.stat().st_size
-    assert before > mod.budget()
+    boot.write_text(real_boot_file())
+    assert boot.stat().st_size > mod.budget()
     moved = mod.roll_window(vault)
-    assert len(moved) == 1 and moved[0]["entries"] > 0
-    assert boot.stat().st_size <= mod.budget()
+    assert len(moved) == 1 and moved[0]["entries"] > 0, moved
     seg = vault / "Proj" / "Kernel-archive.md"
-    assert seg.is_file() and "A STANDING RULE" in seg.read_text()
+    assert seg.is_file() and "## resume 0" in seg.read_text()
+
+
+def test_A_STANDING_CONSTRAINT_ABOVE_THE_MARKER_IS_NEVER_MOVED(mod, vault):
+    """★ The defect this row was REJECTED for, as a test.
+
+    The first version compacted a Boot file's OLDEST `## ` sections. A real Boot file's sections
+    are named and structural, not ordered by age — so the reviewer's realistic fixture had its
+    `## Standing constraints` section, carrying a NEVER rule, moved wholesale into an archive file
+    nothing reads at boot. The rule that forbids exactly that lives in the kind of file the
+    mechanism had just emptied."""
+    boot = vault / "Proj" / "Kernel.md"
+    boot.write_text(real_boot_file(n_resume=60))
+    assert boot.stat().st_size > mod.budget() * 2
+    mod.roll_window(vault)
+    after = boot.read_text()
+    assert "NEVER delete a memory file." in after, "a binding rule was moved out of the boot file"
+    assert "## At a glance" in after and "## Standing constraints" in after
+    assert "## Canon headlines" in after and "## Pointer map" in after, \
+        "a structural section BELOW the window was carried off — the second half of the defect"
+    seg = (vault / "Proj" / "Kernel-archive.md").read_text()
+    assert "NEVER delete a memory file." not in seg
+    assert "locked decisions" not in seg
+    # POSITIVE CONTROL: the window DID move something, so the survival above is not "nothing ran".
+    assert "## resume 0" in seg
+
+
+def test_a_boot_file_with_NO_marker_is_reported_and_never_written(mod, vault):
+    """The safe default, in the only direction that matters: not compacting costs a large file;
+    compacting the wrong thing costs a rule that silently stops being loaded."""
+    boot = vault / "Proj" / "Kernel.md"
+    boot.write_text(real_boot_file(marker=False))
+    before = boot.read_text()
+    out = mod.roll_window(vault)
+    assert len(out) == 1 and out[0]["entries"] == 0
+    assert "declares no window" in out[0]["skipped"]
+    assert WINDOW_OPEN in out[0]["skipped"] and WINDOW_CLOSE in out[0]["skipped"], \
+        "the report must say how to opt in"
+    assert boot.read_text() == before
+    assert not (vault / "Proj" / "Kernel-archive.md").exists()
 
 
 def test_the_window_does_not_empty_the_file(mod, vault):
     """A Boot file compacted to nothing is a region with no index — worse than an oversize one."""
     boot = vault / "Proj" / "Kernel.md"
-    boot.write_text(entries(40, 200))
+    boot.write_text(real_boot_file(n_resume=40))
     mod.roll_window(vault)
-    assert boot.stat().st_size >= mod.budget() * float(LIMITS["compaction_floor_share"]) * 0.5
-    assert "## entry" in boot.read_text()
+    live = boot.read_text()
+    assert "## resume" in live
+    assert "## Standing constraints" in live and "## Pointer map" in live
 
 
 def test_a_boot_file_under_the_budget_is_untouched(mod, vault):
@@ -146,14 +218,41 @@ def test_a_boot_file_under_the_budget_is_untouched(mod, vault):
     assert not (vault / "Proj" / "Kernel-archive.md").exists()
 
 
-def test_the_window_moves_the_OLDEST_entries_which_the_report_must_say(mod, vault):
-    """The mechanism's sharp edge, asserted rather than documented: a standing rule written at the
-    TOP of a Boot file is the first thing the window moves out."""
+def test_the_window_moves_the_oldest_entries_BELOW_the_marker(mod, vault):
     boot = vault / "Proj" / "Kernel.md"
-    boot.write_text(entries(20, 200, first="NEVER delete a memory file"))
+    boot.write_text(real_boot_file(n_resume=30))
     mod.roll_window(vault)
-    assert "NEVER delete a memory file" not in boot.read_text()
-    assert "NEVER delete a memory file" in (vault / "Proj" / "Kernel-archive.md").read_text()
+    seg = (vault / "Proj" / "Kernel-archive.md").read_text()
+    live = boot.read_text()
+    assert "## resume 0" in seg and "## resume 0\n" not in live
+    # The NEWEST window entry stays live: a window emptied to nothing is the same loss, slower.
+    assert "## resume 29" in live
+
+
+def test_a_window_holding_ONE_GIANT_entry_is_reported_not_emptied(mod, vault):
+    """Measured by the reviewer on the first version: `compact_file`'s floor share does not bind
+    when a file has few large entries — a single 39,000 B entry compacted the file to 36 bytes,
+    head only. The loop stops one entry short, always, and says why it could do nothing."""
+    boot = vault / "Proj" / "Kernel.md"
+    boot.write_text("# Boot\n\n## Standing constraints\n\nNEVER.\n\n" + WINDOW_OPEN
+                    + "\n\n## the only entry\n" + "x" * 5000 + "\n" + WINDOW_CLOSE + "\n")
+    before = boot.read_text()
+    out = mod.roll_window(vault)
+    assert len(out) == 1 and out[0]["entries"] == 0
+    assert "too large to move even one" in out[0]["skipped"]
+    assert boot.read_text() == before
+
+
+def test_a_window_with_no_entries_at_all_is_reported_not_cut(mod, vault):
+    boot = vault / "Proj" / "Kernel.md"
+    boot.write_text("# Boot\n\n## Standing constraints\n\nNEVER.\n\n" + WINDOW_OPEN
+                    + "\n\nprose with no headings at all\n" + "x" * 5000 + "\n"
+                    + WINDOW_CLOSE + "\n")
+    before = boot.read_text()
+    out = mod.roll_window(vault)
+    assert len(out) == 1 and out[0]["entries"] == 0
+    assert "no `## ` entries" in out[0]["skipped"]
+    assert boot.read_text() == before
 
 
 def test_a_WARN_band_file_is_reported_but_not_compacted(mod, vault):
