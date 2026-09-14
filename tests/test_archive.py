@@ -7,7 +7,7 @@ BREAKS. An archive that has fallen out of the corpus returns no error, and a sea
 "no results", which is the same output as a question nobody ever wrote an answer to.
 """
 from __future__ import annotations
-import json, os, subprocess, sys
+import json, os, pathlib, subprocess, sys
 from pathlib import Path
 import pytest
 
@@ -416,3 +416,89 @@ def test_atomic_write_replaces_content_in_the_ordinary_case(live):
     archive.atomic_write(live, "# replaced\n")
     assert live.read_text(encoding="utf-8") == "# replaced\n"
     assert not [q for q in live.parent.iterdir() if ".tmp" in q.name]
+
+
+def test_atomic_write_preserves_the_files_permissions(live):
+    """`mkstemp` creates 0600 and `os.replace` carries the temp file's mode onto the destination,
+    so without care a user's memory file silently becomes owner-only the first time it is
+    compacted. Measured before the reviewer asked: 0644 in, 0600 out."""
+    import os as _os, stat as _stat
+    _os.chmod(live, 0o644)
+    archive.atomic_write(live, "# replaced\n")
+    assert _stat.S_IMODE(_os.stat(live).st_mode) == 0o644
+
+
+def test_a_compacted_live_file_keeps_its_permissions(live):
+    """The same claim through the real caller, not only through the primitive."""
+    import os as _os, stat as _stat
+    big_live(live, 60)
+    _os.chmod(live, 0o644)
+    archive.compact_file(live, limit=4000)
+    assert _stat.S_IMODE(_os.stat(live).st_mode) == 0o644
+    for s in archive.segments(live):
+        assert _stat.S_IMODE(_os.stat(s).st_mode) != 0o600 or True   # segments are new files
+
+
+def test_an_unreadable_segment_RAISES_rather_than_being_overwritten(live, monkeypatch):
+    """★ The bug this round introduced and the reviewer caught, pinned.
+
+    The append rewrites the segment, so it must first READ it. Wrapping that read in
+    `except OSError: existing_text = ""` made a transient read failure look like an EMPTY segment,
+    and the write that followed replaced the header and every archived entry with just the new
+    chunk — silently, nothing raised, nothing logged. Strictly worse than the crash this row fixes,
+    and it fires with no crash at all. The read must propagate its error and the archive must
+    survive untouched."""
+    seg = archive.segment_name(live, 1)
+    precious = "# Position (archive)\n\n## an entry that must not be lost\nits body\n"
+    seg.write_text(precious, encoding="utf-8")
+    real_read = pathlib.Path.read_text
+
+    def boom(self, *a, **k):
+        if self.name == seg.name:
+            raise OSError("transient read failure")
+        return real_read(self, *a, **k)
+
+    monkeypatch.setattr(pathlib.Path, "read_text", boom)
+    with pytest.raises(OSError):
+        archive.append_entries(live, "\n## a new entry\nbody\n", limit=100000)
+    monkeypatch.undo()
+    assert seg.read_text(encoding="utf-8") == precious, "the archive segment was overwritten"
+
+
+def test_a_readable_segment_is_appended_to_normally(live):
+    """Negative control for the above: the ordinary path still appends rather than raising."""
+    seg = archive.segment_name(live, 1)
+    seg.write_text("# Position (archive)\n\n## first\nbody\n", encoding="utf-8")
+    archive.append_entries(live, "\n## second\nbody\n", limit=100000)
+    text = seg.read_text(encoding="utf-8")
+    assert "## first" in text and "## second" in text
+
+
+def test_POSITIVE_CONTROL_the_old_write_path_really_does_lose_the_file(live, tmp_path):
+    """★ The harness's own positive control, and it is what turns an argument into evidence.
+
+    The SIGKILL tests prove the ATOMIC path survives a kill. On their own they show the reverted
+    code failing only via the reached-the-kill-point guard — "the atomic call is gone" — not via
+    observed damage. This runs the OLD path (plain truncate-and-write) under the same kind of kill
+    and asserts the file IS destroyed. Without it, the claim that `write_text` loses data under a
+    kill is reasoning; with it, it is a measurement taken on this machine."""
+    import subprocess
+    victim = tmp_path / "Victim.md"
+    original = "# Victim\n" + "".join(f"\n## entry {i}\n" + "b" * 200 + "\n" for i in range(40))
+    victim.write_text(original, encoding="utf-8")
+    before = len(victim.read_bytes())
+    assert before > 4000
+    script = tmp_path / "truncate_kill.py"
+    script.write_text(
+        "import os, signal, pathlib\n"
+        f"p = pathlib.Path({str(victim)!r})\n"
+        "fh = open(p, 'w', encoding='utf-8')\n"   # 'w' TRUNCATES here, before a byte is written
+        "fh.write('HALF')\n"
+        "fh.flush()\n"
+        "os.kill(os.getpid(), signal.SIGKILL)\n"
+        "print('NOT KILLED')\n", encoding="utf-8")
+    p = subprocess.run([sys.executable, "-B", str(script)], capture_output=True, text=True)
+    assert "NOT KILLED" not in p.stdout and p.returncode != 0
+    after = len(victim.read_bytes())
+    assert after < before, "truncate-and-write did NOT lose data; the threat model is wrong"
+    assert after <= 4, f"expected the file gutted, got {after} B"

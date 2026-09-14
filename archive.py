@@ -79,19 +79,47 @@ def atomic_write(path: Path, text: str) -> None:
     temporary file IN THE SAME DIRECTORY (so `os.replace` is a rename within one filesystem, which
     is atomic, rather than a copy across two, which is not); `flush` and `fsync` it so the bytes are
     on the device before anything points at them; then `os.replace`, which either fully succeeds or
-    leaves the original untouched. The temp file is cleaned up if any of that fails, so a crashed
+    leaves the original untouched.
+
+    **What this does and does not promise.** The threat model it is proven against is a PROCESS
+    DEATH — a kill, a crash, an OOM — and the tests kill a real process at two points inside the
+    write. Full power loss is a weaker guarantee: the directory fsync below makes the rename likely
+    to survive one, but nothing here has been tested against pulled power, and the claim is not
+    made. The temp file is cleaned up if any of that fails, so a crashed
     run does not litter the vault with debris the next search would try to read.
     """
     tmp = None
     try:
+        # The original's MODE, read before anything replaces it. `mkstemp` creates 0600 and
+        # `os.replace` carries the temp file's mode onto the destination — so without this a user's
+        # memory file silently becomes owner-only the first time it is compacted. Measured, not
+        # assumed: 0644 before, 0600 after. Small, but it is a state change with no signal, which
+        # is the shape this project refuses.
+        try:
+            mode = os.stat(path).st_mode & 0o777
+        except OSError:
+            mode = None
         fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
         tmp = Path(tmp_name)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(text)
             fh.flush()
             os.fsync(fh.fileno())
+        if mode is not None:
+            os.chmod(tmp, mode)
         os.replace(tmp, path)            # atomic: the old inode survives until this instant
         tmp = None
+        # fsync the DIRECTORY too, so the RENAME survives a power loss and not only the bytes it
+        # points at. Best-effort: a filesystem that will not let a directory be opened or synced is
+        # not a reason to fail a write that has already landed.
+        try:
+            dfd = os.open(str(path.parent), os.O_RDONLY)
+            try:
+                os.fsync(dfd)
+            finally:
+                os.close(dfd)
+        except OSError:
+            pass
     finally:
         if tmp is not None:
             try:
@@ -269,21 +297,45 @@ def append_entries(live: Path, text: str, limit: int | None = None) -> Path:
     # file, because both halves read as complete.
     parts = text.split("\n## ")
     chunks = ([parts[0]] if parts[0] else []) + ["\n## " + s for s in parts[1:]]
-    target = None
+    # ★ THE ROLL DECISION USES THE PROJECTED SIZE, NOT THE ON-DISK SIZE. Batching the writes means
+    # the file does not grow as the loop runs, so asking `current_segment` each time — which stats
+    # the disk — put every chunk in the same segment and the split silently stopped happening. The
+    # running total is what the on-disk size used to stand in for.
+    target = current_segment(live, 0, limit)
+    try:
+        cur_size = target.stat().st_size
+    except OSError:
+        cur_size = len(header_for(live).encode("utf-8"))
+    pending: dict = {}
+    order: list = []
     for chunk in chunks:
         blob = len(chunk.encode("utf-8"))
-        target = current_segment(live, blob, limit)
-        # The append is atomic too, for the same reason and one more: a kill DURING a plain append
-        # leaves a half-written entry in the archive, and half an entry reads as a whole one. The
-        # segment is bounded by `max_memory_file_bytes`, so rewriting it whole is a bounded cost
-        # paid only on a compaction.
-        existing_text = ""
+        if cur_size + blob > limit and cur_size > len(header_for(live).encode("utf-8")):
+            target = segment_name(live, segment_index(target) + 1)
+            cur_size = len(header_for(live).encode("utf-8"))
+        if target not in pending:
+            pending[target] = []
+            order.append(target)
+        pending[target].append(chunk)
+        cur_size += blob
+    # ONE atomic write per segment, not one per chunk. Fewer read-rewrite cycles is cheaper, but
+    # the reason that matters is that each cycle is a chance to get the read wrong — and getting it
+    # wrong here overwrites an archive.
+    for target in order:
+        chunks = pending[target]
         if target.exists():
-            try:
-                existing_text = target.read_text(encoding="utf-8")
-            except OSError:
-                existing_text = ""
+            # ★ NOT GUARDED, DELIBERATELY. This read was briefly wrapped in
+            # `except OSError: existing_text = ""`, which meant that a transient read failure — a
+            # permission blip, a network-mount hiccup, a momentary lock — made the code treat a
+            # full segment as EMPTY and then write only the new chunk over it, destroying the
+            # header and every entry already archived there. Silently: nothing raised, nothing
+            # logged, the function returned normally. That is strictly worse than the crash bug
+            # this row exists to fix, and it fires with no crash at all; the old append-mode code
+            # never read the segment, so it could not have this failure. Letting the error
+            # propagate hands it to `compact_vault`'s handler, which logs it and moves on with the
+            # archive intact.
+            existing_text = target.read_text(encoding="utf-8")
         else:
             existing_text = header_for(live)
-        atomic_write(target, existing_text + chunk)
+        atomic_write(target, existing_text + "".join(chunks))
     return target or current_segment(live, 0, limit)
