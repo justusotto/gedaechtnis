@@ -448,10 +448,10 @@ def test_the_bundle_is_not_searchable_memory_EVEN_WITH_include_queues(world, tmp
 def guard():
     """`conftest.py`'s two functions, loaded BY PATH.
 
-    `import conftest` works when this file's suite runs alone and raises when it runs beside
-    atlas-system's own `tests/`, which has a `conftest.py` of its own: the bare module name is
-    ambiguous and the import went to whichever came first. Caught by running both suites in one
-    pytest invocation, which is how the package is actually checked before a merge."""
+    `import conftest` works when this suite runs alone and raises when it runs beside another
+    suite that has a `conftest.py` of its own — which the enclosing project's does: the bare
+    module name is ambiguous and the import goes to whichever was found first. Caught by running
+    both suites in ONE pytest invocation, which neither suite's own green run exercises."""
     import importlib.util
     spec = importlib.util.spec_from_file_location(
         "gedaechtnis_tests_conftest", Path(__file__).resolve().parent / "conftest.py")
