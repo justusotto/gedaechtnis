@@ -177,7 +177,9 @@ def test_tool_absent_no_call_no_crash(world):
     w = world
     w["cfg"].write_text(json.dumps({"claim_tool": str(w["tmp"] / "nope.sh")}))
     p = hook(w, "start")
-    assert calls(w) == [] and p.stdout.strip() == ""
+    assert calls(w) == []
+    # …and the session is TOLD it is unclaimed rather than left to read silence as a claim
+    assert "Region claim" in p.stdout and "OFF" in p.stdout
     hook(w, "stop")                                 # and the stop half survives it too
     assert calls(w) == []
 
@@ -185,8 +187,45 @@ def test_tool_absent_no_call_no_crash(world):
 def test_auto_claim_false_no_call(world):
     w = world
     w["cfg"].write_text(json.dumps({"claim_tool": str(w["tool"]), "auto_claim": False}))
-    hook(w, "start")
+    p = hook(w, "start")
     assert calls(w) == []
+    assert "auto_claim" in p.stdout, "a disabled feature still says so"
+
+
+# ------------------------------------------------- the facts line for an OFF claim ----
+# The package ships no claim helper, so OFF is the ordinary state of a published copy. What must
+# never happen is OFF looking like ON. Each case below pairs with its negative control: the
+# claiming run, which prints "claim held" and no OFF line.
+def test_no_helper_configured_says_so_and_names_the_setting(world):
+    w = world
+    # `tool_root` is pointed at an empty directory, which is what a published copy of the plugin
+    # looks like: no `claim_tool` key, and no helper where the default would derive one.
+    w["cfg"].write_text(json.dumps({"tool_root": str(w["tmp"] / "empty-root")}))
+    p = hook(w, "start")
+    assert calls(w) == []
+    assert "Region claim" in p.stdout and "OFF" in p.stdout
+    assert "claim_tool" in p.stdout, "the line says how to turn it on"
+    assert "Mnemosyne/UkrainianCard" in p.stdout, "and which region went unclaimed"
+
+
+def test_the_off_line_is_absent_when_the_claim_is_actually_held(world):
+    """Negative control: with a working helper there is no OFF line — so the line above is proof of
+    a state, not a string this hook always prints."""
+    w = world
+    p = hook(w, "start")
+    assert len(calls(w)) == 1
+    assert "Region claim held" in p.stdout
+    assert "OFF" not in p.stdout
+
+
+def test_no_region_means_no_line_at_all(world):
+    """Outside a region there is nothing to claim, so the facts line would be noise. Silence here
+    is the correct answer and is not the silence the line exists to prevent."""
+    w = world
+    w["cfg"].write_text(json.dumps({"tool_root": str(w["tmp"] / "empty-root")}))
+    (w["repo"] / ".atlas-lane").write_text("lane: CURSUS\npath: Global/\npath: Pharos/queues/\n")
+    p = hook(w, "start")
+    assert calls(w) == [] and p.stdout.strip() == ""
 
 
 def test_auto_claim_defaults_true_with_no_config_key(world):

@@ -362,7 +362,7 @@ Precedence, per setting: environment variable → `~/.claude/gedaechtnis/config.
 | `owner_pages_status` | — | none; the session-start hook then says nothing about review pages |
 | `python` | — | the interpreter running the hook |
 | `tool_root` | `GEDAECHTNIS_TOOL_ROOT` | the checkout this plugin lives in |
-| `claim_tool` | `GEDAECHTNIS_CLAIM_TOOL` | `<tool_root>/skills/atlas-region/helpers/region_claim.sh`; absent = the claim hooks do nothing |
+| `claim_tool` | `GEDAECHTNIS_CLAIM_TOOL` | `<tool_root>/skills/atlas-region/helpers/region_claim.sh`. **This package ships no such helper**, so out of the box the region claim is OFF — and says so: a session inside a region gets a one-line statement at start, and `/gedaechtnis-status` prints the state unconditionally. Point this at a helper to turn it on |
 | `auto_claim` | `GEDAECHTNIS_AUTO_CLAIM` | `true` — coordination that must be switched on is coordination that is off |
 | `auto_commit` | `GEDAECHTNIS_AUTO_COMMIT` | `true` — the Stop hook commits this session's vault writes |
 | `inject_rules` | `GEDAECHTNIS_INJECT_RULES` | `true` — the operating rules are injected at session start |
