@@ -377,8 +377,61 @@ def test_noise_floor_is_measured_across_seeds_not_across_design_factors():
     # A second load sits far away (0.90); it must NOT enter the floor.
     runs = [cell("low", 7, 0.10), cell("low", 8, 0.20),
             cell("high", 7, 0.90), cell("high", 8, 0.90)]
+    # max across cells: the noisy cell sets the floor, the quiet one does not lower it.
     floor = sim.noise_floor(runs, "boot_recall_recent")
-    assert floor == pytest.approx(0.025), f"floor {floor} was contaminated by the load factor"
+    assert floor == pytest.approx(0.05), f"floor {floor} was contaminated by the load factor"
+    # The old POOLED behaviour would be pstdev over all four raw values ~= 0.377 — 7x larger.
+    assert floor < 0.1, "the floor is pooling the design factors again"
+
+
+def test_noise_floor_is_a_max_not_a_mean_because_it_is_used_as_a_gate():
+    """A gate built from an average is beaten by the noisiest cell about half the time.
+
+    The mean here would be 0.025 — under HALF the 0.05 the noisy cell actually needs — so a
+    difference of 0.03 in that cell would read as 'readable' while sitting inside its own wobble.
+    Flagged by the 2026-09-14 re-review; the measured gap on the real run was mean 0.0252 against
+    max 0.0636."""
+    def cell(load, seed, value):
+        return {"budget": 25_000, "load": load, "curve": "linear", "seed": seed,
+                "horizon": 30, "snapshots": {30: {"boot_recall_recent": value}}}
+
+    runs = [cell("low", 7, 0.10), cell("low", 8, 0.20),      # spread 0.05
+            cell("high", 7, 0.90), cell("high", 8, 0.90)]    # spread 0.00
+    assert sim.noise_floor(runs, "boot_recall_recent", summary="max") == pytest.approx(0.05)
+    assert sim.noise_floor(runs, "boot_recall_recent", summary="mean") == pytest.approx(0.025)
+    # Zero-variance cells are kept (real information) but under max they never set the floor.
+    assert sim.cell_spreads(runs, "boot_recall_recent")[(25_000, "high", "linear")] == 0.0
+
+
+def _tied_cell(budget, load, seed, tool, toks):
+    snap = {"boot_bytes": toks * 4, "boot_tokens": toks, "boot_recall_recent": 0.0,
+            "tool_recall_recent": tool, "boot_recall": 0.0, "tool_recall": tool,
+            "wikilink_health": 1.0, "oversize": [], "unsearchable": []}
+    return {"load": load, "curve": "linear", "budget": budget, "seed": seed, "compactions": 0,
+            "shape_limited": False, "horizon": 30, "snapshots": {30: snap}}
+
+
+def test_the_winner_does_not_depend_on_the_order_the_budgets_arrive_in():
+    """An exact tie on the metric must resolve the SAME WAY however the budgets were ordered.
+
+    The bug this pins, demonstrated by the 2026-09-14 re-review: `max()` returns the FIRST maximal
+    element, `--ab` built `budgets` in the order typed on the command line and `--reaggregate`
+    built it with `sorted()`. Same cells, same code, different winner — which destroys the one
+    property that makes re-aggregating a saved run trustworthy instead of re-simulating it.
+
+    The two arms below are identical in EVERY number the rule reads — same recall, same boot
+    tokens, so the same answers-per-1k-tokens — and differ only in the budget label. That is what
+    isolates the tie-break: an earlier version of this fixture varied recall to make the ratios
+    match, which merely tripped the recall GUARD and tested nothing about ties."""
+    cells = ([_tied_cell(40_000, "low", s, 0.9, 3_000) for s in (7, 8)] +
+             [_tied_cell(20_000, "low", s, 0.9, 3_000) for s in (7, 8)])
+    a = sim.aggregate(cells, [40_000, 20_000])      # as an operator might type it
+    b = sim.aggregate(cells, [20_000, 40_000])      # as --reaggregate's sorted() produces it
+    assert a["arms"]["40000"]["answers_per_1k_tokens"] == \
+           a["arms"]["20000"]["answers_per_1k_tokens"], "the fixture no longer ties; test is void"
+    assert a["winner"] == b["winner"], "the winner depends on input order"
+    # And the tie resolves the way the documented rule says it should: the cheaper budget.
+    assert a["winner"] == 20_000
 
 
 def test_json_output_round_trips(tmp_path):

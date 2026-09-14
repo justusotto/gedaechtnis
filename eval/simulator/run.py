@@ -599,30 +599,61 @@ def ab(budgets: list, loads: list, curves: list, horizon: int, seeds: int,
     return out
 
 
-def noise_floor(runs: list, metric: str) -> float:
-    """The metric's noise floor: the mean, over CELLS, of that metric's spread across SEEDS.
-
-    ★ This is a repeat of the CONTROL, and nothing else is. The first version of this function
-    took the spread across every cell in an arm — which pools `low`, `medium` and `high` loads and
-    three curves together, so it measured the DESIGN FACTORS, not noise. It returned 0.4737 on a
-    0-to-1 metric, i.e. a "floor" that swallows any result the experiment could ever produce, and
-    it would have done so silently while still printing a winner. A cell repeated under a
-    different seed, and only that, tells you what the instrument's own wobble is.
-    (Global kernel: "measure the floor with a repeat of the CONTROL, per metric".)"""
+def cell_spreads(runs: list, metric: str) -> dict:
+    """{(budget, load, curve): spread across SEEDS} for one metric. The raw material of a floor."""
     cells: dict = {}
     for r in runs:
         final = r["snapshots"][max(r["snapshots"])]
         v = final.get(metric)
         if v is not None:
             cells.setdefault((r["budget"], r["load"], r["curve"]), []).append(v)
-    spreads = [statistics.pstdev(v) for v in cells.values() if len(v) > 1]
-    return round(statistics.mean(spreads), 4) if spreads else 0.0
+    return {k: statistics.pstdev(v) for k, v in cells.items() if len(v) > 1}
+
+
+def noise_floor(runs: list, metric: str, summary: str = "max") -> float:
+    """The metric's noise floor: over CELLS, the spread of that metric across SEEDS.
+
+    ★ This is a repeat of the CONTROL, and nothing else is. The first version took the spread
+    across every cell in an ARM — which pools `low`, `medium` and `high` loads and three curves
+    together, so it measured the DESIGN FACTORS, not noise. It returned 0.4737 on a 0-to-1 metric,
+    i.e. a "floor" that swallows any result the experiment could ever produce, and did so silently
+    while still printing a winner. A cell repeated under a different seed, and only that, tells you
+    what the instrument's own wobble is. (Global kernel: "measure the floor with a repeat of the
+    CONTROL, per metric".)
+
+    ★ MAX, not mean, and the reason is what the number is USED for. This is not a descriptive
+    statistic — it is a hard gate ("a difference smaller than this counts as no difference"). A
+    gate built from an average is beaten by the noisiest cell roughly half the time by
+    construction: a quiet cell sitting beside a noisy one drags the threshold below what the noisy
+    cell's own comparisons need. Max is the conservative floor for a threshold; mean is the right
+    summary for a report and the wrong one for a gate. Measured on the 2026-09-14 run, the
+    difference is not cosmetic — mean 0.0252 against max 0.0636 for boot recall, so the pooled mean
+    was under half of what the `low` cells alone required.
+
+    Zero-variance cells are INCLUDED (a cell whose seeds agree is real information, not something
+    to discard) — under `max` they simply never set the floor, which is the correct influence for
+    them to have. `per_cell_floors` in the result carries the whole distribution, because one
+    pooled scalar applied uniformly is exactly the shape of the mistake this function already made
+    once."""
+    spreads = list(cell_spreads(runs, metric).values())
+    if not spreads:
+        return 0.0
+    agg = max if summary == "max" else statistics.mean
+    return round(agg(spreads), 4)
 
 
 def aggregate(runs: list, budgets: list) -> dict:
     """Arms, floors, ladder and winner from a list of cell results. Pure, so a saved run can be
     re-aggregated without re-simulating (`--reaggregate`) — which is what makes a correction to
     the decision rule cheap enough to actually make."""
+    # ORDER-INDEPENDENCE, and it is not housekeeping. `max()` returns the FIRST maximal element,
+    # so on an exact tie the winner was decided by the order `budgets` happened to arrive in —
+    # `--ab` uses the order the operator typed on the command line, `--reaggregate` uses sorted().
+    # Same cells, same code, different winner: demonstrated by the 2026-09-14 re-review. And ties
+    # are not exotic here — the degenerate case has near-flat `answered` and recall is quantised
+    # over ~12-20 held-out questions, so a 4-decimal ratio collides easily. Sorting the budgets is
+    # half the fix; the explicit tie-break key below is the other half.
+    budgets = sorted(budgets)
     arms = {}
     for budget in budgets:
         cells = [r for r in runs if r["budget"] == budget]
@@ -670,7 +701,11 @@ def aggregate(runs: list, budgets: list) -> dict:
     best_tool = max(a["tool_recall_mean"] for a in arms.values())
     eligible = [a for a in arms.values() if a["tool_recall_mean"] >= best_tool - tool_floor]
     disqualified = [a["budget"] for a in arms.values() if a not in eligible]
-    best = max(eligible, key=lambda a: a["answers_per_1k_tokens"])
+    # The tie-break is EXPLICIT, and it implements the rule the docstring already promised ("among
+    # tied arms the cheaper budget wins") instead of leaving it to iteration order to get right by
+    # accident. `-budget` is the second key, so an exact tie on the metric resolves to the smaller
+    # budget deterministically, on any input ordering.
+    best = max(eligible, key=lambda a: (a["answers_per_1k_tokens"], -a["budget"]))
 
     # ── THE MARGINAL LADDER, and why the headline metric alone cannot decide this ──────────
     #
@@ -704,11 +739,20 @@ def aggregate(runs: list, budgets: list) -> dict:
         "budgets": budgets, "arms": arms,
         "population": "recent",
         "recent_window_days": RECENT_WINDOW_DAYS,
-        "noise_floor_method": ("mean across cells of the metric's standard deviation across "
-                               "SEEDS — a repeat of the control, never the spread across loads "
-                               "and curves, which are design factors"),
+        "noise_floor_method": ("MAX across cells of the metric's standard deviation across SEEDS "
+                               "— a repeat of the control, never the spread across loads and "
+                               "curves, which are design factors. Max rather than mean because "
+                               "this number is used as a GATE, and an averaged gate is beaten by "
+                               "the noisiest cell about half the time"),
         "boot_recall_noise_floor": floor,
         "tool_recall_noise_floor": tool_floor,
+        # The whole distribution, not just the scalar: one pooled number applied uniformly to
+        # every load is the shape of the mistake this instrument already made once. A per-load
+        # reading can differ from the pooled gate in BOTH directions and the ladder says so.
+        "per_cell_floors": {f"{b}/{ld}/{cv}": round(v, 4)
+                            for (b, ld, cv), v in sorted(cell_spreads(runs,
+                                                                     "boot_recall_recent").items(),
+                                                         key=lambda kv: str(kv[0]))},
         "disqualified_by_guard": disqualified,
         "winner": best["budget"],
         "winner_rule": ("highest answers per 1,000 boot tokens on the `recent` population, among "
