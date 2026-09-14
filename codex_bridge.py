@@ -439,3 +439,81 @@ def normalize_tool_input(inp: dict) -> dict:
     out["_codex_tool_name"] = "apply_patch"
     out["tool_name"] = "Write" if files and files[0]["op"] == "Add" else "Edit"
     return out
+
+
+# --- 9. agent definitions ---------------------------------------------------------
+#
+# Claude restricts a subagent by an ALLOWLIST of tools (`tools: Read, Glob, Grep`). Codex has
+# no such concept, and the desktop import wizard therefore drops the key entirely: an agent
+# that was read-only BY CONSTRUCTION becomes read-only only in so far as its prompt asks
+# nicely. `cursus-adviser`'s translated definition still tells it "You never write... no
+# Bash, so you cannot commit" -- a sentence that was true of the harness and is now merely a
+# promise.
+#
+# Codex's agent format does have the right primitive: `sandbox_mode`. This maps the allowlist
+# onto it, so the constraint is enforced again rather than requested. `model` is mapped too --
+# the wizard dropped that as well, silently collapsing per-agent cost tiering onto whatever the
+# session happens to be running.
+
+WRITE_TOOLS = frozenset(("Write", "Edit", "MultiEdit", "NotebookEdit", "Bash", "Agent", "Task"))
+
+
+def agent_sandbox_mode(tools: list[str] | None) -> str | None:
+    """`read-only` when the agent's allowlist contains no tool that can change anything.
+
+    Returns None when there is no allowlist at all -- an agent that never declared one was
+    never restricted, and inventing a restriction here would change behaviour rather than
+    preserve it.
+    """
+    if not tools:
+        return None
+    return "workspace-write" if (set(tools) & WRITE_TOOLS) else "read-only"
+
+
+def parse_agent_frontmatter(text: str) -> dict:
+    """Minimal YAML-frontmatter reader for a Claude agent definition.
+
+    Deliberately not a YAML parser: these files use a flat `key: value` frontmatter, and
+    depending on PyYAML would make the plugin's hooks carry a third-party import.
+    """
+    if not text.startswith("---"):
+        return {}
+    end = text.find("\n---", 3)
+    if end == -1:
+        return {}
+    out: dict = {}
+    key = None
+    for line in text[3:end].splitlines():
+        if not line.strip():
+            continue
+        if line[:1] not in (" ", "\t") and ":" in line:
+            key, _, val = line.partition(":")
+            key = key.strip()
+            out[key] = val.strip()
+        elif key:                                   # folded continuation of the previous key
+            out[key] = (out[key] + " " + line.strip()).strip()
+    if "tools" in out:
+        out["tools"] = [t.strip() for t in out["tools"].split(",") if t.strip()]
+    return out
+
+
+def agent_overlay(agent_md: str) -> dict:
+    """The keys a translated Codex agent TOML should carry but is missing.
+
+    Returns only what should be ADDED/CORRECTED -- the caller merges, so a hand-edit to any
+    other key in the TOML survives regeneration.
+    """
+    fm = parse_agent_frontmatter(agent_md)
+    out: dict = {}
+    sb = agent_sandbox_mode(fm.get("tools"))
+    if sb:
+        out["sandbox_mode"] = sb
+    # `model` is deliberately NOT carried across. A Claude definition names a Claude model
+    # ("sonnet", "opus", "fable"); writing that into a Codex agent TOML pins a model id that
+    # does not exist on the other vendor. Restoring per-agent tiering needs a deliberate
+    # cross-vendor model map, which is a routing decision for the owner, not something this
+    # translator should invent. Until that map exists an agent inherits the session model --
+    # the same behaviour the import wizard produced, but now for a stated reason.
+    if fm.get("model"):
+        out["_dropped_model"] = fm["model"]
+    return out
