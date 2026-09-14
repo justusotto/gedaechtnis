@@ -556,3 +556,66 @@ def test_a_retried_compaction_after_a_crash_does_not_duplicate(world):
         headings += [l for l in s.read_text().splitlines() if l.startswith("## ")]
     assert len(headings) == len(set(headings)), \
         f"{len(headings) - len(set(headings))} heading(s) duplicated by the retry"
+
+
+def test_compaction_is_COMMITTED_not_left_as_vault_dirt(world):
+    """★ The second reviewer's disqualifying finding.
+
+    `commit.py` commits the session's TOUCHED SET — the paths `chore.py` records on Edit/Write tool
+    calls — and its own docstring says a script's writes are not in it. Compaction is a script's
+    write. Left alone it leaves a modified live file and untracked archive segments behind forever,
+    because no later session's touched set will contain them either.
+
+    This asserts the vault is CLEAN after the Stop hook, which is the only form of the claim that
+    cannot pass while the defect is present."""
+    world["limits_file"].write_text(json.dumps(dict(LIMITS, max_memory_file_bytes=4000)))
+    # A MARKER, because without one `auto_commit`'s lane fail-safe correctly stages nothing and the
+    # test would have "passed" on the wrong mechanism. (It did, on the first attempt.)
+    (world["repo"] / ".atlas-lane").write_text("lane: PROJ\npath: Proj/\n")
+    live = world["vault"] / "Proj" / "Canon.md"
+    live.write_text("# Canon\n" + "".join(f"\n## entry {i}\n" + "b" * 400 + "\n" for i in range(60)))
+    git(world["vault"], "add", "--", "Proj/Canon.md")
+    git(world["vault"], "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q",
+        "-m", "the file before compaction", "--", "Proj/Canon.md")
+    assert git(world["vault"], "status", "--porcelain") == ""
+    run_stop(world)
+    run_stop(world)
+    assert live.stat().st_size <= 4000, "compaction did not run; this test cannot see its subject"
+    dirt = git(world["vault"], "status", "--porcelain")
+    assert dirt == "", f"compaction left the vault dirty:\n{dirt}"
+    assert "Compaction" in git(world["vault"], "log", "-1", "--format=%s")
+
+
+def test_a_compacted_file_outside_the_lane_partition_is_left_for_its_own_lane(world):
+    """The negative control, and it must NOT be read as a bug. Compaction may legitimately touch a
+    file this lane does not own; the answer is the same as for any other write — leave it for the
+    lane that does. `auto_commit` drops it, we do not special-case it, and the file stays dirty
+    rather than being committed under the wrong lane's name."""
+    world["limits_file"].write_text(json.dumps(dict(LIMITS, max_memory_file_bytes=4000)))
+    (world["repo"] / ".atlas-lane").write_text("lane: PROJ\npath: Proj/\n")
+    other = world["vault"] / "Other" / "Canon.md"
+    other.parent.mkdir(exist_ok=True)
+    other.write_text("# Canon\n" + "".join(f"\n## e {i}\n" + "b" * 400 + "\n" for i in range(60)))
+    run_stop(world)
+    run_stop(world)
+    assert other.stat().st_size <= 4000, "the file was not compacted at all"
+    dirt = git(world["vault"], "status", "--porcelain")
+    assert "Other/" in dirt, "another lane's file was committed under this lane's name"
+
+
+def test_a_file_outside_any_region_is_compacted_too(world):
+    """The coverage gap the reviewer reproduced: a memory file at the vault root, or in a directory
+    with no `Map.md`, grew past the bound across repeated session ends and was never touched — the
+    year-3 failure relocated to whichever files happen to sit outside a region."""
+    world["limits_file"].write_text(json.dumps(dict(LIMITS, max_memory_file_bytes=4000)))
+    (world["repo"] / ".atlas-lane").write_text("lane: PROJ\npath: Proj/\npath: NoMap/\n")
+    loose = world["vault"] / "Notes.md"
+    nomap = world["vault"] / "NoMap" / "Canon.md"
+    nomap.parent.mkdir()
+    body = "# x\n" + "".join(f"\n## entry {i}\n" + "b" * 400 + "\n" for i in range(60))
+    loose.write_text(body)
+    nomap.write_text(body)
+    run_stop(world)
+    run_stop(world)
+    assert loose.stat().st_size <= 4000, "a vault-root memory file was never compacted"
+    assert nomap.stat().st_size <= 4000, "a file in a Map-less directory was never compacted"

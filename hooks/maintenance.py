@@ -49,8 +49,18 @@ no hardcoded list of region names anywhere in this file.
 
 ## What it writes
 
-`<state>/maintenance.json`, and nothing else — no vault file, no commit, no git write. The hook that
-computes a trigger has no business touching the surface the trigger is about.
+`<state>/maintenance.json` — the triggers' own bookkeeping, machine-written and outside the boot
+chain — AND, when a memory file has grown past the bound that decides whether the search can read
+it, the compaction of that file into its archive segments.
+
+That second half is deliberate and was not here first. A hook that computed a trigger and touched
+nothing was the right shape while compaction lived elsewhere; once it lives here, "writes nothing"
+would be a docstring asserting the opposite of the code. **The compacted paths are COMMITTED**, by
+handing them to `commit.py`'s `auto_commit` seam rather than writing any git law here: a hook's own
+file writes are invisible to the touched set (`commit.py`: "a script the session ran — is not in
+the touched set and is not committed"), so compaction that was not explicitly committed would leave
+the vault permanently dirty, one growing set of untracked archive segments at a time, and dirt of
+that kind quietly stops other machinery rather than announcing itself.
 """
 from __future__ import annotations
 import json, os, re, subprocess, sys, time
@@ -413,6 +423,25 @@ def facts_lines(doc: dict) -> list[str]:
 
 
 # -------------------------------------------------------------- compaction ----
+def memory_files() -> list[Path]:
+    """Every `.md` in the vault that a search would read — the population the size bound is about.
+    Dot-directories are skipped (git internals, generated mirrors); nothing else is."""
+    out = []
+    try:
+        candidates = list(VAULT.rglob("*.md"))
+    except OSError:
+        return []
+    for md in candidates:
+        try:
+            rel = md.relative_to(VAULT)
+        except ValueError:
+            continue
+        if any(part.startswith(".") for part in rel.parts):
+            continue
+        out.append(md)
+    return out
+
+
 def compact_vault() -> list[dict]:
     """Keep every memory file under the bound that decides whether the search can read it.
 
@@ -427,21 +456,75 @@ def compact_vault() -> list[dict]:
     It is a NO-OP on a healthy vault: `compact_file` returns 0 for any file under the bound, so a
     vault that never grows one is never written to. A sealed segment is never itself compacted —
     that would move bytes twice and break the links into it.
+
+    ★ SCOPE IS EVERY MEMORY FILE, not every file inside a region. The first version walked
+    `regions()` — directories carrying `Map.md`, excluding `Global/` — and a reviewer reproduced
+    what that misses: a file at the vault root, or in a directory whose `Map.md` is absent, grew
+    past the bound across repeated session ends and was never touched. That is the year-3 failure
+    exactly, relocated to whichever files happen to sit outside a region. `Global/` is excluded from
+    the SYNTHESIS scan for a real reason — it is where a pass promotes TO — but that reason says
+    nothing about whether its files may grow until the search stops reading them.
     """
     moved = []
-    for region in regions():
-        for path in sorted(region.glob("*.md")):
-            if archive.is_sidecar(path.stem):
-                continue
+    for path in sorted(memory_files()):
+        if archive.is_sidecar(path.stem):
+            continue
+        if True:
             try:
                 n = archive.compact_file(path)
             except (OSError, ValueError) as e:
                 log("maintenance", f"compaction FAILED for {path}: {e.__class__.__name__}: {e}")
                 continue
             if n:
-                moved.append({"path": str(path.relative_to(VAULT)), "entries": n})
-                log("maintenance", f"compacted {n} entry(ies) out of {path.relative_to(VAULT)}")
+                # The live file AND every segment of it. The segments are NEW FILES, and a commit
+                # that carried only the shrunken live file would commit the removal of entries
+                # while leaving the file that now holds them untracked — the worst possible half
+                # of this operation to land on its own. Caught by
+                # `test_compaction_is_COMMITTED_not_left_as_vault_dirt`, which saw exactly that.
+                touched = [path] + archive.segments(path)
+                moved.append({"path": str(path.relative_to(VAULT)), "entries": n,
+                              "paths": [str(q.relative_to(VAULT)) for q in touched]})
+                log("maintenance", f"compacted {n} entry(ies) out of {path.relative_to(VAULT)} "
+                                   f"into {len(touched) - 1} segment(s)")
     return moved
+
+
+def commit_compaction(inp: dict, compacted: list[dict]) -> None:
+    """Commit what compaction just wrote, through `commit.py`'s seam and no git law of our own.
+
+    ★ WITHOUT THIS THE WHOLE ORGAN IS INVISIBLE TO GIT. `commit.py` commits the session's TOUCHED
+    SET — the paths recorded by `chore.py` on every Edit/Write tool call — and its own docstring
+    says what that means for us: "a shell command, a script the session ran — is not in the touched
+    set and is not committed". Compaction is exactly that. Left alone, every compaction would leave
+    a modified live file and a fistful of untracked archive segments behind FOREVER, because no
+    later session's touched set will ever contain them either. Dirt of that kind does not announce
+    itself; it quietly makes other machinery defer.
+
+    Everything about HOW to commit stays in `auto_commit`: the off switch, the lane fail-safe, the
+    partition filter, the dirty intersection, the explicit `git add --`, the pathspec read back from
+    the index, the identity. This function contributes a selector and a subject line. A second
+    implementation of the vault's git law here would be a second thing to keep correct.
+
+    A path outside the lane's declared partition is dropped by `auto_commit`, not by us — which is
+    the right place for it: compaction may legitimately touch a file this lane does not own, and
+    the answer to that is to leave it for the lane that does, exactly as for any other write."""
+    if not compacted:
+        return
+    paths = []
+    for c in compacted:
+        for q in c.get("paths") or [c["path"]]:
+            if q not in paths:
+                paths.append(q)
+    try:
+        import commit as commit_mod
+        commit_mod.auto_commit(
+            inp,
+            lambda sid, _prefixes: paths,
+            lambda lane: f"Compaction ({lane}): {len(paths)} memory file(s) kept under the search bound",
+            tag="maintenance-compaction")
+    except Exception as e:                       # a commit bug must not cost the session its hook
+        log("maintenance", f"compaction commit FAILED ({e.__class__.__name__}: {e}) — "
+                           f"{len(paths)} path(s) left UNCOMMITTED: {', '.join(paths[:5])}")
 
 
 # ------------------------------------------------------------------- main ----
@@ -467,6 +550,7 @@ def main() -> None:
     # after this session end rather than as it was before — a measurement taken before the act it
     # is meant to reflect reports a problem that has already been fixed.
     compacted = compact_vault()
+    commit_compaction(inp, compacted)
     doc = dict(state)
     doc.update(compute(state, cwd, day))
     doc["compacted"] = compacted

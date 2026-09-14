@@ -195,8 +195,15 @@ def compact_file(live: Path, limit: int | None = None, floor_share: float = 0.4)
             # missed the rest — which is how this guard failed its own test on the first attempt.
             # The scan costs one read of the archive, paid only on a compaction, which fires only
             # when a file is over the bound; correctness is worth more here than the read.
-            already = "".join(s.read_text(encoding="utf-8") for s in existing)
-            outgoing = [e for e in outgoing if e not in already]
+            # EXACT ENTRIES, not substring containment. `e in blob` would drop a short entry whose
+            # whole text happens to occur inside unrelated archived content — unlikely, and exactly
+            # the kind of unlikely that silently deletes a memory. The archive is parsed into the
+            # same entry units the outgoing list is made of, and membership is equality.
+            archived = set()
+            for s in existing:
+                body = s.read_text(encoding="utf-8")
+                archived.update("\n## " + part for part in body.split("\n## ")[1:])
+            outgoing = [e for e in outgoing if e not in archived]
         except OSError:
             pass
     if outgoing:
