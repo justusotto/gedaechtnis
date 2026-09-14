@@ -436,15 +436,35 @@ def memory_files() -> list[Path]:
     outbox, which are operational surfaces that other machinery parses and no one asked this hook
     to edit. Queues (`Pharos/`, `Channels/`), generated mirrors (`.gedaechtnis/`) and git internals
     are all out, for the same reasons the search leaves them out.
+
+
+    ★ IT REUSES recall's DIRECTORY RULES AND NOT ITS SIZE CEILING, and the difference is the whole
+    point of the row. `recall.md_files()` drops any file over `MAX_FILE_BYTES` — correctly, for its
+    own purpose: it will not read one. Delegating to it wholesale made compaction inherit that
+    filter, so a file that had ALREADY crossed the ceiling became invisible to the thing whose job
+    is to bring it back under — the files that most need compacting were the only ones it could not
+    see, and such a vault never self-heals. A reviewer reproduced it with a 2,494,898 B file that
+    two Stop hooks in a row left untouched, unlogged and unmentioned.
     """
     try:
         import recall
     except Exception:
         return []
+    skip_dirs = set(recall.SKIP_DIRS) | set(recall.NON_MEMORY_DIRS) | set(recall.GENERATED_DIRS)
+    out = []
     try:
-        return list(recall.md_files(VAULT))
+        for dirpath, dirnames, filenames in os.walk(VAULT):
+            dirnames[:] = sorted(d for d in dirnames
+                                 if d not in skip_dirs and not d.startswith("."))
+            for name in sorted(filenames):
+                if not name.endswith(".md"):
+                    continue
+                q = Path(dirpath) / name
+                if q.is_file() and not q.is_symlink():
+                    out.append(q)
     except OSError:
         return []
+    return out
 
 
 def compact_vault() -> list[dict]:

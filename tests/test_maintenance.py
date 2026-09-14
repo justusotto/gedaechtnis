@@ -639,3 +639,35 @@ def test_compaction_never_rewrites_a_queue_or_a_generated_mirror(world):
     run_stop(world)
     assert queue.read_bytes() == before_q, "compaction rewrote a work queue"
     assert mirror.read_bytes() == before_m, "compaction rewrote a generated mirror"
+
+
+def test_a_file_ALREADY_over_the_search_ceiling_is_still_compacted(world):
+    """★ The files that most need compacting must not be the only ones it cannot see.
+
+    `recall.md_files()` drops anything over its own MAX_FILE_BYTES — right for a reader, fatal for
+    the writer whose job is to bring such a file back under. A vault that arrives already oversize
+    (a rollout onto an old vault, a stretch with compaction disabled, one burst write) would never
+    self-heal, and the state doc would say nothing at all."""
+    ceiling = 20000
+    world["limits_file"].write_text(json.dumps(
+        dict(LIMITS, max_memory_file_bytes=4000, max_searchable_file_bytes=ceiling)))
+    (world["repo"] / ".atlas-lane").write_text("lane: PROJ\npath: Proj/\n")
+    live = world["vault"] / "Proj" / "Canon.md"
+    live.write_text("# Canon\n" + "".join(f"\n## entry {i}\n" + "b" * 400 + "\n" for i in range(120)))
+    # The fixture has to cross the ceiling the SEARCH actually uses, not the one the test wrote
+    # down. The first version of this test set 20,000 in limits.json while recall.py carried a
+    # hardcoded 2,000,000, so the file was never over anything and the test passed under the very
+    # mutation it was written to catch. recall.py now reads the config value, which is what makes
+    # this assertion mean what it says.
+    import subprocess as _sp
+    probe = _sp.run([sys.executable, "-B", "-c",
+                     f"import sys; sys.path.insert(0, {str(PLUGIN)!r}); import recall;"
+                     " print(recall.MAX_FILE_BYTES)"],
+                    capture_output=True, text=True, env=world["env"])
+    assert probe.stdout.strip() == str(ceiling), \
+        f"recall does not use the configured ceiling ({probe.stdout.strip()!r}); test is vacuous"
+    assert live.stat().st_size > ceiling, "fixture is not over the search ceiling"
+    run_stop(world)
+    run_stop(world)
+    assert live.stat().st_size <= 4000, "a file past the search ceiling was never compacted"
+    assert state_doc(world)["compacted"], "compaction happened but was not recorded"

@@ -79,7 +79,23 @@ NON_MEMORY_DIRS = frozenset({"Pharos", "Channels"})
 # the reason is different: queues restate the vault's vocabulary without answering anything,
 # generated views answer correctly but only by DUPLICATING an entry that is already found.
 GENERATED_DIRS = frozenset({".gedaechtnis"})
-MAX_FILE_BYTES = 2_000_000
+def _max_file_bytes() -> int:
+    """The search ceiling, read from `rules/limits.json` rather than kept here.
+
+    It was a literal here AND a documented value in `limits.json` whose own prose said "recall.py
+    will not look inside a file larger than this" — two copies of one number, one of which nothing
+    enforced. `maintenance.py` already reads the config value, so the two could disagree and the
+    hook would report a ceiling the search does not use. The literal survives only as the fallback
+    for an install whose limits file is unreadable."""
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
+        import limits
+        return int(limits.get("max_searchable_file_bytes"))
+    except Exception:
+        return 2_000_000
+
+
+MAX_FILE_BYTES = _max_file_bytes()
 
 # BM25's length normalisation, and the one number that tunes it: a hit's weighted frequency is
 # divided by `(1 - b) + b * size / pivot`, where `pivot` is the mean size of the entries that
