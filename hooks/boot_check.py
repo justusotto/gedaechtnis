@@ -66,7 +66,11 @@ EVIDENCE_CAP = 8
 # fleet's own boot chain writes `<project>/.claude/agents/` as a PLACEHOLDER, and without it the
 # checker reported `/.claude/agents` as a path that does not exist — which is true, and not a claim
 # anybody made.
-PATH_RE = re.compile(r"(?<![\w@:.>])(?:~|/[A-Za-z0-9_.+\-]+)(?:/[A-Za-z0-9_.+\-]+)+/?")
+# `/` is in the lookbehind for a reproduced one: a URL's double slash leaves the second `/`
+# preceded by the first, so `http://example.com/a/b` yielded the "path" `/example.com/a/b` and was
+# reported as missing from disk. No boot file carries a scheme-prefixed URL today; the first one
+# pasted in would have produced a confident false failure.
+PATH_RE = re.compile(r"(?<![\w@:.>/])(?:~|/[A-Za-z0-9_.+\-]+)(?:/[A-Za-z0-9_.+\-]+)+/?")
 SHA_BACKTICK_RE = re.compile(r"`([0-9a-f]{7,40})`")
 SHA_KEYWORD_RE = re.compile(r"\b(?:commit|HEAD)\s+`?([0-9a-f]{7,40})\b", re.I)
 WIKILINK_RE = re.compile(r"\[\[([^\]\|#]+)(?:#[^\]\|]*)?(?:\|[^\]]*)?\]\]")
@@ -115,17 +119,26 @@ def extract_claims(text: str) -> list[dict]:
     return uniq
 
 
-def basename_index(vault: Path) -> dict[str, int]:
+def basename_index(vault: Path) -> tuple[dict[str, int], bool]:
+    """(index, complete). The FLAG is the point, and it was missing.
+
+    `os.walk` failing on its first step — an absent vault, an unmounted volume, a permission blip —
+    returned an empty index, and an empty index makes every wikilink in every boot file report as a
+    confident failure. That is this organ's own defect class living inside the organ: a state that
+    could not be measured, rendering as a measurement. Reproduced by the row's reviewer."""
     idx: dict[str, int] = {}
+    if not vault.is_dir():
+        return idx, False
+    complete = True
     try:
-        for dirpath, dirnames, filenames in os.walk(vault):
+        for dirpath, dirnames, filenames in os.walk(vault, onerror=lambda e: None):
             dirnames[:] = [d for d in dirnames if not d.startswith(".")]
             for name in filenames:
                 if name.endswith(".md"):
                     idx[name[:-3]] = idx.get(name[:-3], 0) + 1
     except OSError:
-        pass
-    return idx
+        complete = False
+    return idx, complete
 
 
 def git_ok(path: Path) -> bool:
@@ -143,7 +156,13 @@ def candidate_repos(cwd: str, files) -> list[Path]:
     maintenance cost.
 
     The closure is derived — the session's cwd and the files' own locations — rather than read from
-    any roster, so it needs no configuration and cannot go stale."""
+    any roster, so it needs no configuration and cannot go stale.
+
+    The blast radius is wider than one file: a SHA is looked for in EVERY candidate repo, not only
+    the repo its own file lives in. That is deliberate (a vault file routinely cites a code repo's
+    commit) and it is the cost — a coincidental prefix collision across two candidates reads as
+    alive. A vault that needs more repos than this closure finds adds them through `extra_checks`
+    rather than through a roster here."""
     out, seen = [], set()
     for start in [VAULT, Path(cwd)] + [Path(f).parent for f in files]:
         root = _sh(["git", "-C", str(start), "rev-parse", "--show-toplevel"])
@@ -154,15 +173,25 @@ def candidate_repos(cwd: str, files) -> list[Path]:
 
 
 def _sh(args, timeout=15):
+    """stdout on success, None on failure. `_sh2` when the CALLER needs to tell failures apart."""
+    out, _err = _sh2(args, timeout)
+    return out
+
+
+def _sh2(args, timeout=15):
+    """(stdout|None, stderr). A caller that must distinguish "no" from "I could not tell" needs the
+    stderr: `git cat-file -t` fails identically for a commit that does not exist and for a short
+    prefix that matches several, and those are opposite facts."""
     try:
         p = subprocess.run(args, capture_output=True, text=True, timeout=timeout,
                            stdin=subprocess.DEVNULL)
-    except (OSError, subprocess.SubprocessError):
-        return None
-    return p.stdout.strip() if p.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError) as e:
+        return None, f"{e.__class__.__name__}"
+    return (p.stdout.strip() if p.returncode == 0 else None), p.stderr.strip()
 
 
-def check_claim(claim: dict, vault: Path, index: dict, repos: list) -> str | None:
+def check_claim(claim: dict, vault: Path, index: dict, repos: list,
+                index_complete: bool = True) -> str | None:
     """None when the claim holds, a reason when it does not, "UNCHECKED: …" when it could not be
     decided. Three outcomes, never two: the middle one is what the whole hook is about."""
     kind, value = claim["kind"], claim["claim"]
@@ -172,15 +201,27 @@ def check_claim(claim: dict, vault: Path, index: dict, repos: list) -> str | Non
         except OSError as e:
             return f"UNCHECKED: {e.__class__.__name__}"
     if kind == "wikilink":
+        if not index_complete:
+            return ("UNCHECKED: the vault could not be indexed, so no wikilink can be resolved")
         target = value.split("/")[-1].strip()
         return None if index.get(target) else "no file of that name in the vault"
     if kind == "sha":
         if not repos:
             return ("UNCHECKED: no git repository among the vault, this session's directory or the "
                     "boot files' own locations, so no commit can be resolved")
+        ambiguous = []
         for repo in repos:
-            if _sh(["git", "-C", str(repo), "cat-file", "-t", value]) == "commit":
+            out, err = _sh2(["git", "-C", str(repo), "cat-file", "-t", value])
+            if out == "commit":
                 return None
+            if "ambiguous" in (err or "").lower():
+                ambiguous.append(repo.name)
+        if ambiguous:
+            # A short prefix matching several objects fails EXACTLY as a missing one does. Calling
+            # that dead is a false accusation about a commit that exists; the honest verdict is
+            # that the token is too short to decide, in this repository, today.
+            return (f"UNCHECKED: `{value}` is an ambiguous prefix in {', '.join(ambiguous)} — too "
+                    f"short to resolve to one object")
         where = ", ".join(r.name for r in repos)
         return f"no such commit in {where}"
     return None
@@ -220,7 +261,7 @@ def run_extensions(vault: Path) -> tuple[list[dict], list[str]]:
 
 def compute(cwd: str) -> dict:
     files = boot_files(cwd)
-    index = basename_index(VAULT)
+    index, index_complete = basename_index(VAULT)
     repos = candidate_repos(cwd, files)
     failures, unreadable, n_claims = [], [], 0
     for path in files:
@@ -231,7 +272,7 @@ def compute(cwd: str) -> dict:
             continue
         for claim in extract_claims(text):
             n_claims += 1
-            why = check_claim(claim, VAULT, index, repos)
+            why = check_claim(claim, VAULT, index, repos, index_complete)
             if why:
                 failures.append({**claim, "file": str(path), "detail": why})
     extra, ext_unchecked = run_extensions(VAULT)
@@ -301,7 +342,13 @@ def main() -> None:
         except (ValueError, AttributeError):
             return text
     if old is None or sans_stamp(old) != sans_stamp(new):
-        state_path().write_text(new, encoding="utf-8")
+        # `archive.atomic_write`, not `write_text`: the same truncate-then-kill this arc fixed in
+        # R3-FIX. The stakes are far lower here — the file is regenerated at every session end, so
+        # a truncated one costs one session's facts line and self-heals — but a second copy of a
+        # bug the arc has already fixed once is not worth the two saved lines.
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        import archive
+        archive.atomic_write(state_path(), new)
     log("boot_check", f"claims={doc['n_claims']} failures={doc['n_failures']} "
                       f"unchecked={doc['n_unchecked']} extra={doc['n_extra']}")
 

@@ -237,3 +237,91 @@ def test_the_shipped_extension_RAISES_rather_than_reporting_nothing_when_git_fai
     (v / "Umb" / "Child" / "Map.md").write_text("# c\n")
     with pytest.raises(Exception):
         mod.run(v)
+
+
+# ------------------------------------------- the reviewer's three reproductions ----
+def bc_module():
+    sys.path.insert(0, str(HOOKS))
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("gd_bc_probe", HOOKS / "boot_check.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_a_vault_that_cannot_be_INDEXED_makes_wikilinks_UNCHECKED_not_dead(tmp_path):
+    """★ This organ's own defect class, found living inside the organ.
+
+    `basename_index` swallowed an `os.walk` failure and returned an EMPTY index — and an empty
+    index makes every wikilink in every boot file report as a confident failure. A state that could
+    not be measured, rendering as a measurement."""
+    mod = bc_module()
+    idx, complete = mod.basename_index(tmp_path / "no-such-vault")
+    assert idx == {} and complete is False
+    why = mod.check_claim({"kind": "wikilink", "claim": "Position", "line": 1},
+                          tmp_path, idx, [], complete)
+    assert why and why.startswith("UNCHECKED"), why
+    # POSITIVE CONTROL: with a real index, a genuinely absent target is still a real failure —
+    # the fix must not have turned the detector off.
+    (tmp_path / "Real.md").write_text("x\n")
+    idx2, complete2 = mod.basename_index(tmp_path)
+    assert complete2 and idx2.get("Real")
+    assert mod.check_claim({"kind": "wikilink", "claim": "Missing", "line": 1},
+                           tmp_path, idx2, [], complete2) == "no file of that name in the vault"
+
+
+def test_a_URL_is_not_a_path_claim():
+    """Reproduced by the row's reviewer: a URL's double slash leaves the second `/` preceded by the
+    first, which the lookbehind did not exclude, so `http://example.com/a/b` was extracted as the
+    path `/example.com/a/b` and reported missing from disk."""
+    mod = bc_module()
+    claims = mod.extract_claims("see http://example.com/a/b/c and https://x.org/y/z\n")
+    assert [c for c in claims if c["kind"] == "path"] == [], claims
+    # POSITIVE CONTROL: a real absolute path on the same line is still extracted.
+    claims = mod.extract_claims("see http://example.com/a/b and /no-such-root/real/file.md\n")
+    paths = [c["claim"] for c in claims if c["kind"] == "path"]
+    assert paths == ["/no-such-root/real/file.md"], paths
+
+
+def test_an_AMBIGUOUS_short_sha_is_UNCHECKED_not_a_dead_commit(tmp_path):
+    """`git cat-file -t` fails identically for a commit that does not exist and for a prefix that
+    matches several objects. Calling the second one dead is a false accusation about a commit that
+    is right there."""
+    mod = bc_module()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    # A FOUR-character collision, brute-forced over cheap blobs. Git refuses a prefix shorter than
+    # four as "not a valid object name" rather than as ambiguous, so a shorter fixture would test
+    # the wrong branch — which is how the first version of this test failed.
+    #
+    # Why not seven, which is the shortest the extractor will even offer? Because a 7-hex collision
+    # needs on the order of 10^5 objects to find, and building one would take longer than the whole
+    # suite. That gap IS the reviewer's finding stated honestly: real ambiguity at seven characters
+    # is rare today and gets likelier as a repository grows, and the branch that handles it is
+    # proven here at the length where a fixture can reach it.
+    prefixes = {}
+    ambiguous = None
+    for i in range(900):
+        (repo / "f.txt").write_text(f"content {i}\n")
+        sha = subprocess.run(["git", "-C", str(repo), "hash-object", "-w", "f.txt"],
+                             capture_output=True, text=True, check=True).stdout.strip()
+        if sha[:4] in prefixes and prefixes[sha[:4]] != sha:
+            ambiguous = sha[:4]
+            break
+        prefixes[sha[:4]] = sha
+    assert ambiguous, "the fixture never produced a colliding prefix; the test proves nothing"
+    why = mod.check_claim({"kind": "sha", "claim": ambiguous, "line": 1}, repo, {}, [repo])
+    assert why and why.startswith("UNCHECKED"), why
+    # POSITIVE CONTROL: a token that is genuinely in no repo is still reported as a real failure.
+    why2 = mod.check_claim({"kind": "sha", "claim": "deadbee", "line": 1}, repo, {}, [repo])
+    assert why2 and not why2.startswith("UNCHECKED"), why2
+
+
+def test_the_state_file_is_written_atomically(world):
+    """Same class R3-FIX closed in `archive.py`: a truncate-then-kill. The stakes are far lower —
+    the file is regenerated every session end — but a second copy of a bug this arc already fixed
+    is not worth two saved lines."""
+    src = (HOOKS / "boot_check.py").read_text(encoding="utf-8")
+    assert "archive.atomic_write(state_path()" in src
+    assert "state_path().write_text(" not in src
