@@ -72,6 +72,7 @@ import limits
 import session_start
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import archive
+import recall
 from common import read_input, log, guarded, VAULT, STATE
 
 STATE_FILE = "maintenance.json"
@@ -424,22 +425,26 @@ def facts_lines(doc: dict) -> list[str]:
 
 # -------------------------------------------------------------- compaction ----
 def memory_files() -> list[Path]:
-    """Every `.md` in the vault that a search would read — the population the size bound is about.
-    Dot-directories are skipped (git internals, generated mirrors); nothing else is."""
-    out = []
+    """Every `.md` a search would read — which is the population the size bound is about, and the
+    only population this hook may rewrite.
+
+    ★ THE EXCLUSIONS ARE `recall.py`'S OWN, imported rather than restated. The bound exists because
+    a file too large for `recall.md_files()` stops being searched, so "which files does that apply
+    to" has exactly one correct answer and it lives there. A second list here would drift, and the
+    direction it would drift in is the dangerous one: compaction REWRITES the files it touches, so
+    a set that is too WIDE does not merely waste work — it rewrites a work queue or a lane notice
+    outbox, which are operational surfaces that other machinery parses and no one asked this hook
+    to edit. Queues (`Pharos/`, `Channels/`), generated mirrors (`.gedaechtnis/`) and git internals
+    are all out, for the same reasons the search leaves them out.
+    """
     try:
-        candidates = list(VAULT.rglob("*.md"))
+        import recall
+    except Exception:
+        return []
+    try:
+        return list(recall.md_files(VAULT))
     except OSError:
         return []
-    for md in candidates:
-        try:
-            rel = md.relative_to(VAULT)
-        except ValueError:
-            continue
-        if any(part.startswith(".") for part in rel.parts):
-            continue
-        out.append(md)
-    return out
 
 
 def compact_vault() -> list[dict]:

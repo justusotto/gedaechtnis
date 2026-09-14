@@ -619,3 +619,23 @@ def test_a_file_outside_any_region_is_compacted_too(world):
     run_stop(world)
     assert loose.stat().st_size <= 4000, "a vault-root memory file was never compacted"
     assert nomap.stat().st_size <= 4000, "a file in a Map-less directory was never compacted"
+
+
+def test_compaction_never_rewrites_a_queue_or_a_generated_mirror(world):
+    """Compaction REWRITES what it touches, so a scope that is too wide is destructive rather than
+    merely wasteful: a work queue and a lane notice outbox are operational surfaces other machinery
+    parses, and nothing asked this hook to edit them. The exclusions are recall.py's own."""
+    world["limits_file"].write_text(json.dumps(dict(LIMITS, max_memory_file_bytes=4000)))
+    (world["repo"] / ".atlas-lane").write_text("lane: PROJ\npath: Proj/\npath: Pharos/\n")
+    body = "# q\n" + "".join(f"\n## row {i}\n" + "b" * 400 + "\n" for i in range(60))
+    queue = world["vault"] / "Pharos" / "queues" / "regions" / "proj.md"
+    queue.parent.mkdir(parents=True)
+    queue.write_text(body)
+    mirror = world["vault"] / ".gedaechtnis" / "views" / "Proj" / "Canon.md"
+    mirror.parent.mkdir(parents=True)
+    mirror.write_text(body)
+    before_q, before_m = queue.read_bytes(), mirror.read_bytes()
+    run_stop(world)
+    run_stop(world)
+    assert queue.read_bytes() == before_q, "compaction rewrote a work queue"
+    assert mirror.read_bytes() == before_m, "compaction rewrote a generated mirror"
