@@ -445,11 +445,26 @@ def test_the_bundle_is_not_searchable_memory_EVEN_WITH_include_queues(world, tmp
 
 
 # ----------------------------------------------------- the guard on the guard ----
+def guard():
+    """`conftest.py`'s two functions, loaded BY PATH.
+
+    `import conftest` works when this file's suite runs alone and raises when it runs beside
+    atlas-system's own `tests/`, which has a `conftest.py` of its own: the bare module name is
+    ambiguous and the import went to whichever came first. Caught by running both suites in one
+    pytest invocation, which is how the package is actually checked before a merge."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "gedaechtnis_tests_conftest", Path(__file__).resolve().parent / "conftest.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 def test_the_real_vault_guard_would_notice_a_write(tmp_path):
     """The positive control for `conftest.py`'s session fixture.
 
     A guard whose comparison cannot change is a guard that passes forever."""
-    from conftest import fingerprint, changed
+    fingerprint, changed = guard().fingerprint, guard().changed
     v = tmp_path / "vault"
     v.mkdir()
     subprocess.run(["git", "init", "-q", str(v)], check=True)
@@ -471,7 +486,7 @@ def test_the_guard_sees_a_GITIGNORED_file_being_modified(tmp_path):
     no opinion about an ignored file's contents. In this vault the ignored files are precisely the
     hook-written status files that are @-imported into every session and whose absence fails
     silently: a stray test corrupting one would have sailed through clean."""
-    from conftest import fingerprint, changed
+    fingerprint, changed = guard().fingerprint, guard().changed
     v = tmp_path / "vault"
     (v / "Global").mkdir(parents=True)
     subprocess.run(["git", "init", "-q", str(v)], check=True)
