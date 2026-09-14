@@ -333,3 +333,86 @@ def test_an_oversized_entry_does_not_make_the_NEXT_segment_oversized_too(live):
     assert len(segs) == 2, [s.name for s in segs]
     assert segs[1].stat().st_size < limit
     assert "after" in segs[1].read_text(encoding="utf-8")
+
+
+# ------------------------------------------- atomic writes, proved by an actual SIGKILL ----
+KILL_SCRIPT = r'''
+import os, signal, sys, pathlib
+sys.path.insert(0, {plugin!r})
+sys.path.insert(0, {hooks!r})
+import archive
+
+LIVE = {live!r}
+WHERE = {where!r}
+LIVE_NAME = pathlib.Path(LIVE).name
+
+# ★ THE KILL IS TARGETED AT THE LIVE FILE'S OWN WRITE, and the first version of this harness was
+# not. compact_file appends to the ARCHIVE before it rewrites the live file, so an untargeted kill
+# fired on the archive write and the process died before it ever reached the rewrite under test —
+# the live file was then "intact" for the trivial reason that nothing had touched it, and the test
+# passed even with the atomic write reverted. A crash harness has to crash the right write.
+_real_replace = os.replace
+def replace(a, b):
+    if WHERE == "before-replace" and pathlib.Path(b).name == LIVE_NAME:
+        os.kill(os.getpid(), signal.SIGKILL)
+    return _real_replace(a, b)
+os.replace = replace
+
+_real_mkstemp = archive.tempfile.mkstemp
+def mkstemp(*a, **k):
+    fd, name = _real_mkstemp(*a, **k)
+    if WHERE == "mid-write" and LIVE_NAME in pathlib.Path(name).name:
+        os.write(fd, b"half a file and then nothing")
+        os.fsync(fd)
+        os.kill(os.getpid(), signal.SIGKILL)
+    return fd, name
+archive.tempfile.mkstemp = mkstemp
+
+archive.compact_file(pathlib.Path(LIVE), limit=4000)
+print("NOT KILLED")
+'''
+
+
+def _kill_run(tmp_path, live, where):
+    import subprocess, textwrap
+    script = tmp_path / f"kill_{where}.py"
+    script.write_text(KILL_SCRIPT.format(
+        plugin=str(PLUGIN), hooks=str(PLUGIN / "hooks"), live=str(live), where=where))
+    return subprocess.run([sys.executable, "-B", str(script)], capture_output=True, text=True)
+
+
+@pytest.mark.parametrize("where", ["before-replace", "mid-write"])
+def test_a_SIGKILL_during_the_live_rewrite_leaves_the_original_intact(live, tmp_path, where):
+    """★ The claim, proved the only way it can be: kill the process and read the file back.
+
+    `Path.write_text` opens with 'w', which TRUNCATES before writing. A kill in that window left
+    the live role file empty or half-written — real memory, gone, and git only restores what was
+    already committed. Two kill points: after the replacement is written but before the rename,
+    and half-way through writing it. In both, the original must be byte-identical."""
+    big_live(live, 60)
+    before = live.read_bytes()
+    assert len(before) > 4000
+    p = _kill_run(tmp_path, live, where)
+    assert "NOT KILLED" not in p.stdout, "the harness never reached the kill point; test is vacuous"
+    assert p.returncode != 0, f"process was not killed (rc={p.returncode})"
+    assert live.read_bytes() == before, \
+        f"the live file changed after a SIGKILL at {where}: {len(before)} B -> {live.stat().st_size} B"
+
+
+@pytest.mark.parametrize("where", ["before-replace", "mid-write"])
+def test_a_SIGKILL_leaves_no_temp_debris_the_search_would_read(live, tmp_path, where):
+    """A crashed run must not litter the vault with half-files. They are hidden AND suffixed
+    `.tmp`, so nothing globbing `*.md` picks them up even before cleanup."""
+    big_live(live, 60)
+    _kill_run(tmp_path, live, where)
+    stray = [q.name for q in live.parent.iterdir() if q.suffix == ".md" and q.name != live.name]
+    assert not [s for s in stray if ".tmp" in s], stray
+    assert list(live.parent.glob("*.md")) == [live] or all(
+        archive.is_sidecar(q.stem) for q in live.parent.glob("*.md") if q != live)
+
+
+def test_atomic_write_replaces_content_in_the_ordinary_case(live):
+    """The negative control: with nothing killing it, atomic_write is an ordinary write."""
+    archive.atomic_write(live, "# replaced\n")
+    assert live.read_text(encoding="utf-8") == "# replaced\n"
+    assert not [q for q in live.parent.iterdir() if ".tmp" in q.name]

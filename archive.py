@@ -46,7 +46,9 @@ Nothing here deletes, rewrites or moves an existing file. `append_entries` only 
 file or creates a new one.
 """
 from __future__ import annotations
+import os
 import re
+import tempfile
 from pathlib import Path
 
 import sys
@@ -59,6 +61,43 @@ import limits  # noqa: E402
 SIDECAR_RE = re.compile(r"-(archive|fixed|resolved)(?:-(\d+))?$", re.I)
 
 FIRST_SEGMENT_SUFFIX = "-archive"
+
+
+def atomic_write(path: Path, text: str) -> None:
+    """Replace `path`'s contents, or leave the file exactly as it was. Never anything between.
+
+    ## Why this is not a nicety
+
+    `Path.write_text` opens with `'w'`, which TRUNCATES before it writes. A process killed in that
+    window leaves the file empty or half-written, and the caller here is compaction — which rewrites
+    a LIVE role file holding memory the user wrote. The moment the Stop hook began compacting a real
+    vault, that stopped being a theoretical ordering concern and became a way to lose someone's
+    notes. Git is not the safety net people assume: it can only restore what was already committed,
+    and compaction routinely touches entries newer than the last commit.
+
+    The recipe is the ordinary one and every step earns its place: write the replacement to a
+    temporary file IN THE SAME DIRECTORY (so `os.replace` is a rename within one filesystem, which
+    is atomic, rather than a copy across two, which is not); `flush` and `fsync` it so the bytes are
+    on the device before anything points at them; then `os.replace`, which either fully succeeds or
+    leaves the original untouched. The temp file is cleaned up if any of that fails, so a crashed
+    run does not litter the vault with debris the next search would try to read.
+    """
+    tmp = None
+    try:
+        fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+        tmp = Path(tmp_name)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)            # atomic: the old inode survives until this instant
+        tmp = None
+    finally:
+        if tmp is not None:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
 
 
 def segment_limit() -> int:
@@ -208,8 +247,7 @@ def compact_file(live: Path, limit: int | None = None, floor_share: float = 0.4)
             pass
     if outgoing:
         append_entries(live, "".join(outgoing), limit=limit)
-    live.write_text(head + ("\n## " + "\n## ".join(entries_[moved:]) if entries_[moved:] else "\n"),
-                    encoding="utf-8")
+    atomic_write(live, head + ("\n## " + "\n## ".join(entries_[moved:]) if entries_[moved:] else "\n"))
     return moved
 
 
@@ -235,8 +273,17 @@ def append_entries(live: Path, text: str, limit: int | None = None) -> Path:
     for chunk in chunks:
         blob = len(chunk.encode("utf-8"))
         target = current_segment(live, blob, limit)
-        if not target.exists():
-            target.write_text(header_for(live), encoding="utf-8")
-        with target.open("a", encoding="utf-8") as fh:
-            fh.write(chunk)
+        # The append is atomic too, for the same reason and one more: a kill DURING a plain append
+        # leaves a half-written entry in the archive, and half an entry reads as a whole one. The
+        # segment is bounded by `max_memory_file_bytes`, so rewriting it whole is a bounded cost
+        # paid only on a compaction.
+        existing_text = ""
+        if target.exists():
+            try:
+                existing_text = target.read_text(encoding="utf-8")
+            except OSError:
+                existing_text = ""
+        else:
+            existing_text = header_for(live)
+        atomic_write(target, existing_text + chunk)
     return target or current_segment(live, 0, limit)
