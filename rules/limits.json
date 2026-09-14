@@ -2,8 +2,9 @@
   "_": "Every threshold this plugin acts on, in one place. Read it; never repeat a number from it.",
   "_provenance": "Boot budget chosen by the row-S0 A/B, 2026-09-14: 81 cells (3 budgets x 3 loads x 3 curves x 3 seeds) simulated to day 365 through the plugin's own hooks. Run: eval/simulator/run.py --ab 20000,25000,40000 --horizon 365 --seeds 3. Result and reasoning: the repo's .orchestration/review/complete1-build-2026-09-14/ROW-S0.md.",
 
-  "boot_budget_bytes": 25000,
-  "_boot_budget_bytes": "The @-import chain a session boots with. 25,000 B is NOT the A/B's arithmetic winner: the A/B's headline metric was DEGENERATE (every arm's answered recall sat inside the measured noise floor, so the metric reduced to 1/tokens and would name the smallest budget on any ballot). What the A/B could read: 40,000 is ruled out — it costs ~2,762 more boot tokens every session for a boot-recall gain under the noise floor. Between 20,000 and 25,000 the instrument could NOT separate the arms in any load. The tie-break is therefore external and documented, not invented: Claude Code's own auto-memory loads the first 200 lines / 25 KB, so a budget above 25 KB spends tokens the tool will not honour and one below it forfeits headroom the tool gives for free.",
+  "boot_budget_bytes": 20000,
+  "_boot_budget_bytes": "The @-import chain a session boots with. What the A/B established: 40,000 is ruled out (it costs ~2,762 more boot tokens every session for a boot-recall gain under the measured noise floor), and between 20,000 and 25,000 the instrument could NOT separate the arms in any load — its headline metric was DEGENERATE, reducing to 1/tokens, so it would name the smallest budget on any ballot and decides nothing by itself. The tie-break is the one piece of DOCUMENTED guidance that applies to this mechanism: Claude Code targets 'under 200 lines per CLAUDE.md file', because longer files consume more context and reduce adherence. At the 101 B/line measured across real role files that is ~20,200 B, so 20,000 is the budget that guidance names.",
+  "_boot_budget_bytes_correction": "This was 25,000 until 2026-09-14, justified by the auto-memory cap of 'the first 200 lines or 25 KB'. That justification was WRONG and the vault's owner caught it: that cap governs MEMORY.md only. The docs are explicit — 'This limit applies only to MEMORY.md. CLAUDE.md files are loaded in full regardless of length' (Claude Code docs, memory.md). This plugin's vault loads through @-imports from CLAUDE.md, which are never truncated, so no 25 KB cliff exists here and nothing was being bought by sitting under one. The real cost of a large boot file is context and adherence, not truncation — which is what the 200-line guidance is about, and it points at 20,000.",
 
   "boot_budget_warn_bytes": 20000,
   "_boot_budget_warn_bytes": "Warn on the edit that crosses this; refuse growth only past boot_budget_bytes. A door that first speaks at the moment it refuses has never given anyone a chance to act.",
@@ -22,6 +23,9 @@
     "Canon": 800
   },
   "_role_soft_limits_lines": "Per-role line counts above which a file is offered to a cleanup pass. They are REVIEW thresholds, never delete thresholds, and a role absent from this table has no line limit. A stem here that the vault does not use costs nothing.",
+
+  "boot_budget_warn_lines": 200,
+  "_boot_budget_warn_lines": "The documented guidance in its own units. Kept in LINES as well as bytes because that is how the guidance is written, and because bytes-per-line varies by more than 2x across real role files (76 to 159 B/line measured) — a byte budget alone silently means a different number of lines in a terse file than in a discursive one.",
 
   "max_searchable_file_bytes": 2000000,
   "_max_searchable_file_bytes": "recall.py will not look inside a file larger than this, and says nothing when it skips one. Row S0 measured what that does: at medium load, day 365, 46% of held-out answers were already unreachable by tool call, and at high load 100% were -- because the rolling window pours every compacted entry into ONE growing archive file that crosses this ceiling. The number is here so a later row can read it rather than rediscover it; the fix is a SEGMENTED archive (row R3), not a larger ceiling.",

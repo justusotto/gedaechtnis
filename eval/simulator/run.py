@@ -96,7 +96,11 @@ sys.path.insert(0, str(PLUGIN / "eval"))
 import session_start  # noqa: E402  the plugin's own boot measurement; never reimplemented
 from recall_bench import run as bench  # noqa: E402  the plugin's own recall scorer
 
-SNAPSHOTS = (30, 90, 180, 365)
+# Snapshot days. Years 2 and 3 are here on the owner's instruction (2026-09-14): "then also test
+# more . year two 3 etc. so it really never fails." Year 1 was where the archive first went blind
+# under heavy load; a system that is asked to hold a memory for good has to be run past the point
+# where its first failure appeared, not up to it.
+SNAPSHOTS = (30, 90, 180, 365, 730, 1095)
 CURVES = ("linear", "exponential", "bursty")
 
 # (region B/day, boot-file B/day, provenance) — see the module docstring.
