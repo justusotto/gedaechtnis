@@ -517,3 +517,43 @@ def agent_overlay(agent_md: str) -> dict:
     if fm.get("model"):
         out["_dropped_model"] = fm["model"]
     return out
+
+
+# --- 10. cross-vendor model tiers -------------------------------------------------
+#
+# An agent definition names a model in its HOME vendor's vocabulary ("sonnet", "opus").
+# Writing that straight into another vendor's config pins an id that does not exist there --
+# done once, to 11 files, before it was caught. The correspondence is a judgement about
+# capability bands, so it lives as DATA in `rules/model-map.json` rather than as a dict here,
+# and availability is resolved against the live harness at apply time: a plan that does not
+# carry a tier's model falls back to the harness default rather than pinning an id that errors.
+
+MODEL_MAP_PATH = Path(__file__).resolve().parent / "rules" / "model-map.json"
+
+
+def load_model_map(path: Path | None = None) -> dict:
+    try:
+        return json.loads(Path(path or MODEL_MAP_PATH).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def model_for(home_model: str, home_vendor: str, target_vendor: str,
+              available: set[str] | None = None, mapping: dict | None = None) -> tuple[str | None, str]:
+    """Translate a model id from one vendor to another via the tier map.
+
+    Returns (target_id_or_None, reason). None means "leave the harness default", and the
+    reason says why -- no tier, or the tier's model is not on this account.
+    """
+    mp = mapping if mapping is not None else load_model_map()
+    tiers = (mp or {}).get("tiers") or {}
+    for tier, vendors in tiers.items():
+        if vendors.get(home_vendor) == home_model:
+            target = vendors.get(target_vendor)
+            if not target:
+                return None, f"tier {tier!r} has no {target_vendor} model"
+            if available is not None and target not in available:
+                return None, (f"tier {tier!r} maps to {target!r}, which is not available on "
+                              f"this account -- leaving the harness default")
+            return target, f"tier {tier!r}"
+    return None, f"{home_model!r} is in no tier of the map"
