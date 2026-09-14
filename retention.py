@@ -270,6 +270,9 @@ def main() -> int:
         md = report_md(rep, args.top)
         if args.json: Path(args.json).write_text(json.dumps(rep, indent=1), encoding="utf-8")
         if args.md: Path(args.md).write_text(md, encoding="utf-8")
+        # not-an-entry-splitter: this truncates THIS function's own freshly generated report at
+        # its first section for the terminal. It never touches a memory file, so the package's
+        # fence-aware `archive.split_entries` would be the wrong tool and a heavier one.
         print(md if not args.md else md.split("\n## ")[0])
         return 0
     if args.cmd == "apply":

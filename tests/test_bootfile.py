@@ -568,12 +568,33 @@ def test_the_CLEANUP_pass_never_touches_a_boot_file(mod, vault, tmp_path):
     assert boot.read_text() == before
 
 
+def l_is_comment(line: str) -> bool:
+    return line.lstrip().startswith("#")
+
+
 def test_every_splitter_in_the_package_is_the_SAME_ONE(mod):
     """The rule that would have prevented three review rounds. Four modules each split on
-    `\\n## `; each tore a fence; each was fixed one at a time. A grep is the cheapest guard against
-    a fifth copy appearing."""
-    for name in ("archive.py", "cleanup.py", "bootfile.py", "hooks/maintenance.py"):
-        src = (PLUGIN / name).read_text(encoding="utf-8")
-        code = "\n".join(l for l in src.splitlines()
-                         if not l.lstrip().startswith("#") and '"""' not in l)
-        assert 'split("\\n## ")' not in code, f"{name} has its own entry splitter again"
+    `\\n## `; each tore a fence; each was fixed one at a time.
+
+    It scans EVERY module in the package, because the first version of this very test listed four
+    files BY HAND — and the fourth reviewer then found the fifth copy in `eval/simulator/run.py`,
+    which the list did not mention. A guard whose reach is a hand-written list protects exactly the
+    places somebody had already thought of, which are the places that were already fixed."""
+    offenders = []
+    for path in sorted(PLUGIN.rglob("*.py")):
+        rel = path.relative_to(PLUGIN)
+        if rel.parts[0] == "tests" or "__pycache__" in rel.parts:
+            continue
+        lines = path.read_text(encoding="utf-8").splitlines()
+        for i, line in enumerate(lines):
+            if l_is_comment(line) or '"""' in line or 'split("\\n## ")' not in line:
+                continue
+            # A WAIVER AT THE SITE, not an exemption list in this test. A file list here would
+            # protect the places somebody had already thought of — which is how the fifth copy hid.
+            # A line that genuinely splits something other than memory says so where it is written,
+            # and a reader of that line sees the claim it is making.
+            window = "\n".join(lines[max(0, i - 4):i])
+            if "not-an-entry-splitter" in window:
+                continue
+            offenders.append(f"{rel}:{i + 1}")
+    assert not offenders, f"these modules have their own entry splitter again: {offenders}"

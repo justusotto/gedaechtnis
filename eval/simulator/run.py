@@ -303,8 +303,14 @@ def compact(sb: Sandbox, budget: int, floor_share: float = 0.4) -> int:
         return 0
     live = sb.role(BOOT_STEM)
     text = live.read_text(encoding="utf-8")
-    parts = text.split("\n## ")
-    head, entries_ = parts[0], parts[1:]
+    # ★ `archive.split_entries`, not a split of our own. This function carried the naive
+    # `text.split("\n## ")` while the comment six lines below it said the segmentation is "the
+    # package's own, not a copy living in the harness" — and a copy is exactly what the split was.
+    # It tore a fenced code block containing a `## ` line, promoting a fence-interior line to a
+    # spurious entry, which in a MEASUREMENT harness means the numbers describe a compaction the
+    # product would never perform. Row R6's fourth reviewer found it after three rounds of the same
+    # defect behind other doors.
+    head, entries_ = archive.split_entries(text)
     if not entries_:
         return 0                        # a head with no entries left: nothing to move
     # ONE pass. The loop this replaces re-read and re-wrote the whole boot file per entry moved,
@@ -315,16 +321,16 @@ def compact(sb: Sandbox, budget: int, floor_share: float = 0.4) -> int:
     moved = 0
     removed = 0
     while moved < len(entries_) and boot - removed > target:
-        removed += len(("\n## " + entries_[moved]).encode("utf-8"))
+        removed += len(entries_[moved].encode("utf-8"))
         moved += 1
     if not moved:
         return 0
-    live.write_text(head + ("\n## " + "\n## ".join(entries_[moved:]) if entries_[moved:] else "\n"),
+    live.write_text(head + ("".join(entries_[moved:]) if entries_[moved:] else "\n"),
                     encoding="utf-8")
     # R3: the archive is SEGMENTED, and the segmentation is the package's own (`archive.py`), not a
     # copy living in the harness. That is the whole point of the re-run — a simulator that measured
     # its own private implementation of the fix would measure nothing about the product.
-    archive.append_entries(live, "".join("\n## " + e for e in entries_[:moved]))
+    archive.append_entries(live, "".join(entries_[:moved]))
     return moved
 
 
