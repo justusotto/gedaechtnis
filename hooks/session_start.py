@@ -190,6 +190,17 @@ def main() -> None:
         # anywhere to distinguish that from nothing having fired.
         import traceback as _tb
         log("hook-errors", "session_start/maintenance: " + _tb.format_exc().replace("\n", " | "))
+    # The same contract for the boot check: read what the last session end computed, say nothing
+    # when nothing failed, and never let this organ's bug cost the session its other facts.
+    try:
+        import boot_check
+        _b = json.loads(boot_check.state_path().read_text(encoding="utf-8"))
+        lines.extend(boot_check.facts_lines(_b))
+    except FileNotFoundError:
+        pass                                           # no session has ended yet; nothing to report
+    except Exception:
+        import traceback as _tb
+        log("hook-errors", "session_start/boot_check: " + _tb.format_exc().replace("\n", " | "))
     ops = config.owner_pages_status()                  # None unless config.json names a script
     if ops:
         rc, out, err = sh([config.python(), str(ops), "--json"], timeout=8)
