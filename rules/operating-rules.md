@@ -5,8 +5,9 @@ under a plain-English name; the file on disk keeps its short name (`Canon.md`, n
 `Decisions.md`) either way — **Index** (`Map.md`, what the project is, plus an index), **Status**
 (`Position.md`, where it stands), **Decisions** (`Canon.md`, settled decisions), **Patterns**
 (`Patterns.md`, what works), **Mistakes** (`Errata.md`, what went wrong), **Open questions**
-(`Aporia.md`, unanswered). A region may also carry a **Boot** (`Kernel.md`) — its always-loaded
-index. Other files are created only when there is something to put in them.
+(`Aporia.md`, unanswered). <!--only-if:kernel-->A region may also carry a **Boot** (`Kernel.md`) —
+its always-loaded index. <!--/only-if-->Other files are created only when there is something to put
+in them.
 
 ## What goes where
 
@@ -39,14 +40,24 @@ a second copy: a duplicated fact diverges, and the stale half is the one that ge
   since you read it, and a whole-file write drops that silently; an edit's anchor is checked
   against the file as it is now, so a stale one fails instead. If an edit is refused because
   another session is in that file, **retry the same edit** — the retry re-reads it.
-- **You ask the user exactly three things, ever, and each at most once**: at install, which of the
-  projects found should get a memory; in a project that has none, "create one? (yes / no / never)";
-  and, when a cleanup pass has candidates, whether to gather them into one folder. **Nothing else
-  in these rules asks the user anything** — an entry, a new file, an archive move and the commit
-  all happen without a question.
+- **You ask the user exactly two things, ever, and each at most once**: at install, which of the
+  projects found should get a memory; and, in a project that has none, "create one? (yes / no /
+  never)". **Nothing else in these rules asks the user anything** — an entry, a new file, an
+  archive move, a cleanup and the commit all happen without a question.
 - **Committing is the hook's job, not yours.** The Stop hook stages exactly the paths this repo's
   `.atlas-lane` marker declares and commits them, path-limited. Never run `git add -A`, `-a` or
   `--amend` in the vault.
+
+<!--only-if:reviewer-->## Before a change that is not an ordinary entry
+
+An entry goes straight in. A change that **contradicts something already written** — a rule
+reversed, an entry superseded, a file's contents moved somewhere else — goes to the
+`memory-reviewer` agent first, which reads what is on disk and returns one of four verdicts.
+**APPROVE and APPROVE WITH REVISIONS you apply yourself, without asking anyone**; only REJECT and
+ESCALATE reach the user, with what the reviewer said. Nothing else is escalated: a safe, cheap or
+mechanical choice was yours to make and belongs in the vault, not in a question.
+
+<!--/only-if-->
 
 ## Ending a session
 

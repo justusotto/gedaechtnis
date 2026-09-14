@@ -298,21 +298,66 @@ def no_memory_line(cwd: str) -> str:
             'about it.')
 
 
+ONLY_IF_RE = re.compile(r"<!--only-if:([a-z_]+)-->(.*?)<!--/only-if-->", re.S)
+
+
+def rules_conditions() -> dict[str, bool]:
+    """Which conditional paragraphs of the rules apply to THIS vault.
+
+    A condition is only ever "this paragraph cannot apply here" — never "this user probably does
+    not need to be told". The distinction is the whole safety of the mechanism: a session that is
+    not told a rule does not follow it, and nothing says so afterwards.
+
+    - `kernel` — the vault has at least one boot file. Telling a session about a file class its
+      vault does not contain is describing somebody else's vault.
+    - `reviewer` — the `memory-reviewer` agent is installed. A trimmed install that lacks it
+      cannot route anything to it, and an instruction to use a tool that is not there is worse
+      than silence: it invites the model to invent a substitute."""
+    plugin = Path(__file__).resolve().parent.parent
+    has_kernel = False
+    try:
+        for dirpath, dirnames, filenames in os.walk(VAULT):
+            dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+            if "Kernel.md" in filenames:
+                has_kernel = True
+                break
+    except OSError:
+        has_kernel = False
+    return {"kernel": has_kernel,
+            "reviewer": (plugin / "agents" / "memory-reviewer.md").is_file()}
+
+
+def assemble_rules(text: str, conditions: dict[str, bool]) -> str:
+    """The rules with each conditional span kept or dropped, and the seams tidied.
+
+    An UNKNOWN condition name is KEPT, never dropped. A typo in a sentinel would otherwise delete
+    a rule from every session silently, which is the one failure this mechanism must not be able
+    to cause — and the direction of that default is the only thing protecting it."""
+    def keep(m):
+        return m.group(2) if conditions.get(m.group(1), True) else ""
+    out = ONLY_IF_RE.sub(keep, text)
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    return "\n".join(line.rstrip() for line in out.splitlines()).strip()
+
+
 def rules_block(source) -> list[str]:
     """The operating rules, at `startup` only, or [] — see the module docstring.
 
     A source Claude Code did not send (an absent key, a direct invocation) is treated as a
     startup: the failure that matters is a session running with no rules at all, and repeating
-    them on a resume costs only tokens."""
+    them on a resume costs only tokens.
+
+    The text is ASSEMBLED for the vault in front of it rather than shipped whole — see
+    `rules_conditions` for what may vary and, more importantly, for what may not."""
     if (source or "startup") != "startup" or not config.flag("inject_rules", True):
         return []
     rules = Path(__file__).resolve().parent.parent / "rules" / "operating-rules.md"
     try:
-        text = rules.read_text(encoding="utf-8").strip()
+        text = rules.read_text(encoding="utf-8")
     except OSError:                                  # a trimmed install without the rules file
         return []
     return ["", "The operating rules for this vault (from the Gedächtnis plugin; they are how "
-                "you write to it):", "", text]
+                "you write to it):", "", assemble_rules(text, rules_conditions())]
 
 
 if __name__ == "__main__":

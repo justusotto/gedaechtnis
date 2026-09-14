@@ -236,9 +236,12 @@ your `CLAUDE.md` empty:
   [`rules/operating-rules.md`](rules/operating-rules.md) — under 3,000 B saying which of the six
   files a decision, a bug, a working approach, an open question or a state change goes in, to
   write it while the work happens rather than in a summary at the end, never to delete a vault
-  file, how to end the session, and the three questions a session ever asks you (the install
-  screen, the no-memory question, a cleanup with candidates — and nothing else). Injected at
-  `startup` only, because a resumed session already has it. `inject_rules: false` turns it off.
+  file, how to end the session, and the two questions a session ever asks you (the install screen
+  and the no-memory question — and nothing else; a cleanup applies by itself). Injected at
+  `startup` only, because a resumed session already has it, and ASSEMBLED for the vault in front
+  of it: a paragraph that cannot apply to this vault — the boot-file sentence in a vault with no
+  boot file, the install question in one that is long installed — is left out, and nothing else
+  ever is. `inject_rules: false` turns it off.
 - **The notes commit themselves.** At Stop, the vault files *this session wrote* — recorded as it
   writes them, and intersected with the paths its `.atlas-lane` marker declares — are staged one
   by one and committed as `Gedächtnis <gedaechtnis@local>`. Never `git add -A`, never `--amend`,
