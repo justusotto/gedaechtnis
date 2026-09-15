@@ -268,3 +268,60 @@ def test_the_lock_exclusion_is_narrow(tmp_path):
     assert ".atlas-writer.lock" not in seen and "owner" not in seen, f"a lock is being watched: {seen}"
     assert {"Position.md", "Position.md.tmp-x"} <= seen, (
         f"a half-written MEMORY file must still be watched — it is content, not coordination: {seen}")
+
+
+# ------------------------------------------------------- measured attribution (audit hook)
+# The attribution rule above is an INFERENCE. The audit hook is a MEASUREMENT, and the pair below
+# is what separates them: it must say CERTAIN when this process did the write, and must not claim
+# certainty when it did not.
+
+def test_a_write_by_this_process_is_recorded_as_certain(tmp_path):
+    """The half that turns a guess into a fact."""
+    sys.path.insert(0, str(HERE))
+    import vault_sentinel as vs
+    vs.install_audit()
+    victim = tmp_path / "written-here.md"
+    victim.write_text("this process did it\n", encoding="utf-8")
+    assert vs.written_by_us([str(victim)]) == [str(victim)]
+
+
+def test_a_path_this_process_never_touched_is_NOT_claimed(tmp_path):
+    """★ The half that matters after the CR6-FIX false positive. A file another process modified
+    must not be reported as ours — the whole failure was a rule asserting authorship it could not
+    have known."""
+    sys.path.insert(0, str(HERE))
+    import vault_sentinel as vs
+    vs.install_audit()
+    other = tmp_path / "written-by-someone-else.md"
+    subprocess.run([sys.executable, "-c",
+                    f"open({str(other)!r}, 'w').write('not us')"], check=True, stdin=subprocess.DEVNULL)
+    assert other.is_file(), "the fixture did not actually write the file"
+    assert vs.written_by_us([str(other)]) == [], \
+        "a write made by ANOTHER process was claimed as this one's"
+
+
+def test_a_read_is_not_recorded_as_a_write(tmp_path):
+    """Negative control on the hook itself: it fires on every `open`, so a read must not land in
+    the written set or every file the suite looks at becomes evidence against it."""
+    sys.path.insert(0, str(HERE))
+    import vault_sentinel as vs
+    vs.install_audit()
+    only_read = tmp_path / "only-read.md"
+    only_read.write_bytes(b"x")
+    vs._WRITTEN.discard(os.path.realpath(str(only_read)))
+    only_read.read_text(encoding="utf-8")
+    assert vs.written_by_us([str(only_read)]) == [], "a READ was recorded as a write"
+
+
+def test_the_message_does_not_claim_authorship_it_cannot_prove(tmp_path):
+    """The report's wording is the part a person acts on. When nothing was measured, it must say
+    the check cannot tell — not 'So this is the suite', which is what sent a real concurrent
+    writer's hook-edit ritual to a reader as a stray test."""
+    sys.path.insert(0, str(HERE))
+    import vault_sentinel as vs
+    roots = {"trees": [tmp_path], "files": []}
+    unmeasured = vs.report(["/somewhere/x.md"], "TEST t", roots, theirs=[], certain=[])
+    assert "DID NOT WRITE THESE" in unmeasured and "cannot tell" in unmeasured
+    assert "So this is the suite" not in unmeasured
+    measured = vs.report(["/somewhere/x.md"], "TEST t", roots, theirs=[], certain=["/somewhere/x.md"])
+    assert "THIS PROCESS WROTE" in measured and "fact, not an inference" in measured

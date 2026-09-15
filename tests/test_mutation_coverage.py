@@ -98,13 +98,6 @@ EXEMPT = {
     "hooks/gate.py::non_release_tags": "`git tag -l` is READ-ONLY; it is here only because the matcher sees the word `tag`",
     "tools/publish_check.py::foreign_tags": "`git tag -l` is READ-ONLY; same reason",
 
-    # --- owned by another session right now.
-    "archive.py::atomic_write": (
-        "THE chokepoint every memory-file rewrite funnels through, and the incident's own mutation "
-        "site. Owned by the CR6-FIX session (branch wt-R6FIX) as of 2026-09-15, where it already "
-        "carries an equivalent pytest refusal. TODO at merge: replace that copy with a "
-        "rootguard.permit() call — two implementations of one rule diverge, which is exactly how "
-        "gate.py ended up with a literal vault path in a list that was supposed to be derived."),
 }
 # ---------------------------------------------------------------------------------------------
 

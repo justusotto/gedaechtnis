@@ -177,6 +177,66 @@ def changed(before: dict, after: dict) -> list:
     return sorted(k for k in keys if before.get(k, "\0ABSENT") != after.get(k, "\0ABSENT"))
 
 
+# ---------------------------------------------------------------- what THIS process wrote
+# ★ Added 2026-09-15 after the CR6-FIX session hit a false positive the attribution rule below
+# could not see: the vault's own hook-edit ritual is BACKUP, EDIT, COMMIT LATER, so a perfectly
+# legitimate concurrent writer sits DIRTY for minutes — and "dirty" was the rule's evidence for
+# "a stray test wrote this and walked away". Three of its errors named
+# `.hooks/atlas-stop-hook.sh` and a `.pre-v7.10-…` sibling: the maintenance session installing a
+# hook version, mid-ritual.
+#
+# That session proposed keying on the `.pre-<desc>-<DATE>` sibling, which is that ritual's
+# signature. DECLINED, and the reason matters more than the decision: it is one vault's editing
+# convention, and teaching a SHIPPED plugin to recognise it is the hard-coded `~/Atlas` fallback
+# in a new costume — right on this machine, silently inert on anyone else's.
+#
+# The generic fix is to stop inferring and start MEASURING. An audit hook records every path this
+# process opens for writing, renames or removes. A changed path in that set was written by us, as
+# a fact rather than an inference.
+#
+# THE LIMIT, NAMED: an audit hook sees this process only. Much of this suite drives the product
+# through a subprocess, and those writes are invisible here. So the set makes "ours" CERTAIN and
+# never makes "not ours" certain — which is why an unrecorded change still fails, and why the
+# message below no longer claims to know which it is. Being unable to tell is reported as being
+# unable to tell.
+
+_WRITTEN: set = set()
+_AUDIT_INSTALLED = False
+
+
+def _audit(event: str, args):
+    try:
+        if event == "open":
+            path, mode = args[0], args[1]
+            if path and mode and any(c in str(mode) for c in "wax+"):
+                _WRITTEN.add(os.path.realpath(str(path)))
+        elif event in ("os.rename", "os.replace", "os.link", "os.symlink"):
+            for a in args[:2]:
+                if a:
+                    _WRITTEN.add(os.path.realpath(str(a)))
+        elif event in ("os.remove", "os.unlink", "os.rmdir", "os.mkdir", "os.truncate", "os.chmod"):
+            if args and args[0]:
+                _WRITTEN.add(os.path.realpath(str(args[0])))
+        elif event.startswith("shutil."):
+            for a in args[:2]:
+                if a:
+                    _WRITTEN.add(os.path.realpath(str(a)))
+    except Exception:
+        pass            # an audit hook must never be able to fail a program
+
+
+def install_audit() -> None:
+    """Start recording this process's own writes. Idempotent; an audit hook cannot be removed."""
+    global _AUDIT_INSTALLED
+    if not _AUDIT_INSTALLED:
+        sys.addaudithook(_audit)
+        _AUDIT_INSTALLED = True
+
+
+def written_by_us(paths) -> list:
+    return [p for p in paths if os.path.realpath(str(p)) in _WRITTEN]
+
+
 def _git(vault: Path, *args) -> str:
     try:
         r = subprocess.run(["git", "-C", str(vault), *args], capture_output=True, text=True,
@@ -239,21 +299,30 @@ def attribute(moved: list, roots: dict, head_before: str) -> tuple:
     return ours, theirs
 
 
-def report(moved: list, scope: str, roots: dict, theirs: list = ()) -> str:
+def report(moved: list, scope: str, roots: dict, theirs: list = (), certain: list = ()) -> str:
     head = (f"THE USER'S REAL FILES CHANGED DURING {scope}. {len(moved)} path(s) moved:\n  "
             + "\n  ".join(moved[:12])
             + (f"\n  ... and {len(moved) - 12} more" if len(moved) > 12 else ""))
+    if certain:
+        head += ("\n\n★ THIS PROCESS WROTE " + ("IT" if len(certain) == 1 else f"{len(certain)} OF THEM")
+                 + " — recorded by an audit hook at the moment of the write, so this is a fact, not "
+                   "an inference:\n  " + "\n  ".join(certain[:8]))
     if theirs:
-        head += (f"\n\n(A further {len(theirs)} path(s) moved and WERE attributed to a concurrent "
-                 f"committer — they are committed and clean. Those are not counted above.)")
-    return head + (
-        f"\n\nWatched: {', '.join(str(t) for t in roots['trees'])}"
-        "\n\nThese paths are NOT attributable to another writer: they are dirty in the working tree, "
-        "or the vault's HEAD did not move. A concurrent session-end commit leaves its files "
-        "committed; a stray test writes and walks away. So this is the suite."
-        "\n\nThe usual cause is an in-process import of a module whose path constants were already "
-        "resolved under a different environment. Resolve per call, or drive the code through a "
-        "subprocess carrying the fixture's environment.")
+        head += (f"\n\n(A further {len(theirs)} path(s) moved and were attributed to a concurrent "
+                 f"committer — committed and clean at a HEAD this run did not make. Not counted above.)")
+    tail = (f"\n\nWatched: {', '.join(str(t) for t in roots['trees'])}")
+    if certain:
+        return head + tail + (
+            "\n\nA test in this process wrote the user's files directly. Resolve paths per call, or "
+            "drive the code through a subprocess carrying the fixture's environment.")
+    return head + tail + (
+        "\n\nTHIS PROCESS DID NOT WRITE THESE — no audit record exists for them. They were written "
+        "either by a SUBPROCESS of this run (which the audit hook cannot see) or by something else "
+        "on this machine. This check cannot tell those apart, and says so rather than guessing: the "
+        "run fails because being unable to tell must not resolve in the suite's favour."
+        "\n\nTo tell them apart: re-run the module alone. If it reproduces, it is a subprocess of "
+        "the suite. If it does not, another writer was active — a session-end commit, an editor, or "
+        "a hook-edit ritual that leaves a file dirty between its backup and its commit.")
 
 
 # ---------------------------------------------------------------- the fixtures themselves
@@ -263,6 +332,8 @@ def report(moved: list, scope: str, roots: dict, theirs: list = ()) -> str:
 # nothing, and `test_vault_sentinel.py` asserts that it still does.
 
 import pytest  # noqa: E402  (deliberately after the pure helpers above, which import nothing heavy)
+
+install_audit()          # before any test runs
 
 _ROOTS = None
 
@@ -287,10 +358,8 @@ def _check(r, before, head_before, fingerprint, scope):
         return
     ours, theirs = attribute(moved, r, head_before)
     if ours:
-        raise AssertionError(report(ours, scope, r, theirs))
-    # Everything was attributable to another writer. Say so on stdout — silence here would hide the
-    # fact that the watched tree is moving under the run, which a reader needs in order to judge the
-    # next failure.
+        certain = written_by_us(ours)
+        raise AssertionError(report(ours, scope, r, theirs, certain))
     print(f"\n[vault sentinel] {len(theirs)} path(s) moved during {scope} and were attributed to a "
           f"concurrent committer (committed and clean). Not the suite.")
 
