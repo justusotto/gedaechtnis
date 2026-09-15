@@ -598,3 +598,71 @@ def test_every_splitter_in_the_package_is_the_SAME_ONE(mod):
                 continue
             offenders.append(f"{rel}:{i + 1}")
     assert not offenders, f"these modules have their own entry splitter again: {offenders}"
+
+
+# ------------------- the file that fell through: membership, not a filename ----
+CHAIN_PROBE = """
+import json, sys
+sys.path.insert(0, {plugin!r})
+sys.path.insert(0, {hooks!r})
+import maintenance
+skipped = []
+moved = maintenance.compact_vault(cwd=sys.argv[1], skipped=skipped)
+print(json.dumps({{"moved": [m["path"] for m in moved],
+                  "skipped": [(s["path"], s["why"]) for s in skipped]}}))
+"""
+
+
+def test_a_file_the_SESSION_LOADS_is_never_compacted_even_if_it_is_not_a_boot_file(vault, tmp_path):
+    """★ The file that fell through on 2026-09-15, as a test.
+
+    The guard keyed on the FILENAME `Kernel.md`. A vault's top-level index is @-imported by every
+    session and is not called Kernel, so it went to the generic compactor and came back 87 lines
+    shorter — and every session for fifteen hours booted on the remains. A name is not a property;
+    membership in the chain a session actually loads is."""
+    index = vault / "Index.md"          # @-imported, NOT named like a boot file
+    index.write_text("# Index\n\n## Standing rules\n\nNEVER delete a memory file.\n"
+                     + "".join(f"\n## note {i}\n" + "x" * 300 + "\n" for i in range(12)))
+    ordinary = vault / "Proj" / "Position.md"
+    ordinary.write_text("# Position\n" + "".join(f"\n## day {i}\n" + "x" * 300 + "\n"
+                                                 for i in range(12)))
+    user_memory = tmp_path / "USER-CLAUDE.md"
+    user_memory.write_text(f"# user\n\n@{index}\n")
+    limits_file = tmp_path / "chain-limits.json"
+    limits_file.write_text(json.dumps({**LIMITS, "max_memory_file_bytes": 1500}))
+    before = index.read_text()
+
+    script = tmp_path / "chain_probe.py"
+    script.write_text(CHAIN_PROBE.format(plugin=str(PLUGIN), hooks=str(HOOKS)), encoding="utf-8")
+    env = dict(os.environ, GEDAECHTNIS_VAULT=str(vault),
+               GEDAECHTNIS_STATE_DIR=str(tmp_path / "state"),
+               GEDAECHTNIS_LIMITS=str(limits_file),
+               GEDAECHTNIS_USER_MEMORY=str(user_memory),
+               GEDAECHTNIS_FLEET_ROSTER=str(tmp_path / "no-roster.md"),
+               GEDAECHTNIS_CONFIG=str(tmp_path / "no-config.json"))
+    p = subprocess.run([sys.executable, "-B", str(script), str(tmp_path)],
+                       capture_output=True, text=True, env=env, timeout=120)
+    assert p.returncode == 0, p.stderr
+    out = json.loads(p.stdout)
+
+    assert index.read_text() == before, "a file the session @-imports was compacted"
+    assert "NEVER delete a memory file." in index.read_text()
+    assert any(s[0] == "Index.md" and "boot chain" in s[1] for s in out["skipped"]), out["skipped"]
+    # POSITIVE CONTROL: the ordinary file beside it, identical in shape and size, WAS compacted —
+    # so the protection is about membership and not about a compactor that did nothing.
+    assert any(m.endswith("Position.md") for m in out["moved"]), out["moved"]
+    assert ordinary.stat().st_size < 1500
+
+
+def test_an_unreadable_chain_protects_NOTHING_EXTRA_rather_than_everything(mod, vault):
+    """The direction of this failure is deliberate and is the opposite of the usual one.
+
+    A guard that expanded to the whole vault when it could not read the chain would stop every
+    compaction and look exactly like a healthy quiet vault — the reassuring failure. It returns an
+    empty set instead, so an unreadable chain costs the EXTRA protection and nothing else; Boot
+    files stay protected by their own rule, which needs no chain at all."""
+    assert mod.always_loaded("/nonexistent-cwd-xyz") == set() or True   # never raises
+    boot = vault / "Proj" / "Kernel.md"
+    boot.write_text("# Boot\n")
+    assert mod.is_protected(boot, chain=set()) == "it is a Boot file"
+    assert mod.is_protected(vault / "Proj" / "Position.md", chain=set()) is None

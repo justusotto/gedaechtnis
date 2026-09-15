@@ -506,7 +506,7 @@ def memory_files() -> list[Path]:
     return out
 
 
-def compact_vault() -> list[dict]:
+def compact_vault(cwd: str | None = None, skipped: list | None = None) -> list[dict]:
     """Keep every memory file under the bound that decides whether the search can read it.
 
     ★ THIS IS THE HALF THAT MAKES THE REST OF ROW R3 REAL. The seam (`archive.py`) and the year-3
@@ -530,26 +530,29 @@ def compact_vault() -> list[dict]:
     nothing about whether its files may grow until the search stops reading them.
     """
     moved = []
+    skipped = [] if skipped is None else skipped
+    # Resolved ONCE per pass: the chain does not change while the pass runs, and a walk per file
+    # would read the whole boot chain for every memory file in the vault.
+    _chain = bootfile.always_loaded(cwd)
     for path in sorted(memory_files()):
         if archive.is_sidecar(path.stem):
             continue
-        if path.name == bootfile.BOOT_FILE:
-            # ★ A BOOT FILE BELONGS TO `bootfile.roll_window` AND TO NOTHING ELSE. This generic
-            # compactor moves a file's OLDEST `## ` sections, which is right for a role file that
-            # grows chronologically and catastrophic for a Boot file, whose sections are named and
-            # structural: it deletes `## Standing constraints` — binding NEVER rules — out of the
-            # one file every session loads, and nothing afterwards disagrees.
+        why = bootfile.is_protected(path, chain=_chain, cwd=cwd)
+        if why:
+            # ★ A FILE A SESSION LOADS IS NOT COMPACTED BY THIS PASS, whatever it is called. This
+            # generic compactor moves a file's OLDEST `## ` sections — right for a role file that
+            # grows chronologically, catastrophic for an always-loaded one, whose sections are
+            # named and structural and whose standing rules sit at the top.
             #
-            # Row R6 built the safe path (a window the file's author DECLARES between two markers)
-            # and its reviewer found this door still open beside it, reproducing the original wipe
-            # through here: `main` runs this function FIRST, so for any Boot file over the generic
-            # bound the unsafe compactor got there before the careful one. One compactor per file
-            # class, and this one does not own this class.
+            # It keyed on the FILENAME until 2026-09-15, so a vault's top-level index — @-imported
+            # by every session but not named like a Boot file — fell through and was cut from 87
+            # lines to 17, and every session for fifteen hours booted on the remains.
+            # Membership is DERIVED from the live chain now; a name is not a property.
             #
-            # The cost is named rather than hidden: a Boot file that declares no window now stays
-            # large. That is the intended trade — it is REPORTED every session, with the reason and
-            # the two marker lines to add, and a large always-loaded file is a bill, while a
-            # silently deleted standing rule is a wrong answer nobody can see.
+            # The cost is named rather than hidden: such a file stays large unless it declares a
+            # window. It is REPORTED every session with the reason, and a large always-loaded file
+            # is a bill, while a silently deleted standing rule is a wrong answer nobody can see.
+            skipped.append({"path": str(path.relative_to(VAULT)), "why": why})
             continue
         if True:
             try:
@@ -631,7 +634,10 @@ def main() -> None:
     # Compact BEFORE measuring, so the state file and the facts line describe the vault as it is
     # after this session end rather than as it was before — a measurement taken before the act it
     # is meant to reflect reports a problem that has already been fixed.
-    compacted = compact_vault()
+    protected_skips: list = []
+    compacted = compact_vault(cwd=cwd, skipped=protected_skips)
+    for s in protected_skips:
+        log("maintenance", f"NOT compacted: {s['path']} — {s['why']}")
     # The Boot file's own window, against the BOOT budget rather than the memory-file bound. Its
     # paths join the same commit: a compaction that is not committed leaves the vault permanently
     # dirty, and dirt of that kind makes other machinery defer rather than announce itself.
