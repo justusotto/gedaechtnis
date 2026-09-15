@@ -666,8 +666,12 @@ def test_an_unreadable_chain_protects_NOTHING_EXTRA_rather_than_everything(mod, 
     empty = mod.always_loaded("/nonexistent-cwd-xyz")
     assert isinstance(empty, set), type(empty)
     assert not any("nonexistent" in m for m in empty), empty
+    # NOTE: a nonexistent cwd does NOT exercise the `except` branch — `boot_chain_files` swallows
+    # a missing path silently and never raises. The real fault-injection test for that branch lives
+    # in `test_cleanup.py::test_the_empty_chain_fallback_holds_UNDER_A_REAL_FAILURE`; what this one
+    # asserts is the weaker, still-useful claim that an absent cwd contributes no members.
     # POSITIVE CONTROL: the same call against a REAL chain returns members, so "empty" above is a
-    # verdict about an unreadable chain and not about a function that always returns nothing.
+    # verdict about the cwd and not about a function that always returns nothing.
     assert mod.always_loaded(str(Path(__file__).resolve().parents[2])), \
         "always_loaded found no chain even for a real repo; the test above proves nothing"
     boot = vault / "Proj" / "Kernel.md"

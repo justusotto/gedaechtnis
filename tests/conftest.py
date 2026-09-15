@@ -33,7 +33,7 @@ judgment is enforced, not remembered.
    git's opinion of a file is irrelevant to whether a change to it is seen.
 """
 from __future__ import annotations
-import os, subprocess
+import os, subprocess, warnings
 from pathlib import Path
 import pytest
 
@@ -80,9 +80,27 @@ def _is_quarantined(path: str) -> bool:
                for part in Path(path).parts)
 
 
+# Directories whose churn during a suite run is somebody else's normal work, not damage: the
+# vault's own generated mirrors, and the queue/notice surfaces other lanes write constantly. These
+# are the two sources of every false positive this guard has actually produced.
+NOISY_PARTS = (".gedaechtnis", "Pharos", "Channels")
+
+
+def _is_noise(path: str) -> bool:
+    return any(part in NOISY_PARTS for part in Path(path).parts)
+
+
 def compaction_signature(before, after) -> list[str]:
-    """The paths that changed in the shape a COMPACTION makes: a memory file that shrank, in a
-    session where `-archive` files also appeared.
+    """The paths that changed in a shape that means DAMAGE.
+
+    ★ It used to require BOTH a shrink and new `-archive` files, and a reviewer showed that made it
+    decorative in the one failure mode the door does not cover: a memory file cut from 5,000 bytes
+    to 500 with no archive beside it returned `[]`. The door catches writes through `atomic_write`;
+    this net exists for everything else, so requiring the compactor's exact fingerprint meant it
+    caught only what was already caught.
+
+    Any `.md` that SHRANK now counts, outside the noisy directories above — and a shrink in a
+    region is the damage signature regardless of what produced it.
 
     ★ Why this is narrower than "anything changed". The plain version false-failed twice in one
     afternoon on other lanes writing the vault while the suite ran, and a hard failure that cries
@@ -102,12 +120,10 @@ def compaction_signature(before, after) -> list[str]:
     # is deleted, it is moved to a quarantine folder. Found by a reviewer naming the gap.
     vanished = [p for p in before
                 if p not in after and p.endswith(".md") and not _is_quarantined(p)]
-    new_archives = [p for p in after
-                    if p not in before and "-archive" in Path(p).stem and p.endswith(".md")]
     shrunk = [p for p, v in after.items()
-              if p in before and p.endswith(".md") and v[0] < before[p][0]]
-    compaction = sorted(shrunk) if (new_archives and shrunk) else []
-    return sorted(set(compaction) | set(vanished))
+              if p in before and p.endswith(".md") and v[0] < before[p][0]
+              and not _is_quarantined(p)]
+    return sorted({p for p in shrunk + vanished if not _is_noise(p)})
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -120,9 +136,14 @@ def the_suite_leaves_the_real_vault_alone():
     if moved and not compacted:
         # Informational, NOT a failure: with concurrent writers this fires constantly, and a
         # constant alarm is one nobody reads. The door is what enforces.
-        print(f"\n[vault watch] {len(moved)} path(s) under {REAL_VAULT} changed while the suite "
-              f"ran — most likely another session, since none of it looks like a compaction: "
-              + ", ".join(moved[:5]) + (" ..." if len(moved) > 5 else ""))
+        # A WARNING, not a print. pytest captures stdout on passing tests and swallows it under
+        # `-q` — which is how this repo runs the suite, so the fallback signal was invisible in the
+        # one context it exists for. A warning reaches the summary regardless.
+        warnings.warn(
+            f"[vault watch] {len(moved)} path(s) under {REAL_VAULT} changed while the suite ran — "
+            f"most likely another session, since none of it looks like damage: "
+            + ", ".join(moved[:5]) + (" ..." if len(moved) > 5 else ""),
+            stacklevel=1)
     assert not compacted, (
         f"A TEST DAMAGED THE REAL VAULT AT {REAL_VAULT}. {len(compacted)} memory file(s) were "
         f"compacted or disappeared:\n  "

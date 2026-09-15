@@ -528,3 +528,83 @@ def test_a_DATED_cleanup_folder_is_excluded_too(world, tmp_path):
     assert not any("Cleanup 2026-09-15" in f for f in found), found
     # POSITIVE CONTROL: the live file beside it IS searched, so the exclusion is about the folder.
     assert any(f.endswith("Proj/Canon.md") for f in found), found
+
+
+# ---------------- the second net's own unit tests, which it did not have ----
+def test_compaction_signature_flags_a_SHRINK_WITH_NO_ARCHIVE(world):
+    """★ The mode the net was decorative in, and a reviewer had to call it directly to find out.
+
+    It required BOTH a shrink AND new `-archive` files — the compactor's exact fingerprint — so a
+    memory file cut from 5,000 bytes to 500 by anything else returned `[]`. The door catches writes
+    through `atomic_write`; this net exists for everything the door does not see, and demanding the
+    compactor's signature meant it caught only what was already caught.
+
+    It had ZERO dedicated tests: it ran only implicitly against the live vault during full-suite
+    runs, where by design it stays quiet. A guard whose only exercise is the case where it must say
+    nothing has never been shown to say anything."""
+    g = guard()
+    before = {"/v/Proj/Canon.md": (5000, 1)}
+    after = {"/v/Proj/Canon.md": (500, 2)}
+    assert g.compaction_signature(before, after) == ["/v/Proj/Canon.md"]
+
+
+def test_compaction_signature_flags_a_VANISHED_file(world):
+    g = guard()
+    assert g.compaction_signature({"/v/Proj/Canon.md": (100, 1)}, {}) == ["/v/Proj/Canon.md"]
+
+
+def test_compaction_signature_is_QUIET_on_growth_and_on_noise(world):
+    """The negative controls, and they are what keep the widened net usable. A file that GREW is
+    somebody writing; the generated mirrors and the queue/notice surfaces churn constantly and are
+    every false positive this guard has actually produced."""
+    g = guard()
+    grew = g.compaction_signature({"/v/Proj/Canon.md": (100, 1)}, {"/v/Proj/Canon.md": (900, 2)})
+    assert grew == [], grew
+    for noisy in ("/v/.gedaechtnis/views/Speculum/Errata.md",
+                  "/v/Pharos/queues/regions/x.md",
+                  "/v/Channels/CURSUS/a-notice.md"):
+        out = g.compaction_signature({noisy: (5000, 1)}, {noisy: (10, 2)})
+        assert out == [], f"{noisy} should be noise, got {out}"
+
+
+def test_compaction_signature_ignores_a_QUARANTINE(world):
+    """A file leaving a `Cleanup …/` bundle is a RESTORE, which is the opposite of damage."""
+    g = guard()
+    q = "/v/Cleanup 2026-09-15 an incident/removed/Proj/Canon.md"
+    assert g.compaction_signature({q: (5000, 1)}, {}) == []
+    assert g.compaction_signature({q: (5000, 1)}, {q: (10, 2)}) == []
+
+
+def test_compaction_signature_says_nothing_when_it_could_not_look(world):
+    """`None` is "no vault to compare", not "nothing changed"."""
+    g = guard()
+    assert g.compaction_signature(None, {"/v/a.md": (1, 1)}) == []
+    assert g.compaction_signature({"/v/a.md": (1, 1)}, None) == []
+
+
+def test_the_empty_chain_fallback_holds_UNDER_A_REAL_FAILURE(world, monkeypatch):
+    """★ Finding #2: the shipped test for this could not fail.
+
+    It passed a nonexistent cwd expecting to hit `always_loaded`'s `except` branch — but
+    `boot_chain_files` swallows a missing path silently and never raises, so the trigger condition
+    never occurred and the test passed for a reason unrelated to the property. The fault is injected
+    here instead, which is the only way to reach the branch."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("gd_bf_fault", PLUGIN / "bootfile.py")
+    bf = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(bf)
+    import sys
+    sys.path.insert(0, str(PLUGIN / "hooks"))
+    import session_start
+
+    def boom(*a, **k):
+        raise RuntimeError("the chain could not be read")
+    monkeypatch.setattr(session_start, "boot_chain_files", boom)
+    assert bf.always_loaded("/anything") == set(), "a raising chain must yield NOTHING extra"
+    # And the safe direction is what that buys: a Boot file is still protected by its own rule,
+    # which needs no chain, while an ordinary file is not protected by a chain nobody could read.
+    boot = world["vault"] / "Proj" / "Kernel.md"
+    boot.parent.mkdir(parents=True, exist_ok=True)
+    boot.write_text("# Boot\n")
+    assert bf.is_protected(boot, chain=set()) == "it is a Boot file"
+    assert bf.is_protected(world["vault"] / "Proj" / "Canon.md", chain=set()) is None
