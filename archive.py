@@ -48,8 +48,24 @@ file or creates a new one.
 from __future__ import annotations
 import os
 import re
+import sys
 import tempfile
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
+import rootguard        # noqa: E402
+
+# ★ THE TEST-ONLY DOOR THAT STOOD HERE IS GONE, replaced by `rootguard.permit`. It was written
+# after the 2026-09-15 incident and it worked — but a sibling session had written a second guard
+# for the same rule, and the two disagreed about the same path: a path mine PERMITTED, theirs
+# REFUSED, each of us reasoning correctly about our own implementation. That is the duplicate-rule
+# defect this package has now produced at four levels (the entry splitter, the Boot-file test, the
+# quarantine name, this), and the answer is the same every time: one implementation.
+#
+# `permit` is also STRICTER than what it replaces. Mine was silent outside pytest; this refuses any
+# write outside the package's own roots at ALL times. Every caller of `atomic_write` was traced
+# before the swap — compaction, the boot window, the cleanup applier, the boot-check state file —
+# and each resolves into the vault or the state directory, both of which are roots.
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
@@ -61,40 +77,6 @@ import limits  # noqa: E402
 SIDECAR_RE = re.compile(r"-(archive|fixed|resolved)(?:-(\d+))?$", re.I)
 
 FIRST_SEGMENT_SUFFIX = "-archive"
-
-
-def _refuse_a_real_path_under_pytest(path: Path) -> None:
-    """Under pytest, REFUSE to rewrite anything outside a temporary directory.
-
-    ★ THIS DOOR EXISTS BECAUSE THE SUITE COMPACTED THE OWNER'S REAL VAULT — 260 files, including
-    the vault index every session boots from, which then booted gutted for fifteen hours before
-    anyone noticed. The test meant to drive `compact_vault` against a fixture: it set
-    GEDAECHTNIS_VAULT to a temp directory and loaded a fresh `maintenance` module. But `common.VAULT`
-    is resolved ONCE PER PROCESS and had already been imported by an earlier test, so the module's
-    idea of the vault was the real one, while the limits it read were the fixture's 1,500 bytes.
-
-    Nothing about that is visible at the call site. The environment says the right thing, the module
-    object is new, and the only wrong value is one somebody else's import cached. So the rule cannot
-    be "remember to use a subprocess" — it is a door: **under pytest, a memory file is rewritten in a
-    temp directory or not at all.**
-
-    It guards `atomic_write` because that is the single chokepoint every rewrite in this package
-    funnels through — compaction, the window, and the cleanup applier all land here."""
-    if not os.environ.get("PYTEST_CURRENT_TEST"):
-        return
-    try:
-        target = str(Path(path).resolve())
-    except OSError:
-        return
-    roots = {tempfile.gettempdir(), "/tmp", "/private/tmp", "/private/var/folders", "/var/folders"}
-    allowed = tuple(str(Path(r).resolve()) + os.sep for r in roots if Path(r).exists())
-    if not target.startswith(allowed):
-        raise RuntimeError(
-            f"REFUSED: a test tried to rewrite {target}, which is not under a temporary directory. "
-            f"A module's VAULT is resolved once per process, so an in-process call can reach the "
-            f"real vault however carefully the environment was set — drive it through a subprocess "
-            f"with GEDAECHTNIS_VAULT set instead. (This door was added after the suite compacted "
-            f"260 files of a real vault.)")
 
 
 def atomic_write(path: Path, text: str) -> None:
@@ -122,7 +104,7 @@ def atomic_write(path: Path, text: str) -> None:
     made. The temp file is cleaned up if any of that fails, so a crashed
     run does not litter the vault with debris the next search would try to read.
     """
-    _refuse_a_real_path_under_pytest(path)
+    rootguard.permit(path, "archive write")
     tmp = None
     try:
         # The original's MODE, read before anything replaces it. `mkstemp` creates 0600 and

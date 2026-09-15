@@ -572,17 +572,21 @@ def test_under_pytest_a_write_OUTSIDE_a_temp_directory_IS_REFUSED(tmp_path, monk
     without privileges — so a regression fails loudly and touches nothing."""
     monkeypatch.setenv("PYTEST_CURRENT_TEST", "a test is running")
     victim = Path("/gedaechtnis-refusal-probe") / "never-written.md"
-    # ASSERT THE PREMISE. If someone widens the door's allowed roots to cover this path, the test
-    # would silently start proving nothing; this makes that a failure instead. The same discipline
-    # the fixture above lacked, which is how it came to aim at a real vault.
-    assert not str(victim).startswith(tuple(
-        str(Path(r).resolve()) + os.sep
-        for r in (tempfile.gettempdir(), "/tmp", "/private/tmp", "/private/var/folders",
-                  "/var/folders") if Path(r).exists())), \
-        "the victim path is inside a temp root, so this test can no longer prove a refusal"
+    # ASSERT THE PREMISE, and against the SHARED guard's own notion of what is permitted rather
+    # than a copy of the rule here — a copy is what the swap to `rootguard` just removed. If the
+    # roots ever widen to cover this path, the test fails instead of silently proving nothing.
+    import sys as _sys
+    _sys.path.insert(0, str(PLUGIN / "hooks"))
+    import rootguard
+    assert not any(rootguard.under(rootguard._norm(victim), r) for r in rootguard.roots()), \
+        "the victim is inside a package root, so this test can no longer prove a refusal"
+    assert not rootguard.under(rootguard._norm(victim), rootguard._temp_root()), \
+        "the victim is inside the test temp root, so the pytest clause would permit it"
     with pytest.raises(RuntimeError) as e:
         archive.atomic_write(victim, "this must never land")
-    assert "REFUSED" in str(e.value) and "temporary directory" in str(e.value)
+    # The MESSAGE belongs to the shared guard now, so assert the fact, not its wording — the old
+    # assertion pinned my door's phrase "temporary directory" and broke on a better message.
+    assert "REFUSED" in str(e.value) and str(victim) in str(e.value)
     assert not victim.exists()
     assert not victim.parent.exists(), "the door must refuse BEFORE creating anything"
 
@@ -596,12 +600,47 @@ def test_the_door_lets_a_TEMP_path_through(tmp_path, monkeypatch):
     assert target.read_text(encoding="utf-8") == "written\n"
 
 
-def test_the_door_is_SILENT_in_production(tmp_path, monkeypatch):
-    """Outside pytest it must not exist at all — the product writes real vaults for a living."""
+def test_IN_PRODUCTION_a_write_inside_a_root_passes_and_one_outside_RAISES(tmp_path, monkeypatch):
+    """The contract CHANGED when the door became `rootguard.permit`, and this is the change.
+
+    The door this replaced was silent outside pytest — it existed only to stop the suite. `permit`
+    refuses a write outside the package's own roots at ALL times, which is strictly stronger and is
+    the reason the swap was worth making rather than merely tidy. Every caller of `atomic_write`
+    was traced first: compaction, the boot window, the cleanup applier and the boot-check state
+    file all resolve into the vault or the state directory, both of which are roots.
+
+    A test that asserted the OLD contract would now pass only by being wrong about the product, so
+    it is rewritten rather than kept."""
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
-    outside = tmp_path / "pretend-real.md"
-    archive.atomic_write(outside, "ok\n")          # tmp here, but the guard is off either way
-    assert outside.read_text(encoding="utf-8") == "ok\n"
-    import inspect
-    src = inspect.getsource(archive._refuse_a_real_path_under_pytest)
-    assert 'os.environ.get("PYTEST_CURRENT_TEST")' in src and "return" in src
+    vault = tmp_path / "vault"
+    (vault / "Proj").mkdir(parents=True)
+    monkeypatch.setenv("GEDAECHTNIS_VAULT", str(vault))
+    monkeypatch.setenv("GEDAECHTNIS_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("GEDAECHTNIS_CONFIG", str(tmp_path / "cfg.json"))
+
+    inside = vault / "Proj" / "Canon.md"
+    archive.atomic_write(inside, "ok\n")
+    assert inside.read_text(encoding="utf-8") == "ok\n"
+
+    outside = tmp_path / "not-a-root" / "x.md"
+    outside.parent.mkdir()
+    with pytest.raises(RuntimeError) as e:
+        archive.atomic_write(outside, "must not land")
+    assert "REFUSED" in str(e.value)
+    assert not outside.exists()
+
+
+def test_the_guard_is_the_SHARED_one_not_a_second_copy(tmp_path):
+    """The rule this whole arc keeps relearning, as a test.
+
+    `archive.py` carried its own test-only door for a day. A sibling session carried a second guard
+    for the same rule, and the two disagreed about the same path — one permitted what the other
+    refused, each correct about itself. Four levels of this package have now produced the same
+    defect (the entry splitter, the Boot-file filename test, the quarantine name, the write guard),
+    so the absence of a second copy here is worth asserting rather than remembering."""
+    src = (PLUGIN / "archive.py").read_text(encoding="utf-8")
+    code = "\n".join(l for l in src.splitlines()
+                     if not l.lstrip().startswith("#") and '"""' not in l)
+    assert "rootguard.permit(" in code
+    assert "PYTEST_CURRENT_TEST" not in code, \
+        "archive.py is deciding for itself again instead of asking the shared guard"
