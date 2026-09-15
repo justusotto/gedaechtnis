@@ -64,7 +64,11 @@ import os, subprocess, sys, time
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config
-from common import read_input, log, lane_for, path_in_partition, touched_paths, VAULT, guarded
+from common import read_input, log, lane_for, path_in_partition, touched_paths, guarded
+import common
+# VAULT deliberately NOT imported by name: a `from` import binds the value
+# ONCE, which is the frozen-path defect this package was bitten by. Read through the
+# module object (common.VAULT) so PEP 562 re-resolves on every access.
 
 GIT_NAME = "Gedächtnis"
 GIT_EMAIL = "gedaechtnis@local"
@@ -79,7 +83,7 @@ def git(args: list[str], timeout: int = 30) -> tuple[int, str, str]:
     printed either way — a Stop hook that writes to stdout talks over the session's last
     message."""
     try:
-        p = subprocess.run(["git", "-C", str(VAULT), *args], capture_output=True, text=True,
+        p = subprocess.run(["git", "-C", str(common.VAULT), *args], capture_output=True, text=True,
                            stdin=subprocess.DEVNULL, timeout=timeout)
         return p.returncode, (p.stdout or ""), (p.stderr or "").strip()
     except (subprocess.TimeoutExpired, OSError) as e:
@@ -170,8 +174,8 @@ def auto_commit(inp: dict, select, subject_for, tag: str = "") -> None:
         log("commit", f"{pre} lane=UNKNOWN cwd={cwd} marker={marker or 'none'} "
                       f"action=staged-nothing exit=clean")
         return
-    if not (VAULT / ".git").exists():
-        log("commit", f"{pre} lane={lane} vault={VAULT} not-a-git-repo action=staged-nothing")
+    if not (common.VAULT / ".git").exists():
+        log("commit", f"{pre} lane={lane} vault={common.VAULT} not-a-git-repo action=staged-nothing")
         return
     mine = [p for p in select(sid, prefixes) if path_in_partition(p, prefixes)]
     if not mine:

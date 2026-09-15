@@ -59,7 +59,26 @@ import archive                                                            # noqa
 sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
 import maintenance                                                        # noqa: E402
 
-VAULT = config.VAULT
+# ★ Resolved PER CALL, never at import. The constants these replace were evaluated once when
+# this module was first imported, and on 2026-09-15 that freeze rewrote 263 files of a real
+# memory vault: a test set GEDAECHTNIS_VAULT after the module was already in `sys.modules`, so
+# the override was read by nobody. PEP 562 `__getattr__` below keeps the old spelling working
+# while making every read a fresh resolution — but `from <this module> import VAULT` binds ONCE
+# and brings the bug straight back, which is why the importers use attribute access and
+# `tests/test_percall_resolution.py` fails if a module-level binding returns.
+
+_ACCESSORS = {"VAULT": lambda: config.vault()}
+
+
+def __getattr__(name: str):
+    fn = _ACCESSORS.get(name)
+    if fn is not None:
+        return fn()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__():
+    return sorted(list(globals()) + list(_ACCESSORS))
 BUNDLE_DIR = "Cleanup"
 README_NAME = "README-what-went-where.html"
 BOOT_FILE = "Kernel.md"          # the window's file; see the skip in `propose`
@@ -181,7 +200,7 @@ def propose(day: str | None = None) -> dict:
     environment, so a second vault passed in here would be honoured by the path arithmetic and
     ignored by the file walk: half the function would scan one vault and describe another. The
     tests point GEDAECHTNIS_VAULT and run this as the product does."""
-    vault = VAULT
+    vault = config.vault()
     day = day or today()
     proposals, unparsable, unreadable = [], 0, []
     for path in maintenance.memory_files():
@@ -303,7 +322,7 @@ def apply(found: dict) -> dict:
 
     Order matters: duplicates are removed BEFORE a file is folded, so an entry that is both a
     duplicate and old is not archived as a second copy first."""
-    vault = VAULT
+    vault = config.vault()
     day = found["day"]
     proposals = found["proposals"]
     if not proposals:
@@ -368,7 +387,7 @@ def apply(found: dict) -> dict:
 
 def touched_paths(receipt: dict) -> list[str]:
     """Every vault-relative path the apply wrote, for the commit."""
-    vault = VAULT
+    vault = config.vault()
     out = []
     bundle = receipt.get("bundle")
     for m in receipt.get("moved") or []:
@@ -434,7 +453,7 @@ def render(receipt: dict) -> str:
     for f in receipt.get("failed") or []:
         out.append(f"  - left untouched: {f}")
     if receipt.get("bundle"):
-        out.append(f"  Receipt: {VAULT / receipt['bundle'] / README_NAME}")
+        out.append(f"  Receipt: {config.vault() / receipt['bundle'] / README_NAME}")
     return "\n".join(out)
 
 
@@ -445,8 +464,8 @@ def main(argv=None) -> int:
     ap.add_argument("--json", action="store_true", help="machine-readable receipt")
     ap.add_argument("--session-id", default="-")
     args = ap.parse_args(argv)
-    if not VAULT.is_dir():
-        print(f"No vault at {VAULT}; nothing to clean.")
+    if not config.vault().is_dir():
+        print(f"No vault at {config.vault()}; nothing to clean.")
         return 0
     found = propose()
     if args.dry_run:

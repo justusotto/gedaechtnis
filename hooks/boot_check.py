@@ -46,7 +46,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config
 import session_start
-from common import read_input, log, guarded, VAULT, STATE
+from common import read_input, log, guarded
+import common
+# VAULT, STATE deliberately NOT imported by name: a `from` import binds the value
+# ONCE, which is the frozen-path defect this package was bitten by. Read through the
+# module object (common.VAULT) so PEP 562 re-resolves on every access.
 
 STATE_FILE = "boot_check.json"
 SCHEMA_VERSION = 1
@@ -81,7 +85,7 @@ HAS_LETTER_RE = re.compile(r"[a-f]")
 
 
 def state_path() -> Path:
-    return STATE / STATE_FILE
+    return common.STATE / STATE_FILE
 
 
 def boot_files(cwd: str) -> list[Path]:
@@ -164,7 +168,7 @@ def candidate_repos(cwd: str, files) -> list[Path]:
     alive. A vault that needs more repos than this closure finds adds them through `extra_checks`
     rather than through a roster here."""
     out, seen = [], set()
-    for start in [VAULT, Path(cwd)] + [Path(f).parent for f in files]:
+    for start in [common.VAULT, Path(cwd)] + [Path(f).parent for f in files]:
         root = _sh(["git", "-C", str(start), "rev-parse", "--show-toplevel"])
         if root and root not in seen:
             seen.add(root)
@@ -261,7 +265,7 @@ def run_extensions(vault: Path) -> tuple[list[dict], list[str]]:
 
 def compute(cwd: str) -> dict:
     files = boot_files(cwd)
-    index, index_complete = basename_index(VAULT)
+    index, index_complete = basename_index(common.VAULT)
     repos = candidate_repos(cwd, files)
     failures, unreadable, n_claims = [], [], 0
     for path in files:
@@ -272,10 +276,10 @@ def compute(cwd: str) -> dict:
             continue
         for claim in extract_claims(text):
             n_claims += 1
-            why = check_claim(claim, VAULT, index, repos, index_complete)
+            why = check_claim(claim, common.VAULT, index, repos, index_complete)
             if why:
                 failures.append({**claim, "file": str(path), "detail": why})
-    extra, ext_unchecked = run_extensions(VAULT)
+    extra, ext_unchecked = run_extensions(common.VAULT)
     unchecked = [f for f in failures if f["detail"].startswith("UNCHECKED")]
     real = [f for f in failures if not f["detail"].startswith("UNCHECKED")]
     return {"version": SCHEMA_VERSION, "computed": time.strftime("%Y-%m-%d"),
@@ -323,10 +327,10 @@ def facts_lines(doc: dict) -> list[str]:
 def main() -> None:
     inp = read_input()
     cwd = inp.get("cwd") or os.getcwd()
-    if not VAULT.is_dir():
-        log("boot_check", f"no vault at {VAULT}; nothing checked")
+    if not common.VAULT.is_dir():
+        log("boot_check", f"no vault at {common.VAULT}; nothing checked")
         return
-    STATE.mkdir(parents=True, exist_ok=True)
+    common.STATE.mkdir(parents=True, exist_ok=True)
     doc = compute(cwd)
     new = json.dumps(doc, indent=1, sort_keys=True) + "\n"
     old = None

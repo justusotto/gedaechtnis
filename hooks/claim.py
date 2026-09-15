@@ -51,7 +51,11 @@ import json, os, subprocess, sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config
-from common import read_input, context, log, lane_for, region_of_repo, repo_root_of, VAULT, STATE, guarded
+from common import read_input, context, log, lane_for, region_of_repo, repo_root_of, guarded
+import common
+# VAULT, STATE deliberately NOT imported by name: a `from` import binds the value
+# ONCE, which is the frozen-path defect this package was bitten by. Read through the
+# module object (common.VAULT) so PEP 562 re-resolves on every access.
 
 EV = "SessionStart"
 
@@ -68,7 +72,7 @@ def _run_tool(tool: Path, sub: str, region: str, pid: int) -> tuple[int, str]:
     different vault than the one the rest of the plugin is looking at."""
     argv = [str(tool)] if os.access(str(tool), os.X_OK) else ["/bin/bash", str(tool)]
     argv += [sub, region, str(pid)]
-    env = dict(os.environ, ATLAS=str(VAULT))
+    env = dict(os.environ, ATLAS=str(common.VAULT))
     try:
         p = subprocess.run(argv, capture_output=True, text=True, stdin=subprocess.DEVNULL,
                            timeout=10, env=env)
@@ -159,13 +163,13 @@ def _regions_for(cwd: str) -> tuple[str | None, list[str]]:
             continue
         if p not in regions:
             regions.append(p)
-    return lane, [r for r in regions if (VAULT / r).is_dir()]
+    return lane, [r for r in regions if (common.VAULT / r).is_dir()]
 
 
 # ---- the session's own record of what it holds -------------------------------------------
 
 def _state_file(sid: str) -> Path:
-    return STATE / f"session-start-{sid}.json"
+    return common.STATE / f"session-start-{sid}.json"
 
 
 def _read_claims(sid: str) -> tuple[dict, list[dict]]:
@@ -183,7 +187,7 @@ def _write_claims(sid: str, doc: dict, claims: list[dict]) -> None:
     doc = dict(doc)
     doc["claims"] = claims
     try:
-        STATE.mkdir(parents=True, exist_ok=True)
+        common.STATE.mkdir(parents=True, exist_ok=True)
         _state_file(sid).write_text(json.dumps(doc, indent=1), encoding="utf-8")
     except OSError as e:
         log("hook-errors", f"claim\tcannot write {_state_file(sid)}: {e}")

@@ -446,7 +446,10 @@ def test_the_bundle_is_not_searchable_memory_EVEN_WITH_include_queues(world, tmp
 
 # ----------------------------------------------------- the guard on the guard ----
 def guard():
-    """`conftest.py`'s two functions, loaded BY PATH.
+    """The sentinel's two functions, loaded BY PATH.
+
+    They moved out of `conftest.py` into `vault_sentinel.py` on 2026-09-15 so the positive control
+    could install the real fixture objects rather than a copy; these two tests followed the code.
 
     `import conftest` works when this suite runs alone and raises when it runs beside another
     suite that has a `conftest.py` of its own — which the enclosing project's does: the bare
@@ -454,7 +457,7 @@ def guard():
     both suites in ONE pytest invocation, which neither suite's own green run exercises."""
     import importlib.util
     spec = importlib.util.spec_from_file_location(
-        "gedaechtnis_tests_conftest", Path(__file__).resolve().parent / "conftest.py")
+        "gedaechtnis_tests_vault_sentinel", Path(__file__).resolve().parent / "vault_sentinel.py")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
@@ -464,7 +467,9 @@ def test_the_real_vault_guard_would_notice_a_write(tmp_path):
     """The positive control for `conftest.py`'s session fixture.
 
     A guard whose comparison cannot change is a guard that passes forever."""
-    fingerprint, changed = guard().fingerprint, guard().changed
+    g = guard()
+    changed = g.changed
+    fingerprint = lambda root: g.stat_fingerprint({"trees": [root], "files": []})
     v = tmp_path / "vault"
     v.mkdir()
     subprocess.run(["git", "init", "-q", str(v)], check=True)
@@ -476,7 +481,7 @@ def test_the_real_vault_guard_would_notice_a_write(tmp_path):
     (v / "Canon.md").write_text("# Canon\n")           # exactly what a stray test would do
     moved = changed(before, fingerprint(v))
     assert [Path(m).name for m in moved] == ["Canon.md"], moved
-    assert fingerprint(tmp_path / "no-such-vault") is None
+    assert fingerprint(tmp_path / "no-such-vault") == {}, "a missing root yields no paths, not a crash"
 
 
 def test_the_guard_sees_a_GITIGNORED_file_being_modified(tmp_path):
@@ -486,7 +491,9 @@ def test_the_guard_sees_a_GITIGNORED_file_being_modified(tmp_path):
     no opinion about an ignored file's contents. In this vault the ignored files are precisely the
     hook-written status files that are @-imported into every session and whose absence fails
     silently: a stray test corrupting one would have sailed through clean."""
-    fingerprint, changed = guard().fingerprint, guard().changed
+    g = guard()
+    changed = g.changed
+    fingerprint = lambda root: g.stat_fingerprint({"trees": [root], "files": []})
     v = tmp_path / "vault"
     (v / "Global").mkdir(parents=True)
     subprocess.run(["git", "init", "-q", str(v)], check=True)

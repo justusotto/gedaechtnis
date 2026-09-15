@@ -46,7 +46,11 @@ import config
 import logstore
 import importer
 import views
-from logstore import VAULT, STEMS, START_FILE
+from logstore import STEMS
+import logstore
+# VAULT, START_FILE deliberately NOT imported by name: a `from` import binds the value
+# ONCE, which is the frozen-path defect this package was bitten by. Read through the
+# module object (logstore.VAULT) so PEP 562 re-resolves on every access.
 
 PASS_BAR = 0.90
 ESCAPE_BYTES = 2000
@@ -66,7 +70,7 @@ def default_out() -> Path:
 
 def vault_head() -> str:
     try:
-        r = subprocess.run(["git", "-C", str(VAULT), "rev-parse", "HEAD"],
+        r = subprocess.run(["git", "-C", str(logstore.VAULT), "rev-parse", "HEAD"],
                            capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=30)
         return r.stdout.strip() if r.returncode == 0 else ""
     except (OSError, subprocess.SubprocessError):
@@ -78,7 +82,7 @@ def shadow_start(create: bool = True) -> dict:
     every later checkpoint counts FROM. Written once and never rewritten — a moving start line would
     make the live counter unreadable."""
     try:
-        return json.loads(START_FILE.read_text(encoding="utf-8"))
+        return json.loads(logstore.START_FILE.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         pass
     start = {"date": time.strftime("%Y-%m-%d"),
@@ -88,8 +92,8 @@ def shadow_start(create: bool = True) -> dict:
              "note": "checkpoint 0 of the 30-day additive shadow (council 2 closure §1); "
                      "written once, never rewritten"}
     if create:
-        START_FILE.parent.mkdir(parents=True, exist_ok=True)
-        START_FILE.write_text(json.dumps(start, indent=1) + "\n", encoding="utf-8")
+        logstore.START_FILE.parent.mkdir(parents=True, exist_ok=True)
+        logstore.START_FILE.write_text(json.dumps(start, indent=1) + "\n", encoding="utf-8")
     return start
 
 
@@ -100,7 +104,7 @@ def score_fidelity() -> list:
     grouped = views.rows_by_file()
     out = []
     for (region, stem), rows in sorted(grouped.items()):
-        live_path = (VAULT / region / f"{stem}.md") if region != "." else (VAULT / f"{stem}.md")
+        live_path = (logstore.VAULT / region / f"{stem}.md") if region != "." else (logstore.VAULT / f"{stem}.md")
         try:
             live_text = live_path.read_text(encoding="utf-8")
         except OSError as e:
@@ -154,7 +158,7 @@ def whole_file_identity() -> dict:
         rel = vp.relative_to(views.VIEW_DIR)
         try:
             got = vp.read_text(encoding="utf-8").split("\n", 1)[1]
-            want = (VAULT / rel).read_text(encoding="utf-8")
+            want = (logstore.VAULT / rel).read_text(encoding="utf-8")
         except (OSError, IndexError) as e:
             differ.append({"view": str(rel), "why": str(e)[:120]})
             continue
@@ -233,7 +237,7 @@ def is_live_role_path(path: str) -> bool:
 
 def _git(*args, timeout=60):
     try:
-        return subprocess.run(["git", "-C", str(VAULT), *args], capture_output=True, text=True,
+        return subprocess.run(["git", "-C", str(logstore.VAULT), *args], capture_output=True, text=True,
                               stdin=subprocess.DEVNULL, timeout=timeout)
     except (OSError, subprocess.SubprocessError):
         return None
@@ -331,7 +335,7 @@ def wikilinks() -> dict:
     so the count is printed beside the row's expectation rather than asserted against it. Links
     inside code (fenced or inline) are not links — see `importer.strip_code`, which the pointer test
     reads through as well: one definition of "is a link", used by both instruments."""
-    by_rel, by_name = _vault_files(VAULT)
+    by_rel, by_name = _vault_files(logstore.VAULT)
     total = 0
     unresolved = []
     for vp in sorted(views.VIEW_DIR.rglob("*.md")) if views.VIEW_DIR.is_dir() else []:
@@ -346,7 +350,7 @@ def wikilinks() -> dict:
             # a relative link resolves from the ORIGINAL region, not from the view's mirror dir
             rel_region = vp.parent.relative_to(views.VIEW_DIR)
             try:
-                resolved = (VAULT / rel_region / target).resolve().relative_to(VAULT.resolve())
+                resolved = (logstore.VAULT / rel_region / target).resolve().relative_to(logstore.VAULT.resolve())
                 cands.add(str(resolved))
                 cands.add(str(resolved) + ".md")
             except (ValueError, OSError):

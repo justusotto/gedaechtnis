@@ -84,29 +84,44 @@ from __future__ import annotations
 import json, os
 from pathlib import Path
 
-HOME = Path(os.path.expanduser("~"))
 
-CONFIG_PATH = Path(os.environ.get("GEDAECHTNIS_CONFIG",
-                                  str(HOME / ".claude" / "gedaechtnis" / "config.json"))).expanduser()
+def home() -> Path:
+    """`~`, resolved now. A test that moves HOME moves every path below it."""
+    return Path(os.path.expanduser("~"))
+
+
+def config_path() -> Path:
+    return Path(os.environ.get("GEDAECHTNIS_CONFIG",
+                               str(home() / ".claude" / "gedaechtnis" / "config.json"))).expanduser()
 
 
 def _load() -> dict:
     """The JSON layer. A missing or malformed file is not an error: the plugin falls through to
     its defaults rather than refusing to start — a config bug must never take a session down."""
     try:
-        data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        data = json.loads(config_path().read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
     return data if isinstance(data, dict) else {}
 
 
-FILE = _load()
+# `FILE` is NOT a cached snapshot any more. It was one, and every accessor that read it returned a
+# value frozen at import — the same defect as the frozen paths, one layer down: a user editing the
+# config file, or a test writing one, was not seen until the process restarted. It stays as a NAME
+# because it is part of this module's published surface, and resolves through the same PEP 562
+# `__getattr__` as the paths do, so every read of it re-reads the file.
 
 
 def _path(env: str | None, key: str, default) -> Path:
+    """Resolve ONE path, NOW — environment, then the config file re-read from disk, then a default.
+
+    The file layer is `_load()` and not the module-level `FILE`, because this function is what the
+    accessors below call on EVERY access and a cached dict would make the config file's value
+    frozen at import even when the path around it is not. `FILE` survives as the name other code
+    already reads; nothing here consults it."""
     raw = os.environ.get(env) if env else None
     if not raw:
-        v = FILE.get(key)
+        v = _load().get(key)
         raw = str(v) if v else None
     if not raw:
         raw = str(default() if callable(default) else default)
@@ -118,22 +133,79 @@ def _default_vault() -> Path:
 
     The test is the roster FILE, never the directory's name: `~/Atlas` proves it is a vault by
     carrying `Global/fleet-roster.md`. A bare directory called Atlas is somebody's photos."""
-    atlas = HOME / "Atlas"
-    return atlas if (atlas / "Global" / "fleet-roster.md").is_file() else HOME / "Gedaechtnis"
+    h = home()
+    atlas = h / "Atlas"
+    return atlas if (atlas / "Global" / "fleet-roster.md").is_file() else h / "Gedaechtnis"
 
 
-VAULT = _path("GEDAECHTNIS_VAULT", "vault", _default_vault)
-STATE = _path("GEDAECHTNIS_STATE_DIR", "state_dir", HOME / ".claude" / "gedaechtnis")
-# The user-level memory file Claude Code loads into EVERY session, whatever the project.
-# ~/.claude/CLAUDE.md is the tool's own convention, not one machine's layout, so the default
-# is portable — but it is still resolved here rather than named at a call site, because the
-# rule this module exists for has no exceptions: read it here or do not read it.
-USER_MEMORY = _path("GEDAECHTNIS_USER_MEMORY", "user_memory", HOME / ".claude" / "CLAUDE.md")
-ROSTER = _path("GEDAECHTNIS_FLEET_ROSTER", "fleet_roster", VAULT / "Global" / "fleet-roster.md")
-WORKTREES = _path("GEDAECHTNIS_WORKTREES", "worktrees_dir", HOME / ".claude" / "worktrees")
+# ---------------------------------------------------------------- the paths, resolved PER CALL
+#
+# ★ These are FUNCTIONS, and the module-level names that used to hold their values are gone.
+#
+# They were constants: `VAULT = _path(...)`, evaluated once when the module was first imported and
+# cached in `sys.modules` for the life of the process. On 2026-09-15 a test set GEDAECHTNIS_VAULT
+# and reloaded the module that uses it — but `config` had already been imported by an earlier test,
+# so the override was read by nobody and the package compacted 263 files of the user's real vault
+# under a 1,500-byte test bound.
+#
+# The lesson is not "reload harder". A path that can change during a process must be READ when it
+# is used, not when the module is loaded — the import order of an unrelated test is not a sensible
+# thing for the location of somebody's memory to depend on. The cost is a `_load()` and an
+# `expanduser()` per access, measured at roughly 20 µs; the hooks make a few dozen such calls per
+# invocation, so it is not a cost anyone can observe.
+#
+# `__getattr__` below keeps `config.VAULT` working as a spelling (PEP 562), and every read of it
+# now goes through `vault()`. `from config import VAULT` still binds once, which is why the
+# re-export sites were converted to attribute access — see `tests/test_percall_resolution.py`,
+# which fails if a module-level binding comes back.
+
+def vault() -> Path:
+    return _path("GEDAECHTNIS_VAULT", "vault", _default_vault)
 
 
-TOOL_ROOT = _path("GEDAECHTNIS_TOOL_ROOT", "tool_root", lambda: Path(__file__).resolve().parents[2])
+def state() -> Path:
+    return _path("GEDAECHTNIS_STATE_DIR", "state_dir", home() / ".claude" / "gedaechtnis")
+
+
+def user_memory() -> Path:
+    """The user-level memory file Claude Code loads into EVERY session, whatever the project.
+    `~/.claude/CLAUDE.md` is the tool's own convention, not one machine's layout, so the default is
+    portable — but it is still resolved here rather than named at a call site, because the rule
+    this module exists for has no exceptions: read it here or do not read it."""
+    return _path("GEDAECHTNIS_USER_MEMORY", "user_memory", home() / ".claude" / "CLAUDE.md")
+
+
+def roster() -> Path:
+    return _path("GEDAECHTNIS_FLEET_ROSTER", "fleet_roster", lambda: vault() / "Global" / "fleet-roster.md")
+
+
+def worktrees() -> Path:
+    return _path("GEDAECHTNIS_WORKTREES", "worktrees_dir", home() / ".claude" / "worktrees")
+
+
+def tool_root() -> Path:
+    return _path("GEDAECHTNIS_TOOL_ROOT", "tool_root", lambda: Path(__file__).resolve().parents[2])
+
+
+_ACCESSORS = {"FILE": _load, "HOME": home, "VAULT": vault, "STATE": state, "USER_MEMORY": user_memory,
+              "ROSTER": roster, "WORKTREES": worktrees, "TOOL_ROOT": tool_root,
+              "CONFIG_PATH": config_path}
+
+
+def __getattr__(name: str):
+    """`config.VAULT` -> `vault()`, freshly, on every read (PEP 562).
+
+    This is what lets the old spelling survive without the old defect. It fires only for names this
+    module does not define, so removing the assignments above was the load-bearing half: an
+    assignment would shadow it and silently restore the cached constant."""
+    fn = _ACCESSORS.get(name)
+    if fn is not None:
+        return fn()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__():
+    return sorted(list(globals()) + list(_ACCESSORS))
 
 
 def claim_tool() -> Path | None:
@@ -143,15 +215,15 @@ def claim_tool() -> Path | None:
     (this file's own grandparent by default), and an install that does not carry one — the
     plugin symlinked on its own into a skills directory — simply has no claim hook. None is
     the ordinary answer, not an error: the caller no-ops silently."""
-    raw = os.environ.get("GEDAECHTNIS_CLAIM_TOOL") or FILE.get("claim_tool")
+    raw = os.environ.get("GEDAECHTNIS_CLAIM_TOOL") or _load().get("claim_tool")
     p = (Path(os.path.expanduser(str(raw))) if raw
-         else TOOL_ROOT / "skills" / "atlas-region" / "helpers" / "region_claim.sh")
+         else tool_root() / "skills" / "atlas-region" / "helpers" / "region_claim.sh")
     return p if p.is_file() else None
 
 
 def owner_pages_status() -> Path | None:
     """The optional answered-pages script, or None when nothing configures one."""
-    v = FILE.get("owner_pages_status")
+    v = _load().get("owner_pages_status")
     if not v:
         return None
     p = Path(os.path.expanduser(str(v)))
@@ -160,7 +232,7 @@ def owner_pages_status() -> Path | None:
 
 def python() -> str:
     """The interpreter used to run the optional script above."""
-    v = FILE.get("python")
+    v = _load().get("python")
     if v:
         p = Path(os.path.expanduser(str(v)))
         if p.is_file():
@@ -213,7 +285,7 @@ def write_keys(updates: dict, path=None) -> None:
     MERGE rather than a write, because two commands write this file for different reasons — the
     installer names the vault, `--decline` records a refusal — and either one replacing it wholesale
     would silently drop the other's key."""
-    p = Path(os.path.expanduser(str(path))) if path else CONFIG_PATH
+    p = Path(os.path.expanduser(str(path))) if path else config_path()
     data = {}
     try:
         loaded = json.loads(p.read_text(encoding="utf-8"))

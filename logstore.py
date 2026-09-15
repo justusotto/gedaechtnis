@@ -67,10 +67,39 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
 import config  # noqa: E402  (path is set above; this is the only place a directory is named)
 
-VAULT = config.VAULT
-LOG_DIR = VAULT / ".gedaechtnis" / "log"
-VIEW_DIR = VAULT / ".gedaechtnis" / "views"
-START_FILE = VAULT / ".gedaechtnis" / "shadow-start.json"
+# ★ Resolved PER CALL, never at import. The constants these replace were evaluated once when
+# this module was first imported, and on 2026-09-15 that freeze rewrote 263 files of a real
+# memory vault: a test set GEDAECHTNIS_VAULT after the module was already in `sys.modules`, so
+# the override was read by nobody. PEP 562 `__getattr__` below keeps the old spelling working
+# while making every read a fresh resolution — but `from <this module> import VAULT` binds ONCE
+# and brings the bug straight back, which is why the importers use attribute access and
+# `tests/test_percall_resolution.py` fails if a module-level binding returns.
+
+def log_dir():
+    return config.vault() / ".gedaechtnis" / "log"
+
+
+def view_dir():
+    return config.vault() / ".gedaechtnis" / "views"
+
+
+def start_file():
+    return config.vault() / ".gedaechtnis" / "shadow-start.json"
+
+
+_ACCESSORS = {"VAULT": lambda: config.vault(), "LOG_DIR": log_dir,
+              "VIEW_DIR": view_dir, "START_FILE": start_file}
+
+
+def __getattr__(name: str):
+    fn = _ACCESSORS.get(name)
+    if fn is not None:
+        return fn()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__():
+    return sorted(list(globals()) + list(_ACCESSORS))
 
 KINDS = ("decision", "lesson", "state", "question", "note")
 STEMS = ("Canon", "Errata", "Patterns", "Position", "Aporia")
@@ -158,12 +187,12 @@ def split_id(row_id: str):
 # --------------------------------------------------------------------- reading ----
 
 def log_files() -> list:
-    return sorted(LOG_DIR.glob("*.tsv")) if LOG_DIR.is_dir() else []
+    return sorted(log_dir().glob("*.tsv")) if log_dir().is_dir() else []
 
 
 def month_file(ts: str = "") -> Path:
     ts = ts or time.strftime("%Y-%m")
-    return LOG_DIR / f"{ts[:7]}.tsv"
+    return log_dir() / f"{ts[:7]}.tsv"
 
 
 def parse_line(line: str):
@@ -248,7 +277,7 @@ def append(region: str, kind: str, stem: str, heading: str, body: str,
     line = "\t".join((row_id, ts, region, kind, stem, escape(heading), escape(body), flag_s, src))
     if not ROW.match(line):
         raise ValueError(f"refused: the composed row does not match the grammar: {line[:160]}")
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    log_dir().mkdir(parents=True, exist_ok=True)
     f = month_file(ts)
     new = not f.exists()
     with open(f, "a", encoding="utf-8") as fh:      # "a" and only ever "a": the file is append-only

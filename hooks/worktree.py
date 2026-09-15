@@ -17,8 +17,26 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config
 
-HOME = config.HOME
-ROOT = config.WORKTREES
+# ★ Resolved PER CALL, never at import. The constants these replace were evaluated once when
+# this module was first imported, and on 2026-09-15 that freeze rewrote 263 files of a real
+# memory vault: a test set GEDAECHTNIS_VAULT after the module was already in `sys.modules`, so
+# the override was read by nobody. PEP 562 `__getattr__` below keeps the old spelling working
+# while making every read a fresh resolution — but `from <this module> import VAULT` binds ONCE
+# and brings the bug straight back, which is why the importers use attribute access and
+# `tests/test_percall_resolution.py` fails if a module-level binding returns.
+
+_ACCESSORS = {"HOME": lambda: config.home(), "ROOT": lambda: config.worktrees()}
+
+
+def __getattr__(name: str):
+    fn = _ACCESSORS.get(name)
+    if fn is not None:
+        return fn()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__():
+    return sorted(list(globals()) + list(_ACCESSORS))
 
 
 def sh(args, cwd=None, timeout=600):
@@ -52,8 +70,8 @@ def create(inp: dict) -> int:
     cwd = inp.get("cwd") or os.getcwd()
     name = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in (inp.get("name") or "wt")) or "wt"
     src = repo_root(cwd) or Path(cwd)
-    ROOT.mkdir(parents=True, exist_ok=True)
-    dst = ROOT / f"{src.name}--{name}-{time.strftime('%Y%m%d-%H%M%S')}"
+    config.worktrees().mkdir(parents=True, exist_ok=True)
+    dst = config.worktrees() / f"{src.name}--{name}-{time.strftime('%Y%m%d-%H%M%S')}"
     p = sh(["cp", "-c", "-R", str(src), str(dst)])            # APFS clonefile
     if p.returncode != 0:
         p = sh(["cp", "-R", "--reflink=auto", str(src), str(dst)])   # Linux reflink (Btrfs/XFS) or plain copy

@@ -26,24 +26,45 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
 import config
 
-HOME = config.HOME
-VAULT = config.VAULT
-STATE = config.STATE
-LEDGER_DIR = VAULT / "Channels" / "ledger"
+# ★ Resolved PER CALL, never at import. The constants these replace were evaluated once when
+# this module was first imported, and on 2026-09-15 that freeze rewrote 263 files of a real
+# memory vault: a test set GEDAECHTNIS_VAULT after the module was already in `sys.modules`, so
+# the override was read by nobody. PEP 562 `__getattr__` below keeps the old spelling working
+# while making every read a fresh resolution — but `from <this module> import VAULT` binds ONCE
+# and brings the bug straight back, which is why the importers use attribute access and
+# `tests/test_percall_resolution.py` fails if a module-level binding returns.
+
+def ledger_dir():
+    return config.vault() / "Channels" / "ledger"
+
+
+_ACCESSORS = {"HOME": lambda: config.home(), "VAULT": lambda: config.vault(),
+              "STATE": lambda: config.state(), "LEDGER_DIR": ledger_dir}
+
+
+def __getattr__(name: str):
+    fn = _ACCESSORS.get(name)
+    if fn is not None:
+        return fn()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__():
+    return sorted(list(globals()) + list(_ACCESSORS))
 KINDS = ("fact", "notice", "request", "handoff", "read", "ack")
 ROW = re.compile(r"^(N-\d{4}-\d{2}-\d{2}-\d{4})\t(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\t([A-Z][A-Z0-9-]*)\t([A-Z][A-Z0-9-]*|\*)\t(fact|notice|request|handoff|read|ack)\t([^\t]*)\t([^\t\n]*)$")
 
 
 def month_file(ts: str | None = None) -> Path:
     ts = ts or time.strftime("%Y-%m")
-    return LEDGER_DIR / f"{ts[:7]}.tsv"
+    return ledger_dir() / f"{ts[:7]}.tsv"
 
 
 def all_rows() -> list[tuple]:
     rows = []
-    if not LEDGER_DIR.is_dir():
+    if not ledger_dir().is_dir():
         return rows
-    for f in sorted(LEDGER_DIR.glob("*.tsv")):
+    for f in sorted(ledger_dir().glob("*.tsv")):
         for line in f.read_text(encoding="utf-8").splitlines():
             if not line or line.startswith("#"):
                 continue
@@ -83,9 +104,9 @@ def append(frm: str, to: str, kind: str, ref: str, body: str) -> str:
     err = validate_line(line)
     if err:
         raise SystemExit(f"refused: {err}")
-    LEDGER_DIR.mkdir(parents=True, exist_ok=True)
+    ledger_dir().mkdir(parents=True, exist_ok=True)
     f = month_file(day)
-    lock = LEDGER_DIR / ".lock"
+    lock = ledger_dir() / ".lock"
     with open(lock, "w") as lk:
         fcntl.flock(lk, fcntl.LOCK_EX)              # mint + append under one lock: no duplicate ids from two lanes
         rid = mint_id(day)
@@ -102,12 +123,12 @@ def append(frm: str, to: str, kind: str, ref: str, body: str) -> str:
 def _commit(f: Path, msg: str) -> None:
     """A ledger row is committed the moment it is appended, path-limited, as the vault's own identity — the
     Stop hook stages only a lane's declared paths, and the ledger is EVERY lane's surface and no lane's path."""
-    if not (VAULT / ".git").exists():
+    if not (config.vault() / ".git").exists():
         return
-    rel = str(f.relative_to(VAULT))
+    rel = str(f.relative_to(config.vault()))
     for attempt in range(4):
-        a = subprocess.run(["git", "-C", str(VAULT), "add", "--", rel], capture_output=True, text=True, stdin=subprocess.DEVNULL)
-        c = subprocess.run(["git", "-C", str(VAULT), "-c", "user.name=atlas", "-c", "user.email=atlas@local", "commit", "-q", "-m", msg, "--", rel],
+        a = subprocess.run(["git", "-C", str(config.vault()), "add", "--", rel], capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        c = subprocess.run(["git", "-C", str(config.vault()), "-c", "user.name=atlas", "-c", "user.email=atlas@local", "commit", "-q", "-m", msg, "--", rel],
                            capture_output=True, text=True, stdin=subprocess.DEVNULL)
         if c.returncode == 0 or "index.lock" not in (a.stderr + c.stderr):
             return
@@ -115,7 +136,7 @@ def _commit(f: Path, msg: str) -> None:
 
 
 def cursor_path(lane: str) -> Path:
-    return STATE / f"ledger-cursor-{lane}.txt"
+    return config.state() / f"ledger-cursor-{lane}.txt"
 
 
 def unacked(to: str) -> list[tuple]:
@@ -134,13 +155,13 @@ def read(to: str, since_cursor: bool) -> list[tuple]:
         except OSError:
             pass
     if rows and since_cursor:
-        STATE.mkdir(parents=True, exist_ok=True)
+        config.state().mkdir(parents=True, exist_ok=True)
         cursor_path(to).write_text(rows[-1][0] + "\n", encoding="utf-8")
     return rows
 
 
 def check(path: Path | None) -> int:
-    files = [path] if path else sorted(LEDGER_DIR.glob("*.tsv")) if LEDGER_DIR.is_dir() else []
+    files = [path] if path else sorted(ledger_dir().glob("*.tsv")) if ledger_dir().is_dir() else []
     bad = 0; last = ""
     for f in files:
         for n, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):

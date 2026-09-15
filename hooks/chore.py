@@ -14,16 +14,31 @@ import fcntl, json, os, re, subprocess, sys, time
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))   # logstore/importer, imported LAZILY below
-from common import (read_input, context, log, expand, under, vault_rel, fleet_repos, VAULT, STATE, guarded,
-                    lane_for, path_in_partition, region_of_repo, repo_root_of, shared_surface,
-                    record_touched, record_agent_touched, record_direct_touched,
-                    was_created, record_created, release_filelock, ROLE_STEMS)
+from common import (read_input, context, log, expand, under, vault_rel, fleet_repos, guarded, lane_for, path_in_partition, region_of_repo, repo_root_of, shared_surface, record_touched, record_agent_touched, record_direct_touched, was_created, record_created, release_filelock, ROLE_STEMS)
+import common
+# VAULT, STATE deliberately NOT imported by name: a `from` import binds the value
+# ONCE, which is the frozen-path defect this package was bitten by. Read through the
+# module object (common.VAULT) so PEP 562 re-resolves on every access.
 import names
 import context_economy
 
 EV = "PostToolUse"
 UUID = re.compile(r"https://claude\.ai/code/artifact/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})")
-INDEX = VAULT / "Pharos" / "artifacts-index.md"
+# ★ Derived from the vault, so resolved PER CALL for the same reason the vault is: a constant
+# here would re-freeze the path one level down from the fix.
+
+def index_path():
+    return common.VAULT / "Pharos" / "artifacts-index.md"
+
+
+_ACCESSORS = {"INDEX": index_path}
+
+
+def __getattr__(name: str):
+    fn = _ACCESSORS.get(name)
+    if fn is not None:
+        return fn()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 ANCHOR = "Prefix every id with"
 
 
@@ -70,11 +85,11 @@ def do_artifact(inp: dict) -> None:
         except OSError:
             pass
     title = title or ti.get("title") or Path(fp or "").stem or "untitled"
-    STATE.mkdir(parents=True, exist_ok=True)
-    lk = open(STATE / "artifacts-index.lock", "w")
+    common.STATE.mkdir(parents=True, exist_ok=True)
+    lk = open(common.STATE / "artifacts-index.lock", "w")
     fcntl.flock(lk, fcntl.LOCK_EX)                          # read-modify-write under a lock: two publishes never lose a row
     try:
-        txt = INDEX.read_text(encoding="utf-8")
+        txt = index_path().read_text(encoding="utf-8")
     except OSError:
         context(EV, f"Artifact {uid} published but ~/Atlas/Pharos/artifacts-index.md is not readable; it is NOT indexed.")
         return
@@ -88,10 +103,10 @@ def do_artifact(inp: dict) -> None:
         txt = txt[:j + 1] + row + txt[j + 1:] if j != -1 else txt[:i] + row + "\n" + txt[i:]
     else:
         txt = txt.rstrip("\n") + "\n" + row
-    tmp = INDEX.with_suffix(".md.tmp-" + uid[:8])
+    tmp = index_path().with_suffix(".md.tmp-" + uid[:8])
     tmp.write_text(txt, encoding="utf-8")
-    os.replace(tmp, INDEX)                                  # atomic: no reader ever sees a half-written index
-    sha = commit_path_limited(VAULT, "Pharos/artifacts-index.md", f"artifacts-index: {title} ({uid[:8]})")
+    os.replace(tmp, index_path())                                  # atomic: no reader ever sees a half-written index
+    sha = commit_path_limited(common.VAULT, "Pharos/artifacts-index.md", f"artifacts-index: {title} ({uid[:8]})")
     fcntl.flock(lk, fcntl.LOCK_UN); lk.close()
     log("chore", f"artifact-index\t{uid}\t{title}\tcommit={sha}")
     context(EV, f"Artifact {uid} (“{title}”) is now a row in ~/Atlas/Pharos/artifacts-index.md"
@@ -109,7 +124,7 @@ def _vault_has_head() -> bool:
     """Does the vault have a commit yet? (The same question `init.py` asks before its first
     commit — a path-limited commit onto an unborn branch is not a thing git will do.)"""
     try:
-        return _git(["rev-parse", "--verify", "-q", "HEAD"], VAULT).returncode == 0
+        return _git(["rev-parse", "--verify", "-q", "HEAD"], common.VAULT).returncode == 0
     except (subprocess.TimeoutExpired, OSError):
         return False
 
@@ -160,7 +175,7 @@ def map_row_for(p: Path, rel: str) -> str | None:
         log("chore", f"map-row\t{rel}\twrite failed: {e}")
         return None
     map_rel = vault_rel(map_p) or ""
-    sha = commit_path_limited(VAULT, map_rel, f"{map_rel}: index {stem}.md") if _vault_has_head() else None
+    sha = commit_path_limited(common.VAULT, map_rel, f"{map_rel}: index {stem}.md") if _vault_has_head() else None
     log("chore", f"map-row\t{rel}\trow={stem}\tcommit={sha}")
     return (f"New file {rel}: added one row to {map_rel} — `{row.strip()}`"
             + (f", committed {sha}." if sha else "."))
@@ -207,7 +222,7 @@ def role_log_target(rel: str) -> tuple[str | None, str | None]:
         return None, None                                # `.gedaechtnis/views/…/Position.md` is not live
     if parts and parts[0] in ("Concilium", "Pharos", "Channels", "Workflows", "Limen"):
         return None, None
-    d = VAULT / p.parent
+    d = common.VAULT / p.parent
     if not (d / "Map.md").is_file():
         return None, None                                # a folder with no Map is not a region
     region = str(p.parent) if str(p.parent) != "." else "."
@@ -263,7 +278,7 @@ def do_write(inp: dict) -> None:
     # feeds is about the whole worktree). Recorded before the vault check below, which is about
     # what the Stop hook commits and has nothing to do with what a later Read should warn about.
     context_economy.record_write(inp.get("session_id", "-"), p)
-    if not under(p, VAULT):
+    if not under(p, common.VAULT):
         return
     sid = inp.get("session_id", "-")
     # D2, the release half. FIRST, and before the is_file() guard: the tool call this chore follows
@@ -336,7 +351,7 @@ def do_write(inp: dict) -> None:
         # (the Stop hook stages only declared paths; the pre-commit guard refuses a foreign committer): commit it now
         lane, prefixes, _ = lane_for(inp.get("cwd"))
         if not (lane and path_in_partition(rel, prefixes)) or kind in ("umbrella-shared", "roster"):
-            sha = commit_path_limited(VAULT, rel, f"{kind}: append by {lane or 'UNKNOWN-LANE'}")
+            sha = commit_path_limited(common.VAULT, rel, f"{kind}: append by {lane or 'UNKNOWN-LANE'}")
             notes.append(f"Shared surface {rel}: your append is committed as atlas@local ({sha or 'commit refused, see chore.log'}).")
     if notes:
         log("chore", f"write\t{rel}\t{' | '.join(n[:80] for n in notes)}")
@@ -363,7 +378,7 @@ def other_occurrences(terms: list[str], exclude: Path, limit: int = 12) -> dict[
     skip = ("Workflows/anthropic-archive", ".git/", "/.tools/")
     for term in terms[:limit]:
         try:
-            p = subprocess.run(["grep", "-rIl", "--include=*.md", "-F", "--", term, str(VAULT)],
+            p = subprocess.run(["grep", "-rIl", "--include=*.md", "-F", "--", term, str(common.VAULT)],
                                capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=15)
         except (subprocess.TimeoutExpired, OSError):
             continue
@@ -386,7 +401,7 @@ def _inbox_target(p: Path, cwd: str | None) -> tuple[str | None, str | None]:
     """(region, what) when the written path is outside this session's lane: a vault path in another region, or a
     file inside another lane's repo. Returns (None, None) when the write is within the lane or unattributable."""
     lane, prefixes, _ = lane_for(cwd)
-    if under(p, VAULT):
+    if under(p, common.VAULT):
         rel = vault_rel(p) or ""
         if lane and path_in_partition(rel, prefixes):
             return None, None
@@ -426,11 +441,11 @@ def do_inbox(inp: dict) -> None:
     lane, _, _ = lane_for(cwd)
     lane = lane or "UNKNOWN-LANE"
     sid = inp.get("session_id", "-")
-    inbox = VAULT / region / "Inbox.md"
-    if not (VAULT / region).is_dir():
+    inbox = common.VAULT / region / "Inbox.md"
+    if not (common.VAULT / region).is_dir():
         return
     # one row per session × region × file; the seen-set lives in the state dir
-    seen_f = STATE / "inbox-seen.txt"
+    seen_f = common.STATE / "inbox-seen.txt"
     key = f"{sid}\t{region}\t{what}"
     try:
         seen = set(seen_f.read_text(encoding="utf-8").splitlines()) if seen_f.is_file() else set()
@@ -446,13 +461,13 @@ def do_inbox(inp: dict) -> None:
             if new:
                 fh.write(f"# {region} — Inbox\n\nAppend-only. Rows are written by the Gedächtnis hooks when ANOTHER lane works in this region or its repo, so the record lands where the work happened. The owning lane folds each row into its state files at its next boot and deletes it here.\n\n")
             fh.write(row)
-        STATE.mkdir(parents=True, exist_ok=True)
+        common.STATE.mkdir(parents=True, exist_ok=True)
         with open(seen_f, "a", encoding="utf-8") as fh:
             fh.write(key + "\n")
     except OSError:
         return
     rel = f"{region}/Inbox.md"
-    sha = commit_path_limited(VAULT, rel, f"{region} Inbox: {lane} wrote {what.split('/')[-1]}")
+    sha = commit_path_limited(common.VAULT, rel, f"{region} Inbox: {lane} wrote {what.split('/')[-1]}")
     log("chore", f"inbox\t{region}\t{lane}\t{what}\tcommit={sha}")
     context(EV, f"Recorded in {rel} that {lane} wrote `{what}` (this region is not this session's lane). The owning lane sees it at its next boot"
                 + (f"; committed {sha}." if sha else "; NOT committed (see chore.log)."))

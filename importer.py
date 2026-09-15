@@ -39,7 +39,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import logstore
-from logstore import VAULT, STEMS
+from logstore import STEMS
+import logstore
+# VAULT deliberately NOT imported by name: a `from` import binds the value
+# ONCE, which is the frozen-path defect this package was bitten by. Read through the
+# module object (logstore.VAULT) so PEP 562 re-resolves on every access.
 
 SKIP_TOP = ("Concilium", "Pharos", "Channels", "Workflows", "Limen")
 SIDECAR = re.compile(r"-(archive|fixed|resolved)(?:-\d+)?$")   # `-archive-2`: a segment is a sidecar too (R3)
@@ -77,7 +81,7 @@ def strip_code(text: str) -> str:
 
 def regions(vault: Path = None) -> list:
     """-> [(region_name, dir)] every folder carrying a Map.md, vault-relative name, sorted."""
-    vault = vault or VAULT
+    vault = vault or logstore.VAULT
     out = []
     for m in sorted(vault.rglob("Map.md")):
         rel = m.parent.relative_to(vault)
@@ -279,7 +283,7 @@ def log_one_file(region: str, stem: str, path: Path, src: str = "session") -> di
 
 def scan(vault: Path = None) -> dict:
     """-> {'entries': [...], 'per_stem': {...}, 'unparsed': [...]} — a pure read of the vault."""
-    vault = vault or VAULT
+    vault = vault or logstore.VAULT
     entries = []
     shape = []
     per_stem = {s: 0 for s in STEMS}

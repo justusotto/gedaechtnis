@@ -17,10 +17,33 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config
 
-HOME = config.HOME
-VAULT = config.VAULT
-STATE = config.STATE
-ROSTER = config.ROSTER
+# ---------------------------------------------------------------- paths, resolved PER CALL
+# ★ HOME, VAULT, STATE and ROSTER are no longer module-level constants. They were, and that freeze
+# is what compacted 263 files of a real memory vault on 2026-09-15: `config.VAULT` was resolved once
+# when this module was first imported, so a test setting GEDAECHTNIS_VAULT afterwards changed
+# nothing, and the package rewrote the user's own memory under a test's 1,500-byte bound.
+#
+# PEP 562 keeps the spelling and removes the freeze: reading `common.VAULT` is a function call now,
+# made fresh every time. Note what that means for CALLERS — `from common import VAULT` binds ONCE
+# and reintroduces exactly the bug, so every re-export site was converted to attribute access and
+# `tests/test_percall_resolution.py` goes red if one comes back.
+#
+# Inside THIS module `__getattr__` does not fire for a plain global lookup, so its own functions
+# call `config.vault()` and friends directly.
+
+_ACCESSORS = {"HOME": lambda: config.home(), "VAULT": lambda: config.vault(),
+              "STATE": lambda: config.state(), "ROSTER": lambda: config.roster()}
+
+
+def __getattr__(name: str):
+    fn = _ACCESSORS.get(name)
+    if fn is not None:
+        return fn()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__():
+    return sorted(list(globals()) + list(_ACCESSORS))
 
 ROLE_STEMS = frozenset(("Map","Vision","Position","Course","Canon","Patterns","Aporia","Eidos",
                         "Errata","Apparatus","Annales","Nomos","Lexicon","Ethos","Praxis","Exempla","Kernel"))
@@ -36,8 +59,8 @@ def read_input() -> dict:
 
 def log(name: str, line: str) -> None:
     try:
-        STATE.mkdir(parents=True, exist_ok=True)
-        with open(STATE / f"{name}.log", "a", encoding="utf-8") as fh:
+        config.state().mkdir(parents=True, exist_ok=True)
+        with open(config.state() / f"{name}.log", "a", encoding="utf-8") as fh:
             fh.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')}\t{line}\n")
     except OSError:
         pass
@@ -71,7 +94,7 @@ def allow(event: str, text: str) -> None:
 def expand(p: str, cwd: str | None = None) -> Path:
     """Expand ~, $HOME, ${HOME}; make relative paths absolute against cwd."""
     s = p.strip().strip('"').strip("'")
-    s = s.replace("${HOME}", str(HOME)).replace("$HOME", str(HOME))
+    s = s.replace("${HOME}", str(config.home())).replace("$HOME", str(config.home()))
     s = os.path.expanduser(s)
     path = Path(s)
     if not path.is_absolute() and cwd:
@@ -92,7 +115,7 @@ def under(path: Path, root: Path) -> bool:
 
 def vault_rel(path: Path) -> str | None:
     try:
-        return str(path.relative_to(VAULT))
+        return str(path.relative_to(config.vault()))
     except ValueError:
         return None
 
@@ -104,7 +127,7 @@ def find_marker(cwd: str | None) -> Path | None:
         return None
     d = Path(cwd)
     for _ in range(8):
-        if d == Path("/") or d == HOME:
+        if d == Path("/") or d == config.home():
             break
         m = d / ".atlas-lane"
         if m.is_file():
@@ -123,7 +146,7 @@ def git_root(start: str | Path | None) -> Path | None:
         return None
     d = Path(start)
     for _ in range(12):
-        if d == d.parent or d == HOME:
+        if d == d.parent or d == config.home():
             return None
         if (d / ".git").exists():
             return d
@@ -168,13 +191,13 @@ def path_in_partition(rel: str, prefixes: list[str]) -> bool:
 
 def fleet_repos() -> list[Path]:
     """`repo:` lines of the roster's fleet-roster block, $HOME-relative, plus the vault itself."""
-    out = [VAULT]
+    out = [config.vault()]
     try:
-        txt = ROSTER.read_text(encoding="utf-8")
+        txt = config.roster().read_text(encoding="utf-8")
     except OSError:
         return out
     for m in re.finditer(r"^\s*repo:\s*(\S+)", txt, re.M):
-        out.append(HOME / m.group(1))
+        out.append(config.home() / m.group(1))
     return out
 
 
@@ -185,7 +208,7 @@ def fleet_repos() -> list[Path]:
 # a path in the same turn must not lose one of them, and neither may drop another key.
 
 def session_state_path(sid: str) -> Path:
-    return STATE / f"session-start-{sid or '-'}.json"
+    return config.state() / f"session-start-{sid or '-'}.json"
 
 
 def update_session_state(sid: str, mutate) -> dict:
@@ -196,8 +219,8 @@ def update_session_state(sid: str, mutate) -> dict:
     import fcntl
     path = session_state_path(sid)
     try:
-        STATE.mkdir(parents=True, exist_ok=True)
-        with open(STATE / f"session-{(sid or '-')}.lock", "w") as lk:
+        config.state().mkdir(parents=True, exist_ok=True)
+        with open(config.state() / f"session-{(sid or '-')}.lock", "w") as lk:
             fcntl.flock(lk, fcntl.LOCK_EX)
             try:
                 doc = json.loads(path.read_text(encoding="utf-8"))
@@ -314,14 +337,14 @@ def direct_touched_paths(sid: str) -> list[str]:
 
 def pre_exists_marker(p: Path) -> Path:
     import hashlib
-    return STATE / ("pre-exists-" + hashlib.sha1(str(p).encode("utf-8")).hexdigest()[:16])
+    return config.state() / ("pre-exists-" + hashlib.sha1(str(p).encode("utf-8")).hexdigest()[:16])
 
 
 def note_pre_exists(p: Path) -> None:
     """Record, at PreToolUse time, whether `p` is already on disk. Rewritten on every gate call
     for that path, so a marker left behind by a DENIED write is corrected before it is ever read."""
     try:
-        STATE.mkdir(parents=True, exist_ok=True)
+        config.state().mkdir(parents=True, exist_ok=True)
         pre_exists_marker(p).write_text("1" if p.exists() else "0", encoding="utf-8")
     except OSError:
         pass
@@ -410,7 +433,7 @@ def filelock_path(p: Path) -> Path:
         real = os.path.realpath(str(p))
     except OSError:
         real = str(p)
-    return STATE / "filelocks" / hashlib.sha1(real.encode("utf-8")).hexdigest()
+    return config.state() / "filelocks" / hashlib.sha1(real.encode("utf-8")).hexdigest()
 
 
 def read_filelock(p: Path) -> dict | None:
@@ -630,11 +653,11 @@ def region_of_repo(repo: Path) -> str | None:
         txt = (repo / "CLAUDE.md").read_text(encoding="utf-8")
     except OSError:
         return None
-    for m in _re.finditer(r"^@" + _re.escape(str(VAULT)) + r"/((?:[^/\s]+/)?[^/\s]+)/(?:Kernel|Position)\.md", txt, _re.M):
+    for m in _re.finditer(r"^@" + _re.escape(str(config.vault())) + r"/((?:[^/\s]+/)?[^/\s]+)/(?:Kernel|Position)\.md", txt, _re.M):
         top = m.group(1).split("/")[0]
         if top in ("Global", "Pharos", "Channels", "Workflows", "Limen", "Concilium"):
             continue
-        if "/" in m.group(1) or top == "Speculum" or _is_leaf_region(VAULT / top):
+        if "/" in m.group(1) or top == "Speculum" or _is_leaf_region(config.vault() / top):
             return m.group(1)
     return None
 
@@ -659,7 +682,7 @@ def repo_root_of(path: Path) -> Path | None:
     for _ in range(12):
         if (d / ".git").exists():
             return d
-        if d == d.parent or d == HOME:
+        if d == d.parent or d == config.home():
             return None
         d = d.parent
     return None

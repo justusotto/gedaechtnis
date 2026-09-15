@@ -19,9 +19,11 @@ from __future__ import annotations
 import re, sys, os
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import (read_input, deny, ask, allow, log, expand, under, vault_rel, lane_for, path_in_partition,
-                    VAULT, HOME, STATE, ROLE_STEMS, guarded, shared_surface, pure_append,
-                    note_pre_exists, clear_pre_exists, created_paths, take_filelock, release_filelock)
+from common import (read_input, deny, ask, allow, log, expand, under, vault_rel, lane_for, path_in_partition, ROLE_STEMS, guarded, shared_surface, pure_append, note_pre_exists, clear_pre_exists, created_paths, take_filelock, release_filelock)
+import common
+# VAULT, HOME, STATE deliberately NOT imported by name: a `from` import binds the value
+# ONCE, which is the frozen-path defect this package was bitten by. Read through the
+# module object (common.VAULT) so PEP 562 re-resolves on every access.
 import fnmatch
 import shlex
 import subprocess
@@ -128,7 +130,7 @@ def segments(cmd: str) -> list[str]:
 
 def git_segments(cmd: str, cwd: str | None):
     """Yield (segment, repo_path) for every `git` segment, tracking `cd` across segments."""
-    cur = Path(cwd) if cwd else HOME
+    cur = Path(cwd) if cwd else common.HOME
     for seg in segments(cmd):
         words = seg.split()
         # skip leading env assignments
@@ -151,7 +153,7 @@ def git_segments(cmd: str, cwd: str | None):
 
 def rule_vault_git(cmd: str, cwd: str | None) -> str | None:
     for seg, repo in git_segments(cmd, cwd):
-        if not (repo == VAULT or under(repo, VAULT)):
+        if not (repo == common.VAULT or under(repo, common.VAULT)):
             continue
         w = seg.split()
         sub = next((x for x in w[1:] if not x.startswith("-") and x not in ("-C",) ), None)
@@ -315,17 +317,33 @@ def rule_launch_model(cmd: str) -> str | None:
     return None
 
 
-_PROTECTED = [
-    (re.compile(r"_cache\.json"), "mining caches (whisper_cache.json, gemini_cache.json, …) are USER DATA — real money and time"),
-    (re.compile(r"anki_mining\.db"), "anki_mining.db is the mining database — user data"),
-    (re.compile(r"(?:^|[\s/'\"])media/"), "a `media/` directory holds mined clips — user data"),
-    (re.compile(r"(?:~|/Users/[^/\s]+)/Pictures"), "~/Pictures holds his photographs"),
-    (re.compile(r"\.Trash"), "the Trash is NEVER emptied — it is his permanent restore net"),
-    (re.compile(r"(?:~|/Users/[^/\s]+|\$HOME|\$\{HOME\})/" + re.escape(VAULT.name) + r"(?:/|\s|$)"
-                + r"|" + re.escape(str(VAULT)) + r"(?:/|\s|$)"), "the vault and its history"),
-]   # the vault is whatever config names — council 2 (Balthasar, closure) found the literal `/Atlas` here,
-    # which left a stranger's ~/Gedaechtnis unprotected by the one rule that must hold everywhere
-_VAULT_RX = re.escape(str(VAULT)) + r"(?:/|\s|$)"   # scope for the owner-class protections when protect_everywhere is off
+def _protected():
+    """The owner-class protections, built NOW — the vault's name and path are in these patterns.
+
+    ★ This was a module-level list, compiled once at import. Two separate defects lived in that:
+    council 2 found a literal `/Atlas` in it, which left a stranger whose vault is `~/Gedaechtnis`
+    unprotected by the one rule that must hold everywhere; and the constant it was rebuilt on was
+    itself resolved at import, so a process whose vault moved kept guarding the old directory —
+    protecting a path nobody was writing while the one being written was unguarded. A guard that
+    freezes its own subject is worse than no guard: it reports green."""
+    v = common.VAULT
+    return [
+        (re.compile(r"_cache\.json"), "mining caches (whisper_cache.json, gemini_cache.json, …) are USER DATA — real money and time"),
+        (re.compile(r"anki_mining\.db"), "anki_mining.db is the mining database — user data"),
+        (re.compile(r"(?:^|[\s/'\"])media/"), "a `media/` directory holds mined clips — user data"),
+        (re.compile(r"(?:~|/Users/[^/\s]+)/Pictures"), "~/Pictures holds his photographs"),
+        (re.compile(r"\.Trash"), "the Trash is NEVER emptied — it is his permanent restore net"),
+        (re.compile(r"(?:~|/Users/[^/\s]+|\$HOME|\$\{HOME\})/" + re.escape(v.name) + r"(?:/|\s|$)"
+                    + r"|" + re.escape(str(v)) + r"(?:/|\s|$)"), "the vault and its history"),
+    ]
+
+
+def _vault_rx():
+    """Scope for the owner-class protections when protect_everywhere is off. Built per call for the
+    same reason as `_protected()`."""
+    return re.escape(str(common.VAULT)) + r"(?:/|\s|$)"
+
+
 _DESTROY = re.compile(r"(?<!git )(?:^|\s)(?:rm|unlink|shred|rmdir)\s|\bfind\b.*\s-delete\b|\bgit\s+clean\b|>\s*\S*_cache\.json")
 
 
@@ -343,15 +361,15 @@ def rule_data_integrity(cmd: str) -> str | None:
         if w0 and w0[0] == "git" and not re.search(r"\bgit\s+(?:-C\s+\S+\s+)?clean\b", seg):
             continue                                  # `git rm --cached` etc. are index operations; the vault-git rule owns them
         everywhere = _cfg.flag("protect_everywhere")
-        for rx, why in _PROTECTED:
-            if not everywhere and "vault" not in why and "Trash" not in why and not re.search(_VAULT_RX, seg):
+        for rx, why in _protected():
+            if not everywhere and "vault" not in why and "Trash" not in why and not re.search(_vault_rx(), seg):
                 continue                              # a stranger's own `media/` or `*_cache.json` outside the vault is his to delete
             if rx.search(seg):
                 # allow rm inside the vault's gitignored scratch (.atlas-locks, .pre-* backups) explicitly
                 # the vault's name, not the literal `Atlas` — the same correction council 2 made to
-                # _PROTECTED above: a stranger whose vault is `~/Gedaechtnis` gets its own scratch
+                # _protected() above: a stranger whose vault is `~/Gedaechtnis` gets its own scratch
                 # carve-out, instead of being asked about every lock file it cleans up
-                if "vault" in why and re.search(re.escape(VAULT.name) + r"/(?:\.atlas-locks|\.atlas-writer\.lock|[^\s]*\.pre-)", seg):
+                if "vault" in why and re.search(re.escape(common.VAULT.name) + r"/(?:\.atlas-locks|\.atlas-writer\.lock|[^\s]*\.pre-)", seg):
                     continue
                 return (f"Defaults never delete: {why}. Deletions go to the Trash via Finder in one `Cleanup YYYY-MM-DD/` "
                         "bundle with a README, never `rm`; and this class asks the owner first. (Global/Nomos §Data integrity)")
@@ -489,7 +507,7 @@ def bash_write_targets(cmd: str, cwd: str | None) -> list[tuple[Path, str]]:
             elif verb in ("rm", "touch", "truncate"):
                 for x in args:
                     out.append((expand(x, cwd), verb))
-    return [(p, how) for p, how in out if under(p, VAULT)]
+    return [(p, how) for p, how in out if under(p, common.VAULT)]
 
 
 # ------------------------------------------ D1's bash half: no whole-file overwrite (WP9 gap 1) ----
@@ -564,7 +582,7 @@ def rule_bash_partition(cmd: str, inp: dict) -> str | None:
             r = rule_display_name_filename(p)      # deterministic, like the stem rule: every mode, every lane
             if r:
                 return r + f" (Bash write via {how}.)"
-    if lane is None and cwd and under(expand(cwd), VAULT):
+    if lane is None and cwd and under(expand(cwd), common.VAULT):
         log("partition", f"ok\tVAULT-CWD\tbash\tsession={sid}")
         return None                                    # a session opened in the vault itself is the owner's own hand
     for p, how in targets:
@@ -695,7 +713,7 @@ def rule_display_name_filename(p: Path) -> str | None:
 
 def partition_mode() -> str:
     try:
-        v = (STATE / "partition.mode").read_text(encoding="utf-8").strip().lower()
+        v = (common.STATE / "partition.mode").read_text(encoding="utf-8").strip().lower()
         return v if v in ("warn", "deny") else "warn"
     except OSError:
         return "warn"
@@ -754,7 +772,7 @@ def do_write(inp: dict) -> None:
         return
     cwd = inp.get("cwd")
     p = expand(fp, cwd)
-    if not under(p, VAULT):
+    if not under(p, common.VAULT):
         return
     rel = vault_rel(p) or ""
     note_pre_exists(p)      # the only moment anything can still tell a CREATION from an edit (chore.py reads this back)
@@ -809,7 +827,7 @@ def do_write(inp: dict) -> None:
         refuse(d1)
         return
 
-    if lane is None and cwd and under(expand(cwd), VAULT):
+    if lane is None and cwd and under(expand(cwd), common.VAULT):
         log("partition", f"ok\tVAULT-CWD\t{rel}\tsession={sid}")
         return                                   # a session opened in the vault itself is the owner's own hand
     if lane is None:
@@ -851,10 +869,10 @@ def agent_definition_has_model(kind: str, cwd: str | None) -> bool:
         d = Path(cwd)
         for _ in range(8):
             cands.append(d / ".claude" / "agents" / f"{kind}.md")
-            if d == d.parent or d == HOME:
+            if d == d.parent or d == common.HOME:
                 break
             d = d.parent
-    cands.append(HOME / ".claude" / "agents" / f"{kind}.md")
+    cands.append(common.HOME / ".claude" / "agents" / f"{kind}.md")
     for c in cands:
         try:
             txt = c.read_text(encoding="utf-8")

@@ -74,7 +74,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import archive
 import bootfile
 import recall
-from common import read_input, log, guarded, VAULT, STATE
+from common import read_input, log, guarded
+import common
+# VAULT, STATE deliberately NOT imported by name: a `from` import binds the value
+# ONCE, which is the frozen-path defect this package was bitten by. Read through the
+# module object (common.VAULT) so PEP 562 re-resolves on every access.
 
 STATE_FILE = "maintenance.json"
 SCHEMA_VERSION = 1
@@ -92,7 +96,7 @@ ROLE_FILE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9-]*\.md$")
 
 # ------------------------------------------------------------------ state ----
 def state_path() -> Path:
-    return STATE / STATE_FILE
+    return common.STATE / STATE_FILE
 
 
 def today() -> str:
@@ -140,7 +144,7 @@ def substantive_commits(since: str) -> tuple[int, int, bool]:
     command itself failed — the counts are then meaningless and must never be read as zero. The bare date would undercount — a
     `--since=YYYY-MM-DD` with no time component is read as that date's current clock time — so the
     00:00:00 is explicit, exactly as the vault learned to write it."""
-    rc, out = sh(["git", "-C", str(VAULT), "log", f"--since={since} 00:00:00", "--format=%s"])
+    rc, out = sh(["git", "-C", str(common.VAULT), "log", f"--since={since} 00:00:00", "--format=%s"])
     if rc != 0:
         return 0, 0, False
     subjects = [l for l in out.splitlines() if l.strip()]
@@ -159,8 +163,8 @@ def regions() -> list[Path]:
     `Global/` is excluded: it is where a synthesis pass PROMOTES to, never a source it reads."""
     found = []
     try:
-        for mapfile in VAULT.rglob("Map.md"):
-            rel = mapfile.relative_to(VAULT)
+        for mapfile in common.VAULT.rglob("Map.md"):
+            rel = mapfile.relative_to(common.VAULT)
             if any(part.startswith(".") for part in rel.parts):
                 continue
             if rel.parts[0] in EXCLUDED_REGION_DIRS:
@@ -181,10 +185,10 @@ def new_region_entries(since: str) -> tuple[int, bool]:
         for name in ("Errata.md", "Patterns.md"):
             p = region / name
             if p.is_file():
-                files.append(str(p.relative_to(VAULT)))
+                files.append(str(p.relative_to(common.VAULT)))
     if not files:
         return 0, True                      # no region files is a real, checked answer of zero
-    rc, out = sh(["git", "-C", str(VAULT), "log", f"--since={since} 00:00:00", "--format=", "-p",
+    rc, out = sh(["git", "-C", str(common.VAULT), "log", f"--since={since} 00:00:00", "--format=", "-p",
                   "--", *files], timeout=40)
     if rc != 0:
         return 0, False
@@ -200,13 +204,13 @@ def topology_events(since: str) -> tuple[list[str], bool]:
     # own region — the exact false alarm rule 2 forbids, arriving one day later than the first-run
     # guard covers. With nothing before `since` there is nothing for a surface to be new RELATIVE
     # TO, and the arm reports nothing rather than everything.
-    rc0, prior_any = sh(["git", "-C", str(VAULT), "log", "-1", "--format=%H",
+    rc0, prior_any = sh(["git", "-C", str(common.VAULT), "log", "-1", "--format=%H",
                          f"--before={since} 00:00:00"])
     if rc0 != 0:
         return [], False
     if not prior_any.strip():
         return [], True                     # checked, and correctly nothing: the vault is young
-    rc, out = sh(["git", "-C", str(VAULT), "log", f"--since={since} 00:00:00", "--diff-filter=A",
+    rc, out = sh(["git", "-C", str(common.VAULT), "log", f"--since={since} 00:00:00", "--diff-filter=A",
                   "--name-only", "--format="], timeout=40)
     if rc != 0:
         return [], False
@@ -220,7 +224,7 @@ def topology_events(since: str) -> tuple[list[str], bool]:
             tops.add(parts[0])
     events = []
     for top in sorted(tops):
-        rc2, prior = sh(["git", "-C", str(VAULT), "log", "-1", "--format=%H",
+        rc2, prior = sh(["git", "-C", str(common.VAULT), "log", "-1", "--format=%H",
                          f"--before={since} 00:00:00", "--", top + "/"])
         if rc2 == 0 and not prior.strip():
             events.append(f"new top-level surface `{top}/`")
@@ -246,7 +250,7 @@ def oversize_role_files() -> list[dict]:
     out = []
     for md in memory_files():
         try:
-            rel = md.relative_to(VAULT)
+            rel = md.relative_to(common.VAULT)
         except ValueError:
             continue
         limit = table.get(md.stem)
@@ -279,7 +283,7 @@ def unsearchable_files() -> list[dict]:
     out = []
     for md in memory_files():                    # the same population, for the same reason
         try:
-            rel = md.relative_to(VAULT)
+            rel = md.relative_to(common.VAULT)
         except ValueError:
             continue
         try:
@@ -355,15 +359,15 @@ def compute(state: dict, cwd: str, day: str, skipped_rolls: list | None = None) 
     # The Boot-file arms. NOT cleanup arms: a region that has outgrown its boot payload is not
     # untidy, and a stale Boot file is not a threshold being approached — it is a summary that
     # reads as current while contradicting the bodies it was distilled from.
-    stale, boot_unchecked = bootfile.stale_boot_files(VAULT)
-    oversize = bootfile.oversize_boot_files(VAULT)
+    stale, boot_unchecked = bootfile.stale_boot_files(common.VAULT)
+    oversize = bootfile.oversize_boot_files(common.VAULT)
     # `compute` runs AFTER the window in `main`, so a file still listed here is one the window
     # declined; the reason is attached where the reader meets the size.
     skips = {r["path"]: r["skipped"] for r in (skipped_rolls or []) if r.get("skipped")}
     for f in oversize:
         if f["path"] in skips:
             f["skipped"] = skips[f["path"]]
-    boot = {"graduation": bootfile.graduation_candidates(VAULT)[:EVIDENCE_CAP],
+    boot = {"graduation": bootfile.graduation_candidates(common.VAULT)[:EVIDENCE_CAP],
             "oversize": oversize[:EVIDENCE_CAP],
             "stale": stale[:EVIDENCE_CAP],
             "unchecked": boot_unchecked[:EVIDENCE_CAP]}
@@ -492,7 +496,7 @@ def memory_files() -> list[Path]:
                  | set(recall.GENERATED_DIRS) | set(recall.REMOVED_DIRS))
     out = []
     try:
-        for dirpath, dirnames, filenames in os.walk(VAULT):
+        for dirpath, dirnames, filenames in os.walk(common.VAULT):
             dirnames[:] = sorted(d for d in dirnames
                                  if d not in skip_dirs and not d.startswith("."))
             for name in sorted(filenames):
@@ -564,9 +568,9 @@ def compact_vault() -> list[dict]:
                 # of this operation to land on its own. Caught by
                 # `test_compaction_is_COMMITTED_not_left_as_vault_dirt`, which saw exactly that.
                 touched = [path] + archive.segments(path)
-                moved.append({"path": str(path.relative_to(VAULT)), "entries": n,
-                              "paths": [str(q.relative_to(VAULT)) for q in touched]})
-                log("maintenance", f"compacted {n} entry(ies) out of {path.relative_to(VAULT)} "
+                moved.append({"path": str(path.relative_to(common.VAULT)), "entries": n,
+                              "paths": [str(q.relative_to(common.VAULT)) for q in touched]})
+                log("maintenance", f"compacted {n} entry(ies) out of {path.relative_to(common.VAULT)} "
                                    f"into {len(touched) - 1} segment(s)")
     return moved
 
@@ -614,11 +618,11 @@ def main() -> None:
     inp = read_input()
     cwd = inp.get("cwd") or os.getcwd()
     day = today()
-    if not VAULT.is_dir():
-        log("maintenance", f"no vault at {VAULT}; nothing computed")
+    if not common.VAULT.is_dir():
+        log("maintenance", f"no vault at {common.VAULT}; nothing computed")
         return
 
-    STATE.mkdir(parents=True, exist_ok=True)
+    common.STATE.mkdir(parents=True, exist_ok=True)
     state = read_state()
     if state is None:
         # FIRST RUN. The dates start today, so nothing has "been due since" a date the user never
@@ -635,7 +639,7 @@ def main() -> None:
     # The Boot file's own window, against the BOOT budget rather than the memory-file bound. Its
     # paths join the same commit: a compaction that is not committed leaves the vault permanently
     # dirty, and dirt of that kind makes other machinery defer rather than announce itself.
-    rolled = bootfile.roll_window(VAULT)
+    rolled = bootfile.roll_window(common.VAULT)
     for r in rolled:
         if r.get("skipped"):
             # An over-budget Boot file that was NOT compacted is the interesting case, not the
