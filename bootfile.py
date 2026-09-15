@@ -98,6 +98,54 @@ def _git(vault: Path, *args: str, ok_codes=(0,)):
     return p.returncode, p.stdout.strip()
 
 
+def always_loaded(cwd: str | None = None) -> set[str]:
+    """Every file the CURRENT @-import chain actually pulls in, as resolved paths.
+
+    ★ MEMBERSHIP IS DERIVED, NEVER INFERRED FROM A NAME, and that distinction cost a real vault.
+    This module protected a Boot file by its FILENAME, so a vault's top-level index — @-imported by
+    every session, the file the whole vault hangs off, but not named like a Boot file — fell
+    straight through to the generic compactor and was cut from 87 lines to 17. Every session for
+    the next fifteen hours booted on the remains.
+
+    A file is protected here because a session LOADS it, which is the property that makes
+    compacting it dangerous. The walk is `session_start.boot_chain_files` — the same one the boot
+    facts and the byte arm use, never a second @-import resolver.
+
+    On any failure this returns an EMPTY set, and every caller treats empty as "protect nothing
+    extra" rather than "protect everything": a guard that silently expanded to the whole vault when
+    it could not read the chain would stop all compaction and look exactly like a healthy quiet
+    vault. The failure is reported by the caller instead."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
+    try:
+        import config
+        import session_start
+        entry = [config.USER_MEMORY]
+        if cwd:
+            entry.append(Path(cwd) / "CLAUDE.md")
+        return {str(Path(p).resolve()) for p, _size in session_start.boot_chain_files(entry)}
+    except Exception:
+        return set()
+
+
+def is_protected(path: Path, chain: set[str] | None = None, cwd: str | None = None) -> str | None:
+    """Why this file must not be compacted by a generic pass, or None.
+
+    Two reasons, and they are the same reason at different scales: the file is a Boot file (a
+    region's always-loaded index), or the session's own @-import chain loads it. Either way its
+    sections are structural rather than chronological, and moving its oldest ones moves whatever
+    the author put at the top — which in an always-loaded file is where standing rules live."""
+    if path.name == BOOT_FILE:
+        return "it is a Boot file"
+    members = always_loaded(cwd) if chain is None else chain
+    try:
+        if str(path.resolve()) in members:
+            return "it is @-imported by the session's own boot chain"
+    except OSError:
+        pass
+    return None
+
+
 def regions(vault: Path) -> list[Path]:
     """The regions, from `maintenance.regions()` — the package's ONE definition.
 
@@ -113,8 +161,11 @@ def regions(vault: Path) -> list[Path]:
     import sys
     sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
     import maintenance
-    from common import VAULT as _V
-    if Path(vault).resolve() != Path(_V).resolve():
+    import common
+    # `common.VAULT` as an ATTRIBUTE, never `from common import VAULT`: since BLASTRADIUS-1's
+    # per-call resolution it is a PEP 562 module getter, and a `from` import binds its value once —
+    # reintroducing, in this line, precisely the freeze that compacted a real vault.
+    if Path(vault).resolve() != Path(common.VAULT).resolve():
         # A caller pointing somewhere else is a test or a mistake; either way, answer about the
         # path it ASKED about rather than about the environment's vault.
         return [d for d in sorted(p for p in Path(vault).rglob("*") if p.is_dir())

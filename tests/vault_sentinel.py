@@ -99,14 +99,30 @@ def resolved_roots() -> dict:
 
 # ---------------------------------------------------------------- the two instruments
 
+# Transient COORDINATION state, not memory. A lock exists to be taken and dropped; it is written
+# and removed constantly by whatever else is using the vault, it is untracked (so the
+# committed-and-clean attribution can never clear it), and nothing in it is a user's content. It is
+# the one category that produces a standing alarm on a machine where anything else is running.
+#
+# The exclusion is deliberately by NAME and deliberately short. It is not "skip what looks
+# temporary": a `.tmp` file beside a role file is a half-written MEMORY file and stays watched.
+_TRANSIENT_NAMES = {".atlas-writer.lock"}
+_TRANSIENT_DIRS = {".atlas-locks"}
+
+
 def _walk(tree: Path):
-    """Every file under `tree`, skipping `.git` internals — they move on their own (packing,
-    reflogs) and a change there is never what this is looking for."""
+    """Every file under `tree`, skipping `.git` internals and coordination locks.
+
+    `.git` moves on its own (packing, reflogs) and a change there is never what this is looking for.
+    The lock exclusions are argued above — they are the only two, and widening this set is how a
+    guard stops guarding."""
     if not tree.is_dir():
         return
     for dirpath, dirnames, filenames in os.walk(tree):
-        dirnames[:] = [d for d in dirnames if d != ".git"]
+        dirnames[:] = [d for d in dirnames if d != ".git" and d not in _TRANSIENT_DIRS]
         for name in filenames:
+            if name in _TRANSIENT_NAMES:
+                continue
             yield Path(dirpath) / name
 
 

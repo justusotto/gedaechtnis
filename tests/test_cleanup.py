@@ -507,3 +507,68 @@ def test_the_guard_sees_a_GITIGNORED_file_being_modified(tmp_path):
     assert git(v, "status", "--porcelain").strip() == "", "git still sees nothing — the point"
     moved = changed(before, fingerprint(v))
     assert [Path(m).name for m in moved] == ["status.md"], moved
+
+
+def test_a_DATED_cleanup_folder_is_excluded_too(world, tmp_path):
+    """★ The exact-name defect, found by a synthesis pass while the quarantine from a real incident
+    sat inside the vault being searched.
+
+    The convention is `Cleanup YYYY-MM-DD <what happened>/`, so the exact-name test
+    `"Cleanup 2026-09-15 accidental-compaction" in {"Cleanup"}` was False and a folder holding
+    hundreds of copied role files counted as memory — every vault-wide query returning three to five
+    copies of each entry. A name was used where a class was meant."""
+    sys.path.insert(0, str(PLUGIN))
+    import recall
+    assert recall.is_removed_dir("Cleanup")
+    assert recall.is_removed_dir("Cleanup 2026-09-15 accidental-compaction")
+    assert recall.is_removed_dir("Cleanup-2026-09-15")
+    # NEGATIVE CONTROL: a real memory folder whose name merely begins the same way is NOT excluded.
+    assert not recall.is_removed_dir("Cleanups")
+    assert not recall.is_removed_dir("CleanupNotes")
+    assert not recall.is_removed_dir("Canon")
+
+    dated = world["vault"] / "Cleanup 2026-09-15 an incident" / "removed" / "Proj"
+    dated.mkdir(parents=True)
+    (dated / "Canon.md").write_text("# Canon\n\n## a quarantined copy\n\nwords\n")
+    (world["vault"] / "Proj" / "Canon.md").write_text("# Canon\n\n## a live entry\n\nwords\n")
+    found = [str(p) for p in recall.md_files(world["vault"], include_queues=True)]
+    assert not any("Cleanup 2026-09-15" in f for f in found), found
+    # POSITIVE CONTROL: the live file beside it IS searched, so the exclusion is about the folder.
+    assert any(f.endswith("Proj/Canon.md") for f in found), found
+
+
+# The six unit tests that stood here tested `compaction_signature`, a narrowing I added to the
+# session-scoped guard so that concurrent writers would not false-fail it. BLASTRADIUS-1's
+# `vault_sentinel` replaced that guard with a better answer to the same problem — per-test
+# granularity, content hashing, and git-based attribution of concurrent changes — so it fails on
+# ANY write to the user's files, which covers the shrink-without-archive case by construction
+# rather than by a heuristic. Two guards for one thing is the defect this arc keeps producing;
+# theirs is the one that stays. Its own tests live in `test_vault_sentinel.py`.
+
+
+def test_the_empty_chain_fallback_holds_UNDER_A_REAL_FAILURE(world, monkeypatch):
+    """★ Finding #2: the shipped test for this could not fail.
+
+    It passed a nonexistent cwd expecting to hit `always_loaded`'s `except` branch — but
+    `boot_chain_files` swallows a missing path silently and never raises, so the trigger condition
+    never occurred and the test passed for a reason unrelated to the property. The fault is injected
+    here instead, which is the only way to reach the branch."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("gd_bf_fault", PLUGIN / "bootfile.py")
+    bf = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(bf)
+    import sys
+    sys.path.insert(0, str(PLUGIN / "hooks"))
+    import session_start
+
+    def boom(*a, **k):
+        raise RuntimeError("the chain could not be read")
+    monkeypatch.setattr(session_start, "boot_chain_files", boom)
+    assert bf.always_loaded("/anything") == set(), "a raising chain must yield NOTHING extra"
+    # And the safe direction is what that buys: a Boot file is still protected by its own rule,
+    # which needs no chain, while an ordinary file is not protected by a chain nobody could read.
+    boot = world["vault"] / "Proj" / "Kernel.md"
+    boot.parent.mkdir(parents=True, exist_ok=True)
+    boot.write_text("# Boot\n")
+    assert bf.is_protected(boot, chain=set()) == "it is a Boot file"
+    assert bf.is_protected(world["vault"] / "Proj" / "Canon.md", chain=set()) is None

@@ -85,6 +85,21 @@ NON_MEMORY_DIRS = frozenset({"Pharos", "Channels"})
 # content the user's own cleanup removed. A member of a defaultable set is one flag away from
 # being wrong, and nothing would have said so.
 REMOVED_DIRS = frozenset({"Cleanup"})
+
+
+def is_removed_dir(name: str) -> bool:
+    """Is this directory a cleanup quarantine?
+
+    ★ A PREFIX, NOT AN EXACT NAME, and the exact-name version was live long enough to bite. The
+    convention these folders follow is `Cleanup YYYY-MM-DD <what happened>/` — so
+    `"Cleanup 2026-09-15 accidental-compaction" in {"Cleanup"}` is False, and a quarantine holding
+    hundreds of copied role files was classified as memory by both the search and the compactor.
+    Every vault-wide query returned three to five copies of each entry.
+
+    It is the same defect as testing a Boot file by the filename `Kernel.md`: a name was used where
+    a CLASS was meant, in the same package, in the same week. The class here is "a folder whose name
+    begins with Cleanup", which is what the convention actually guarantees."""
+    return name == "Cleanup" or name.startswith("Cleanup ") or name.startswith("Cleanup-")
 # Not memory either: the vault's own generated evidence about itself — see the docstring's
 # "Generated views are not memory either." A separate set (and flag) from NON_MEMORY_DIRS because
 # the reason is different: queues restate the vault's vocabulary without answering anything,
@@ -169,7 +184,7 @@ def md_files(vault: Path, include_queues: bool = False, include_generated: bool 
     that show a human an answer pass one."""
     for dirpath, dirnames, filenames in os.walk(vault):
         dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS and not d.startswith(".git")
-                             and d not in REMOVED_DIRS
+                             and not is_removed_dir(d)
                              and (include_queues or d not in NON_MEMORY_DIRS)
                              and (include_generated or d not in GENERATED_DIRS))
         for name in sorted(filenames):

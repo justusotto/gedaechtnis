@@ -82,7 +82,12 @@ def __dir__():
     return sorted(list(globals()) + list(_ACCESSORS))
 BUNDLE_DIR = "Cleanup"
 README_NAME = "README-what-went-where.html"
-BOOT_FILE = "Kernel.md"          # the window's file; see the skip in `propose`
+def _bootfile():
+    """`bootfile.py`, lazily — it owns the one definition of "a session loads this file"."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import bootfile
+    return bootfile
 
 # `**Last revisited:** 2026-08-01`, `Last revisited: 2026-08-01`, and the spellings in between.
 LAST_REVISITED_RE = re.compile(r"Last revisited[:*\s]+([0-9]{4}-[0-9]{2}-[0-9]{2})?", re.I)
@@ -203,6 +208,7 @@ def propose(day: str | None = None) -> dict:
     tests point GEDAECHTNIS_VAULT and run this as the product does."""
     vault = config.vault()
     day = day or today()
+    _chain = _bootfile().always_loaded(os.getcwd())
     proposals, unparsable, unreadable = [], 0, []
     for path in maintenance.memory_files():
         # A sidecar is APPEND-ONLY by contract ("nothing here is ever rewritten or moved: a link
@@ -210,15 +216,12 @@ def propose(day: str | None = None) -> dict:
         # exactly the promise the archive exists to make.
         if archive.is_sidecar(path.stem):
             continue
-        if path.name == BOOT_FILE:
-            # ★ A BOOT FILE BELONGS TO THE WINDOW AND TO NOTHING ELSE. Its sections are named and
-            # structural, not chronological, and this pass has no concept of the window its author
-            # declares — so a "duplicate" or an oversize fold here would move a standing constraint
-            # out of the one file every session loads, unattended and without asking. The same rule
-            # `maintenance.compact_vault` follows, for the same reason, found in the same review.
-            #
-            # It is not enough that `role_soft_limits_lines` happens to carry no `Kernel` key today:
-            # nothing declared that it must not, and a table is one edit from acquiring one.
+        if _bootfile().is_protected(path, chain=_chain):
+            # The same rule `maintenance.compact_vault` follows, for the same reason and found in
+            # the same review: a file a session LOADS is not tidied by an unattended pass. Keyed on
+            # the filename until 2026-09-15, when a vault's top-level index fell through elsewhere
+            # for exactly that — a name is not a property. Not enough that `role_soft_limits_lines` happens to
+            # carry no `Kernel` key today: nothing declared that it must not.
             continue
         try:
             rel = str(path.relative_to(vault))

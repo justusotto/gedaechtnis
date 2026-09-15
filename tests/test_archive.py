@@ -544,3 +544,44 @@ def test_under_its_line_limit_a_file_is_untouched(live):
     assert archive.compact_file(live, limit=100, floor_share=0.4, measure=count_lines) == 0
     assert live.read_text(encoding="utf-8") == before
     assert archive.segments(live) == []
+
+
+# ------------------------------------ the door added after the suite ate a real vault ----
+def test_under_pytest_a_write_OUTSIDE_a_temp_directory_IS_REFUSED(tmp_path, monkeypatch):
+    """★ The incident this door exists for, as a test.
+
+    On 2026-09-15 at 00:43 the suite compacted 260 files of the owner's REAL vault, including the
+    index every session boots from — which then booted gutted for fifteen hours. The test meant to
+    drive `compact_vault` against a fixture: it set GEDAECHTNIS_VAULT to a temp directory and
+    loaded a fresh `maintenance` module. But `common.VAULT` is resolved ONCE PER PROCESS and an
+    earlier test had already imported it, so the module's vault was the real one while the limits
+    it read were the fixture's 1,500 bytes.
+
+    Nothing about that is visible at the call site, so the rule cannot be "remember to use a
+    subprocess". Under pytest, a memory file is rewritten in a temp directory or not at all."""
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "a test is running")
+    victim = Path.home() / "Atlas" / "definitely-not-written.md"
+    with pytest.raises(RuntimeError) as e:
+        archive.atomic_write(victim, "this must never land")
+    assert "REFUSED" in str(e.value) and "temporary directory" in str(e.value)
+    assert not victim.exists()
+
+
+def test_the_door_lets_a_TEMP_path_through(tmp_path, monkeypatch):
+    """The negative control, and it is the one that matters: a door that refuses everything would
+    pass the test above while breaking every other test in this file."""
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "a test is running")
+    target = tmp_path / "Fine.md"
+    archive.atomic_write(target, "written\n")
+    assert target.read_text(encoding="utf-8") == "written\n"
+
+
+def test_the_door_is_SILENT_in_production(tmp_path, monkeypatch):
+    """Outside pytest it must not exist at all — the product writes real vaults for a living."""
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    outside = tmp_path / "pretend-real.md"
+    archive.atomic_write(outside, "ok\n")          # tmp here, but the guard is off either way
+    assert outside.read_text(encoding="utf-8") == "ok\n"
+    import inspect
+    src = inspect.getsource(archive._refuse_a_real_path_under_pytest)
+    assert 'os.environ.get("PYTEST_CURRENT_TEST")' in src and "return" in src

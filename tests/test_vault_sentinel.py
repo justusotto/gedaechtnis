@@ -249,3 +249,22 @@ def test_a_vault_with_no_git_attributes_nothing_away(tmp_path):
     moved = vs.changed(before, vs.stat_fingerprint(roots))
     ours, theirs = vs.attribute(moved, roots, vs.head_of(v))
     assert ours == moved and theirs == []
+
+
+def test_the_lock_exclusion_is_narrow(tmp_path):
+    """The exclusion list is the one place this guard deliberately looks away, so it gets its own
+    pair: the two named lock paths are skipped, and everything else that merely LOOKS temporary —
+    a half-written role file, a `.tmp` beside one — is still watched."""
+    sys.path.insert(0, str(HERE))
+    import vault_sentinel as vs
+    v = tmp_path / "vault"
+    (v / ".atlas-locks" / "Global.lock.d").mkdir(parents=True)
+    (v / "Region").mkdir(parents=True)
+    (v / ".atlas-locks" / "Global.lock.d" / "owner").write_text("pid\n", encoding="utf-8")
+    (v / ".atlas-writer.lock").write_text("x\n", encoding="utf-8")
+    (v / "Region" / "Position.md").write_text("a\n", encoding="utf-8")
+    (v / "Region" / "Position.md.tmp-x").write_text("half\n", encoding="utf-8")
+    seen = {Path(k).name for k in vs.stat_fingerprint({"trees": [v], "files": []})}
+    assert ".atlas-writer.lock" not in seen and "owner" not in seen, f"a lock is being watched: {seen}"
+    assert {"Position.md", "Position.md.tmp-x"} <= seen, (
+        f"a half-written MEMORY file must still be watched — it is content, not coordination: {seen}")
