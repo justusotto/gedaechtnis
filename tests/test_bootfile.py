@@ -661,7 +661,15 @@ def test_an_unreadable_chain_protects_NOTHING_EXTRA_rather_than_everything(mod, 
     compaction and look exactly like a healthy quiet vault — the reassuring failure. It returns an
     empty set instead, so an unreadable chain costs the EXTRA protection and nothing else; Boot
     files stay protected by their own rule, which needs no chain at all."""
-    assert mod.always_loaded("/nonexistent-cwd-xyz") == set() or True   # never raises
+    # `X == set() or True` is ALWAYS truthy — the first version of this line asserted nothing at
+    # all, and a reviewer caught it. Sixth instance of the decorative-control class in this arc.
+    empty = mod.always_loaded("/nonexistent-cwd-xyz")
+    assert isinstance(empty, set), type(empty)
+    assert not any("nonexistent" in m for m in empty), empty
+    # POSITIVE CONTROL: the same call against a REAL chain returns members, so "empty" above is a
+    # verdict about an unreadable chain and not about a function that always returns nothing.
+    assert mod.always_loaded(str(Path(__file__).resolve().parents[2])), \
+        "always_loaded found no chain even for a real repo; the test above proves nothing"
     boot = vault / "Proj" / "Kernel.md"
     boot.write_text("# Boot\n")
     assert mod.is_protected(boot, chain=set()) == "it is a Boot file"

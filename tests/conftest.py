@@ -73,6 +73,13 @@ def changed(before, after) -> list[str]:
     return sorted(k for k in keys if before.get(k) != after.get(k))
 
 
+def _is_quarantined(path: str) -> bool:
+    """Inside a `Cleanup …/` bundle — where a legitimate cleanup MOVES things, so a path leaving
+    one is a restore rather than a loss."""
+    return any(part == "Cleanup" or part.startswith("Cleanup ") or part.startswith("Cleanup-")
+               for part in Path(path).parts)
+
+
 def compaction_signature(before, after) -> list[str]:
     """The paths that changed in the shape a COMPACTION makes: a memory file that shrank, in a
     session where `-archive` files also appeared.
@@ -88,11 +95,19 @@ def compaction_signature(before, after) -> list[str]:
     editing prose in another region does not look like that."""
     if before is None or after is None:
         return []
+    # A file that VANISHED. Checked separately and unconditionally, because it is in `before` and
+    # not in `after` — so it appears in neither the shrink list nor the door's path (a deletion
+    # never reaches `atomic_write`). A memory file disappearing during a test run is never
+    # acceptable and never something a concurrent lane does: this vault's own law is that nothing
+    # is deleted, it is moved to a quarantine folder. Found by a reviewer naming the gap.
+    vanished = [p for p in before
+                if p not in after and p.endswith(".md") and not _is_quarantined(p)]
     new_archives = [p for p in after
                     if p not in before and "-archive" in Path(p).stem and p.endswith(".md")]
     shrunk = [p for p, v in after.items()
               if p in before and p.endswith(".md") and v[0] < before[p][0]]
-    return sorted(shrunk) if (new_archives and shrunk) else []
+    compaction = sorted(shrunk) if (new_archives and shrunk) else []
+    return sorted(set(compaction) | set(vanished))
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -109,8 +124,8 @@ def the_suite_leaves_the_real_vault_alone():
               f"ran — most likely another session, since none of it looks like a compaction: "
               + ", ".join(moved[:5]) + (" ..." if len(moved) > 5 else ""))
     assert not compacted, (
-        f"A TEST COMPACTED THE REAL VAULT AT {REAL_VAULT}. {len(compacted)} file(s) shrank while "
-        f"archive files appeared beside them:\n  "
+        f"A TEST DAMAGED THE REAL VAULT AT {REAL_VAULT}. {len(compacted)} memory file(s) were "
+        f"compacted or disappeared:\n  "
         + "\n  ".join(compacted[:10])
         + (f"\n  ... and {len(compacted) - 10} more" if len(compacted) > 10 else "")
         + "\n\nThis is the signature of the 2026-09-15 incident: a module's VAULT was already "
