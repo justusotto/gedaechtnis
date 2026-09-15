@@ -118,6 +118,19 @@ def permit(path, why: str = "", scratch=None) -> Path:
 
     if os.environ.get("PYTEST_CURRENT_TEST"):
         tmp = _temp_root()
+        # Under pytest, the run's temp root is ALWAYS permitted, whether or not it is one of the
+        # configured roots. This is what makes the guard a drop-in for a test-only door: the great
+        # majority of this suite drives the package at a `tmp_path` fixture WITHOUT pointing
+        # GEDAECHTNIS_VAULT at it, which is correct — the code under test takes the path as an
+        # argument. Without this clause a straight swap refuses every one of them (measured: it
+        # does), and the refusal would be about the fixture rather than about anything real.
+        #
+        # It is not a hole. It widens what is allowed only while PYTEST_CURRENT_TEST is set, and
+        # only to a directory the test framework owns and destroys. The clause below is the one
+        # doing the work in that state: being inside a temp path is permitted, being inside a REAL
+        # root is not.
+        if under(p, tmp):
+            return p
         stray = [r for r in rs if not under(r, tmp)]
         if stray and any(under(p, r) for r in stray):
             raise OutsideRoot(
