@@ -44,7 +44,15 @@ def _trailing_pathspec(flags: str) -> bool:
     while i < len(toks):
         t = toks[i]
         if t == "--":
-            return "--" not in toks[i + 1:] and _breadth(toks[i + 1:]) or True
+            rest = toks[i + 1:]
+            # ★ A BARE TRAILING `--` IS NOT A PATHSPEC. `git commit -m msg --` has an EMPTY pathspec
+            # list, which git treats as "no pathspec" — it commits the whole staged index, which is
+            # exactly the breadth this door exists to refuse, and it is irreversible under NO-AMEND.
+            # The old expression ended in `or True`, so the empty case returned True and the refusal
+            # was skipped. Found by the BLASTRADIUS-1 code review, 2026-09-15; reproduced live.
+            if not rest:
+                return False
+            return "--" not in rest and _breadth(rest) or True
         if t in takes:
             i += 2; continue
         if t.startswith("-") or t == "HEREDOC":

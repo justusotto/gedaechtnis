@@ -25,6 +25,7 @@ import argparse, fcntl, json, os, re, subprocess, sys, time
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
 import config
+import rootguard
 
 # ★ Resolved PER CALL, never at import. The constants these replace were evaluated once when
 # this module was first imported, and on 2026-09-15 that freeze rewrote 263 files of a real
@@ -104,6 +105,7 @@ def append(frm: str, to: str, kind: str, ref: str, body: str) -> str:
     err = validate_line(line)
     if err:
         raise SystemExit(f"refused: {err}")
+    rootguard.permit(ledger_dir(), "ledger month file")
     ledger_dir().mkdir(parents=True, exist_ok=True)
     f = month_file(day)
     lock = ledger_dir() / ".lock"

@@ -153,3 +153,99 @@ def test_the_shipped_conftest_still_installs_all_three(tmp_path):
     for name in ("real_files_unchanged_session", "real_files_unchanged_module",
                  "real_files_unchanged_function"):
         assert name in src, f"conftest.py no longer installs {name}"
+
+
+# ---------------------------------------------------------------- the attribution's own controls
+# `attribute()` is the only LOOSENING in this guard: it lets some changes through. A loosening needs
+# the control that proves it cannot swallow the case the guard exists for — otherwise the honest
+# thing would be to not have it.
+
+def _vault(tmp_path):
+    import subprocess as sp
+    v = tmp_path / "vault"; (v / "Region").mkdir(parents=True)
+    (v / "Region" / "Position.md").write_text("# Status\n\noriginal\n", encoding="utf-8")
+    sp.run(["git", "-C", str(v), "init", "-q"], check=True, stdin=sp.DEVNULL)
+    sp.run(["git", "-C", str(v), "add", "-A"], check=True, stdin=sp.DEVNULL)
+    sp.run(["git", "-C", str(v), "-c", "user.name=t", "-c", "user.email=t@t",
+            "commit", "-q", "-m", "root"], check=True, stdin=sp.DEVNULL)
+    return v
+
+
+def test_a_concurrent_COMMITTED_change_is_attributed_away(tmp_path):
+    """A background session-end commit: the file moved AND was committed, so the vault's HEAD moved
+    and the path is clean. That is somebody else's work, not the suite's."""
+    import subprocess as sp
+    sys.path.insert(0, str(HERE))
+    import vault_sentinel as vs
+    v = _vault(tmp_path)
+    roots = {"trees": [v], "files": []}
+    head_before = vs.head_of(v)
+    f = v / "Region" / "Position.md"
+    before = vs.stat_fingerprint(roots)
+    f.write_text("# Status\n\nthe other writer's entry\n", encoding="utf-8")
+    sp.run(["git", "-C", str(v), "add", "-A"], check=True, stdin=sp.DEVNULL)
+    sp.run(["git", "-C", str(v), "-c", "user.name=t", "-c", "user.email=t@t",
+            "commit", "-q", "-m", "session-end auto-commit"], check=True, stdin=sp.DEVNULL)
+    moved = vs.changed(before, vs.stat_fingerprint(roots))
+    assert moved, "the fixture did not actually change anything"
+    ours, theirs = vs.attribute(moved, roots, head_before)
+    assert [Path(t).name for t in theirs] == ["Position.md"], (ours, theirs)
+    assert ours == [], f"a committed, clean change was still blamed on the suite: {ours}"
+
+
+def test_a_DIRTY_change_is_still_the_suites_even_when_HEAD_moved(tmp_path):
+    """★ The control that carries the weight. A concurrent committer is active — HEAD moves — and a
+    stray test writes at the same time. The stray write must still fail: it is dirty, because no
+    test is going to commit the user's vault. Without this, the attribution would be a hole that
+    opens exactly when the vault is busy, which is when the incident happened."""
+    import subprocess as sp
+    sys.path.insert(0, str(HERE))
+    import vault_sentinel as vs
+    v = _vault(tmp_path)
+    roots = {"trees": [v], "files": []}
+    head_before = vs.head_of(v)
+    before = vs.stat_fingerprint(roots)
+
+    # the other writer commits something of its own
+    (v / "Region" / "Canon.md").write_text("# Decisions\n\ntheirs\n", encoding="utf-8")
+    sp.run(["git", "-C", str(v), "add", "-A"], check=True, stdin=sp.DEVNULL)
+    sp.run(["git", "-C", str(v), "-c", "user.name=t", "-c", "user.email=t@t",
+            "commit", "-q", "-m", "theirs"], check=True, stdin=sp.DEVNULL)
+    # and the suite scribbles on the user's memory, leaving it dirty
+    (v / "Region" / "Position.md").write_text("compacted under a test bound\n", encoding="utf-8")
+
+    moved = vs.changed(before, vs.stat_fingerprint(roots))
+    ours, theirs = vs.attribute(moved, roots, head_before)
+    assert [Path(o).name for o in ours] == ["Position.md"], (ours, theirs)
+    assert [Path(t).name for t in theirs] == ["Canon.md"], (ours, theirs)
+
+
+def test_when_nothing_committed_every_change_is_the_suites(tmp_path):
+    """HEAD did not move, so there is no other writer to blame. Unattributable must resolve
+    AGAINST the suite, never in its favour."""
+    sys.path.insert(0, str(HERE))
+    import vault_sentinel as vs
+    v = _vault(tmp_path)
+    roots = {"trees": [v], "files": []}
+    head_before = vs.head_of(v)
+    before = vs.stat_fingerprint(roots)
+    (v / "Region" / "Position.md").write_text("scribble\n", encoding="utf-8")
+    moved = vs.changed(before, vs.stat_fingerprint(roots))
+    ours, theirs = vs.attribute(moved, roots, head_before)
+    assert [Path(o).name for o in ours] == ["Position.md"]
+    assert theirs == []
+
+
+def test_a_vault_with_no_git_attributes_nothing_away(tmp_path):
+    """A stranger's vault need not be a git repository. With no history there is no evidence of
+    another writer, so everything stays the suite's."""
+    sys.path.insert(0, str(HERE))
+    import vault_sentinel as vs
+    v = tmp_path / "plain"; (v / "Region").mkdir(parents=True)
+    (v / "Region" / "Position.md").write_text("x\n", encoding="utf-8")
+    roots = {"trees": [v], "files": []}
+    before = vs.stat_fingerprint(roots)
+    (v / "Region" / "Position.md").write_text("y\n", encoding="utf-8")
+    moved = vs.changed(before, vs.stat_fingerprint(roots))
+    ours, theirs = vs.attribute(moved, roots, vs.head_of(v))
+    assert ours == moved and theirs == []

@@ -66,6 +66,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
 import config  # noqa: E402  (path is set above; this is the only place a directory is named)
+from common import region_is_contained  # noqa: E402  (a function, not a path — safe to bind)
+import rootguard  # noqa: E402
 
 # ★ Resolved PER CALL, never at import. The constants these replace were evaluated once when
 # this module was first imported, and on 2026-09-15 that freeze rewrote 263 files of a real
@@ -264,8 +266,20 @@ def append(region: str, kind: str, stem: str, heading: str, body: str,
         raise ValueError(f"stem must be one of {STEMS}, not {stem!r}")
     if src not in SRCS:
         raise ValueError(f"src must be one of {SRCS}, not {src!r}")
+    # ★ The region is JOINED ONTO A FILESYSTEM PATH downstream — `views.view_path` builds
+    # `root / region / f"{stem}.md"` and `views.generate` creates the parent and writes it. So the
+    # check is CONTAINMENT, not merely "no tab and no `·`": `..` is a legal path segment and
+    # `pathlib` discards the left operand entirely when the right one is absolute, so a region of
+    # `../../tmp/evil` or `/etc/x` composed a grammar-valid row and a write outside every root.
+    # Found by the BLASTRADIUS-1 code review, 2026-09-15; reproduced by construction. A plain CLI
+    # typo was enough — no attacker required.
     if "·" in region or "\t" in region or not region:
         raise ValueError(f"region must be a vault-relative folder with no tab and no `·`: {region!r}")
+    if region != "." and not region_is_contained(region):
+        raise ValueError(
+            f"region must stay inside the vault: {region!r} escapes it (a `..`/`.` segment, an "
+            f"absolute path, or a symlink leading out). The region is joined onto a real path by "
+            f"`views.generate`, so this is a write target, not a label.")
     digest = content_hash(region, stem, heading, body)
     idx = known if known is not None else _index(all_rows())
     hit = idx.get((region, digest))
@@ -277,6 +291,7 @@ def append(region: str, kind: str, stem: str, heading: str, body: str,
     line = "\t".join((row_id, ts, region, kind, stem, escape(heading), escape(body), flag_s, src))
     if not ROW.match(line):
         raise ValueError(f"refused: the composed row does not match the grammar: {line[:160]}")
+    rootguard.permit(log_dir(), "append-only log")
     log_dir().mkdir(parents=True, exist_ok=True)
     f = month_file(ts)
     new = not f.exists()
@@ -398,7 +413,9 @@ def migrate(dry_run: bool = False) -> dict:
         if dry_run:
             continue
         bak = f.with_name(f.name + ".pre-srccol-" + time.strftime("%Y-%m-%d"))
+        rootguard.permit(f, "log migration")
         if not bak.exists():                            # check-before-clobber, once per day
+            rootguard.permit(bak, "log migration backup")
             bak.write_text(f.read_text(encoding="utf-8"), encoding="utf-8")
         tmp = f.with_name(f.name + ".tmp-srccol")
         tmp.write_text("\n".join(out) + "\n", encoding="utf-8")

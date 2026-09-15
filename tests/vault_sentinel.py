@@ -161,18 +161,83 @@ def changed(before: dict, after: dict) -> list:
     return sorted(k for k in keys if before.get(k, "\0ABSENT") != after.get(k, "\0ABSENT"))
 
 
-def report(moved: list, scope: str, roots: dict) -> str:
+def _git(vault: Path, *args) -> str:
+    try:
+        r = subprocess.run(["git", "-C", str(vault), *args], capture_output=True, text=True,
+                           stdin=subprocess.DEVNULL, timeout=20)
+        return r.stdout if r.returncode == 0 else ""
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def head_of(vault: Path) -> str:
+    return _git(vault, "rev-parse", "HEAD").strip()
+
+
+def attribute(moved: list, roots: dict, head_before: str) -> tuple:
+    """Split the moved paths into (the suite's, a concurrent committer's).
+
+    ## Why this exists, and why it is not a loosening
+
+    A vault like this one has writers that are not the suite: a background session-end commit,
+    another lane, a person in an editor. Their writes are indistinguishable from a stray test's by
+    content, and the first version said so honestly and failed on both. Measured over two full runs
+    on 2026-09-15: zero false positives in a quiet five minutes, then FIVE in a run made while the
+    session hosting it was committing. A guard that cries wolf during ordinary work is a guard
+    people learn to tail past — which is precisely how the incident it was built for went unread
+    for hours.
+
+    The discriminator is what happens to the file AFTERWARDS. A concurrent session-end commit
+    LEAVES THE FILE COMMITTED: the vault's HEAD moves and the path is clean against it. A stray
+    test writes and walks away: the path is DIRTY, because no test is going to commit the user's
+    vault. So a moved path that is (a) clean against the working tree and (b) part of the range
+    `head_before..HEAD` is attributed to the other writer; everything else is the suite's and
+    still fails.
+
+    The conservative direction is deliberate. Anything the check cannot attribute — no git, no HEAD
+    movement, a dirty file, a path outside the repo, a git call that failed — counts as the
+    SUITE's. Being unable to tell must never resolve in the suite's favour."""
+    vault = roots["trees"][0] if roots["trees"] else None
+    if vault is None or not head_before:
+        return moved, []
+    head_now = head_of(vault)
+    if not head_now or head_now == head_before:
+        return moved, []          # nobody committed; every change is unattributed, i.e. ours
+    committed = set()
+    names = _git(vault, "diff", "--name-only", f"{head_before}..{head_now}")
+    for rel in names.splitlines():
+        if rel.strip():
+            committed.add(str((vault / rel.strip()).resolve()))
+    dirty = _git(vault, "status", "--porcelain")
+    dirty_paths = set()
+    for line in dirty.splitlines():
+        rel = line[3:].strip().strip('"')
+        if " -> " in rel:
+            rel = rel.split(" -> ", 1)[1]
+        if rel:
+            dirty_paths.add(str((vault / rel).resolve()))
+    ours, theirs = [], []
+    for m in moved:
+        rm = str(Path(m).resolve())
+        (theirs if (rm in committed and rm not in dirty_paths) else ours).append(m)
+    return ours, theirs
+
+
+def report(moved: list, scope: str, roots: dict, theirs: list = ()) -> str:
     head = (f"THE USER'S REAL FILES CHANGED DURING {scope}. {len(moved)} path(s) moved:\n  "
             + "\n  ".join(moved[:12])
             + (f"\n  ... and {len(moved) - 12} more" if len(moved) > 12 else ""))
+    if theirs:
+        head += (f"\n\n(A further {len(theirs)} path(s) moved and WERE attributed to a concurrent "
+                 f"committer — they are committed and clean. Those are not counted above.)")
     return head + (
         f"\n\nWatched: {', '.join(str(t) for t in roots['trees'])}"
-        "\n\nIf those paths look like a test's own fixture, a test drove this package at the REAL "
-        "root instead of its own — the usual cause is an in-process import of a module whose "
-        "path constants were already resolved under a different environment. Resolve per call, or "
-        "drive the code through a subprocess carrying the fixture's environment."
-        "\n\nIf they look like somebody's actual work, another writer touched them while the suite "
-        "ran and this is a false alarm. That ambiguity is exactly why the paths are printed.")
+        "\n\nThese paths are NOT attributable to another writer: they are dirty in the working tree, "
+        "or the vault's HEAD did not move. A concurrent session-end commit leaves its files "
+        "committed; a stray test writes and walks away. So this is the suite."
+        "\n\nThe usual cause is an in-process import of a module whose path constants were already "
+        "resolved under a different environment. Resolve per call, or drive the code through a "
+        "subprocess carrying the fixture's environment.")
 
 
 # ---------------------------------------------------------------- the fixtures themselves
@@ -194,28 +259,42 @@ def roots():
     return _ROOTS
 
 
+def _baseline(fingerprint):
+    r = roots()
+    vault = r["trees"][0] if r["trees"] else None
+    return r, fingerprint(r), (head_of(vault) if vault else "")
+
+
+def _check(r, before, head_before, fingerprint, scope):
+    moved = changed(before, fingerprint(r))
+    if not moved:
+        return
+    ours, theirs = attribute(moved, r, head_before)
+    if ours:
+        raise AssertionError(report(ours, scope, r, theirs))
+    # Everything was attributable to another writer. Say so on stdout — silence here would hide the
+    # fact that the watched tree is moving under the run, which a reader needs in order to judge the
+    # next failure.
+    print(f"\n[vault sentinel] {len(theirs)} path(s) moved during {scope} and were attributed to a "
+          f"concurrent committer (committed and clean). Not the suite.")
+
+
 @pytest.fixture(scope="session", autouse=True)
 def real_files_unchanged_session():
     """Content hash across the whole run. The backstop: it sees a change no narrower scope framed,
     including one made during collection or by a session-scoped fixture's own teardown."""
-    r = roots()
-    before = content_fingerprint(r)
+    r, before, head = _baseline(content_fingerprint)
     yield
-    moved = changed(before, content_fingerprint(r))
-    if moved:
-        raise AssertionError(report(moved, "THE SUITE", r))
+    _check(r, before, head, content_fingerprint, "THE SUITE")
 
 
 @pytest.fixture(scope="module", autouse=True)
 def real_files_unchanged_module(request):
     """Content hash around each test module — the scope that names a FILE, and the only one that
     can see a rewrite restoring the original size."""
-    r = roots()
-    before = content_fingerprint(r)
+    r, before, head = _baseline(content_fingerprint)
     yield
-    moved = changed(before, content_fingerprint(r))
-    if moved:
-        raise AssertionError(report(moved, f"MODULE {request.node.name}", r))
+    _check(r, before, head, content_fingerprint, f"MODULE {request.node.name}")
 
 
 @pytest.fixture(autouse=True)
@@ -223,9 +302,6 @@ def real_files_unchanged_function(request):
     """`stat` fingerprint around each test — the scope that names the TEST. Cheap on purpose
     (~24 ms over a 3,000-path tree): the per-test question is *which one*, and size-plus-mtime
     answers it for every write that is not a deliberate forgery."""
-    r = roots()
-    before = stat_fingerprint(r)
+    r, before, head = _baseline(stat_fingerprint)
     yield
-    moved = changed(before, stat_fingerprint(r))
-    if moved:
-        raise AssertionError(report(moved, f"TEST {request.node.nodeid}", r))
+    _check(r, before, head, stat_fingerprint, f"TEST {request.node.nodeid}")

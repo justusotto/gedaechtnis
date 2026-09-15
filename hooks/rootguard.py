@@ -37,8 +37,21 @@ deliberately drives the real vault (there are none, and there should be none) ha
 ## What this cannot do
 
 It guards the paths that go through it. A module that opens a file without calling `permit()` is
-not covered, which is why `tests/test_rootguard.py` asserts the coverage of the call sites by
-reading the source rather than trusting that they were wired.
+not covered — and that gap is not hypothetical: the first version of this file shipped with ZERO
+production call sites while this very paragraph claimed a coverage test existed. It did not. Two
+independent reviews found it the same day. A docstring that asserts a check nobody wrote is worse
+than no docstring, because it stops the next person from looking.
+
+So the claim now names a file that exists: **`tests/test_mutation_coverage.py`** walks the AST of
+every product module and fails on any filesystem-mutating call whose enclosing function neither
+calls `permit()` nor appears in that file's `EXEMPT` table with a written reason. It has a positive
+control (plant an unguarded write, watch the scan name it), a negative control (the guarded shape
+must not trip it), a check that the scan is reading the package at all, and a check that no
+exemption has gone stale — a stale exemption silently pre-approves whatever is written there next.
+
+What that test does NOT prove: that the permit is on the right path, or that it runs before the
+write. It proves somebody considered the question at each site and recorded the answer. The
+behavioural half is `tests/test_rootguard.py`; neither substitutes for the other.
 """
 from __future__ import annotations
 

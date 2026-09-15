@@ -43,6 +43,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
 import config
+import rootguard
 import logstore
 import importer
 import views
@@ -92,6 +93,7 @@ def shadow_start(create: bool = True) -> dict:
              "note": "checkpoint 0 of the 30-day additive shadow (council 2 closure §1); "
                      "written once, never rewritten"}
     if create:
+        rootguard.permit(logstore.START_FILE, "shadow start pin")
         logstore.START_FILE.parent.mkdir(parents=True, exist_ok=True)
         logstore.START_FILE.write_text(json.dumps(start, indent=1) + "\n", encoding="utf-8")
     return start

@@ -16,6 +16,7 @@ import hashlib, json, os, shutil, subprocess, sys, time
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config
+import rootguard
 
 # ★ Resolved PER CALL, never at import. The constants these replace were evaluated once when
 # this module was first imported, and on 2026-09-15 that freeze rewrote 263 files of a real
@@ -72,6 +73,11 @@ def create(inp: dict) -> int:
     src = repo_root(cwd) or Path(cwd)
     config.worktrees().mkdir(parents=True, exist_ok=True)
     dst = config.worktrees() / f"{src.name}--{name}-{time.strftime('%Y%m%d-%H%M%S')}"
+    # `name` comes off the hook payload and is already reduced to [A-Za-z0-9-_] above, and
+    # `src.name` is a directory basename — but the permit is what SAYS so, and it is the thing that
+    # keeps saying so if either sanitiser is ever loosened. This is the directory the whole clone
+    # lands in, and `remove()` later deletes it recursively.
+    rootguard.permit(dst, "worktree clone root", scratch=config.worktrees())
     p = sh(["cp", "-c", "-R", str(src), str(dst)])            # APFS clonefile
     if p.returncode != 0:
         p = sh(["cp", "-R", "--reflink=auto", str(src), str(dst)])   # Linux reflink (Btrfs/XFS) or plain copy
@@ -91,6 +97,18 @@ def create(inp: dict) -> int:
 
 def remove(inp: dict) -> int:
     wt = Path(inp.get("worktree_path") or "")
+    # ★ FIRST LINE, BEFORE EVERY OTHER CHECK. `worktree_path` is a field of the hook payload, and the
+    # function ends in `shutil.rmtree(wt, ignore_errors=True)` — the only recursive delete in this
+    # package, and one that reports nothing when it is wrong. The marker-file test below is evidence
+    # about what the directory CONTAINS; it is not evidence about WHERE it is, and a directory
+    # carrying a stale marker outside the clones root would have been deleted on that evidence.
+    # Bounded to the worktrees root, which is where this hook's own `create()` puts every clone.
+    # (BLASTRADIUS-1 security pass, 2026-09-15 — defence in depth: no live path to it was proven.)
+    try:
+        rootguard.permit(wt, "worktree remove", scratch=config.worktrees())
+    except rootguard.OutsideRoot as e:
+        print(f"refusing to remove a path outside the clones root:\n{e}", file=sys.stderr)
+        return 0
     if not wt.is_dir():
         return 0
     marker = wt / ".gedaechtnis-clone-of"
@@ -101,8 +119,17 @@ def remove(inp: dict) -> int:
     if "kind: git-worktree" in mtxt:
         sh(["git", "-C", str(src), "worktree", "remove", "--force", str(wt)]); return 0
     name = wt.name.split("--", 1)[-1]
-    unique = False
+    # ★ THE DEFAULT IS "KEEP IT", NOT "DELETE IT". `unique` used to start False, and the entire
+    # assessment that can set it — the fetch-back, the dirt manifest, the stash check — sits inside
+    # the `.git` branch below. A clone of a directory that is not a git repo (`create()` falls back
+    # to `Path(cwd)` when there is no repo root) therefore skipped every check and fell straight to
+    # `shutil.rmtree`, destroying whatever the build wrote, with no Trash round trip — against this
+    # module's own promise that defaults never delete. Found by the BLASTRADIUS-1 code review,
+    # 2026-09-15. Now the assessment has to RUN and come back negative before anything is removed;
+    # "I could not tell" keeps the directory.
+    unique = True
     if (wt / ".git").exists() and (src / ".git").exists():
+        unique = False
         # every branch the clone made, plus HEAD, comes back — a side branch is not lost because only HEAD was fetched
         f = sh(["git", "-C", str(src), "fetch", "--quiet", str(wt), f"+HEAD:refs/gedaechtnis/{name}/HEAD",
                 f"+refs/heads/*:refs/gedaechtnis/{name}/branches/*"])

@@ -100,14 +100,37 @@ def expand(p: str, cwd: str | None = None) -> Path:
     if not path.is_absolute() and cwd:
         path = Path(cwd) / path
     try:
-        return Path(os.path.normpath(str(path)))
+        # ★ REALPATH, not normpath. Containment everywhere downstream (`under`, `vault_rel`, the
+        # partition gate, the D1/D2 doors, the Concilium stem rule) is decided by comparing this
+        # path to the vault's, and `normpath` does not follow symlinks — so a write to
+        # `~/atlas/Global/Map.md`, where `~/atlas` is a link to the vault, was not recognised as a
+        # vault path at all and EVERY door returned silently. `rootguard._norm` already realpaths
+        # for this reason; the two containment helpers disagreeing is the defect.
+        # (BLASTRADIUS-1 code review, 2026-09-15.)
+        return Path(os.path.realpath(str(path)))
     except Exception:
         return path
 
 
+def _real(p: Path) -> Path:
+    """Absolute and symlink-free, without requiring the path to exist.
+
+    BOTH SIDES of a containment test must go through this. `expand()` canonicalises the incoming
+    path, and on macOS the temp directory is itself a symlink (`/var` -> `/private/var`), so
+    canonicalising only one side made every containment check in a sandboxed run compare
+    `/private/var/.../vault/x` against `/var/.../vault` and answer False. That silently turned 41
+    adversarial gate cases from `deny` into `allow` — the doors were still there, and nothing was
+    inside them any more. Caught by the safety eval the same hour; recorded because "I canonicalised
+    the input" reads as the whole fix and is half of it."""
+    try:
+        return Path(os.path.realpath(str(p)))
+    except OSError:
+        return p
+
+
 def under(path: Path, root: Path) -> bool:
     try:
-        path.relative_to(root)
+        _real(path).relative_to(_real(root))
         return True
     except ValueError:
         return False
@@ -115,7 +138,7 @@ def under(path: Path, root: Path) -> bool:
 
 def vault_rel(path: Path) -> str | None:
     try:
-        return str(path.relative_to(config.vault()))
+        return str(_real(path).relative_to(_real(config.vault())))
     except ValueError:
         return None
 
@@ -207,8 +230,26 @@ def fleet_repos() -> list[Path]:
 # through the two helpers below so the read-modify-write is locked: two hook processes appending
 # a path in the same turn must not lose one of them, and neither may drop another key.
 
+_SID_OK = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
+
+
+def safe_sid(sid: str) -> str:
+    """A session id reduced to something that cannot be a path.
+
+    `sid` arrives as a field of the hook payload and is interpolated straight into filenames here
+    and in four other hooks. `Path("STATE") / f"session-start-{'../../x'}.json"` keeps the `..` —
+    `pathlib` does not collapse them — so an oddly-shaped id would put the state file anywhere.
+    Nothing is known to produce one; this costs a regex and removes the question. Rejected ids
+    become a stable hash rather than a constant, so two of them do not collide into one record."""
+    s = (sid or "-").strip()
+    if _SID_OK.match(s):
+        return s
+    import hashlib
+    return "unsafe-" + hashlib.sha1(s.encode("utf-8", "replace")).hexdigest()[:16]
+
+
 def session_state_path(sid: str) -> Path:
-    return config.state() / f"session-start-{sid or '-'}.json"
+    return config.state() / f"session-start-{safe_sid(sid)}.json"
 
 
 def update_session_state(sid: str, mutate) -> dict:
@@ -220,7 +261,7 @@ def update_session_state(sid: str, mutate) -> dict:
     path = session_state_path(sid)
     try:
         config.state().mkdir(parents=True, exist_ok=True)
-        with open(config.state() / f"session-{(sid or '-')}.lock", "w") as lk:
+        with open(config.state() / f"session-{safe_sid(sid)}.lock", "w") as lk:
             fcntl.flock(lk, fcntl.LOCK_EX)
             try:
                 doc = json.loads(path.read_text(encoding="utf-8"))
@@ -648,18 +689,52 @@ def pure_append(kind: str, path: Path, tool: str, ti: dict, lane: str | None = N
 
 
 def region_of_repo(repo: Path) -> str | None:
-    """The vault region a repo belongs to, read from its CLAUDE.md @-imports (`<Umbrella>/<Region>/(Kernel|Position).md`)."""
+    """The vault region a repo belongs to, read from its CLAUDE.md @-imports (`<Umbrella>/<Region>/(Kernel|Position).md`).
+
+    ★ The returned string is JOINED ONTO THE VAULT by callers, so it is a path fragment taken from a
+    file this package does not own — `repo/CLAUDE.md`, which belongs to whatever checkout the
+    session happens to be touching. The region pattern matches `..` like any other segment. A line reading
+    `@<vault>/../Desktop/Kernel.md` therefore yielded the region `../Desktop`, and `chore.do_inbox`
+    appended to `~/Desktop/Inbox.md` — outside every root this package may write, and the `is_dir()`
+    check it relied on passes for any directory that happens to exist beside the vault. Found by the
+    BLASTRADIUS-1 security pass, 2026-09-15; reproduced against the live regex before the fix.
+
+    So the region is validated as a CONTAINED path, not merely parsed: no segment may be `..` or
+    `.`, and the joined result must still resolve under the vault. Both halves are needed — the
+    segment rule is the cheap one, and the containment check is what holds when a segment is a
+    symlink."""
     try:
         txt = (repo / "CLAUDE.md").read_text(encoding="utf-8")
     except OSError:
         return None
     for m in _re.finditer(r"^@" + _re.escape(str(config.vault())) + r"/((?:[^/\s]+/)?[^/\s]+)/(?:Kernel|Position)\.md", txt, _re.M):
-        top = m.group(1).split("/")[0]
+        rel = m.group(1)
+        if not region_is_contained(rel):
+            continue
+        top = rel.split("/")[0]
         if top in ("Global", "Pharos", "Channels", "Workflows", "Limen", "Concilium"):
             continue
-        if "/" in m.group(1) or top == "Speculum" or _is_leaf_region(config.vault() / top):
-            return m.group(1)
+        if "/" in rel or top == "Speculum" or _is_leaf_region(config.vault() / top):
+            return rel
     return None
+
+
+def region_is_contained(rel: str) -> bool:
+    """Is `rel` a vault-relative region path that stays inside the vault? Rejects traversal.
+
+    Separate from `region_of_repo` because two other callers join a region onto the vault and this
+    is the rule all of them need."""
+    if not rel or rel.startswith("/"):
+        return False
+    parts = rel.split("/")
+    if any(seg in ("", ".", "..") for seg in parts):
+        return False
+    try:
+        root = Path(os.path.realpath(str(config.vault())))
+        target = Path(os.path.realpath(str(config.vault() / rel)))
+    except OSError:
+        return False
+    return target == root or root in target.parents
 
 
 def _is_leaf_region(d: Path) -> bool:

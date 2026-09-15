@@ -52,7 +52,7 @@ BINARY_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico", ".t
 # ---------------------------------------------------------------------- per-session state ----
 
 def _state_path(sid: str) -> Path:
-    return common.STATE / f"context-economy-{sid or '-'}.json"
+    return common.STATE / f"context-economy-{common.safe_sid(sid)}.json"
 
 
 def _load(sid: str) -> dict:
@@ -71,7 +71,7 @@ def _update(sid: str, mutate) -> dict:
     path = _state_path(sid)
     try:
         common.STATE.mkdir(parents=True, exist_ok=True)
-        with open(common.STATE / f"context-economy-{(sid or '-')}.lock", "w") as lk:
+        with open(common.STATE / f"context-economy-{common.safe_sid(sid)}.lock", "w") as lk:
             fcntl.flock(lk, fcntl.LOCK_EX)
             try:
                 doc = json.loads(path.read_text(encoding="utf-8"))

@@ -21,6 +21,7 @@ import argparse, hashlib, html, json, os, re, subprocess, sys, time
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
 import config
+import rootguard
 
 DERIVED_DIRS = {"_shots", "shots", "_render_check", "_smoke", "_fonts", "node_modules", "__pycache__",
                 "downloads-dupes", "_stale-dev-renders", "renders", "_renders", "screenshots", "_screens"}
@@ -194,12 +195,20 @@ def report_md(rep: dict, top: int) -> str:
 def apply(review_root: Path, rep: dict, trash: bool) -> Path:
     day = time.strftime("%Y-%m-%d")
     bundle = review_root.parent / f"Cleanup {day}"
+    # `apply` operates on a REVIEW ROOT the user named on the command line — a repo's arc-artifact
+    # directory, deliberately outside the vault — so the roots do not apply and the scratch root
+    # does. Declaring it here is the point: the claim being made is "everything this command touches
+    # is under the directory you pointed at", which is narrow but real, and it is an ARGUMENT rather
+    # than an environment variable so it cannot be set once and forgotten.
+    scratch = review_root.parent
+    rootguard.permit(bundle, "retention bundle", scratch=scratch)
     bundle.mkdir(parents=True, exist_ok=True)
     rows = []
     for a in rep["arcs"]:
         for c in a["candidates"]:
             src = review_root / a["arc"] / c["path"]
             dst = bundle / a["arc"] / c["path"]
+            rootguard.permit(dst, "retention bundle destination", scratch=scratch)
             dst.parent.mkdir(parents=True, exist_ok=True)
             os.replace(src, dst)                          # a move, never a delete
             rows.append((a["arc"], c["path"], c["bytes"], c["why"], c["round_closed"]))

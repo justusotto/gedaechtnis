@@ -58,6 +58,7 @@ import limits                                                             # noqa
 import archive                                                            # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
 import maintenance                                                        # noqa: E402
+import rootguard                                                          # noqa: E402
 
 # ★ Resolved PER CALL, never at import. The constants these replace were evaluated once when
 # this module was first imported, and on 2026-09-15 that freeze rewrote 263 files of a real
@@ -249,6 +250,7 @@ def _bundle_copy(bundle: Path, rel: str, entry: str, why: str) -> str:
     path itself, and a restore is a copy back along the same relative path rather than an exercise
     in reading the README."""
     dest = bundle / "removed" / rel
+    rootguard.permit(dest, "cleanup bundle copy")
     dest.parent.mkdir(parents=True, exist_ok=True)
     header = ""
     if not dest.exists():
@@ -313,6 +315,7 @@ they are on purpose: filing an unanswered question away is how it stops being an
 {rows(reported, ["path", "heading", "last_revisited", "why"])}</table>
 {f'<p class="q">{unparsable} entry(ies) carry a “Last revisited” marker whose date could not be read. They are UNCHECKED, never assumed fresh.</p>' if unparsable else ''}
 """
+    rootguard.permit(bundle, "cleanup bundle receipt")
     bundle.mkdir(parents=True, exist_ok=True)
     (bundle / README_NAME).write_text(doc, encoding="utf-8")
 

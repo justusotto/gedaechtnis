@@ -50,6 +50,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import logstore
 import importer
+import rootguard
 import logstore
 # VAULT, VIEW_DIR deliberately NOT imported by name: a `from` import binds the value
 # ONCE, which is the frozen-path defect this package was bitten by. Read through the
@@ -279,6 +280,10 @@ def generate(only_region: str = "", only_stem: str = "", list_only: bool = False
                             + (" …" if len(orphans) > 3 else "")))
         p = view_path(region, stem, cold=cold)
         if not list_only:
+            # The region comes off a log row, i.e. out of a file, i.e. it is data. `logstore.append`
+            # now refuses a traversing region at write time, but rows written before that check
+            # existed are still on disk and this is the thing that turns one into a path.
+            rootguard.permit(p, f"generated view {region}/{stem}")
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(text, encoding="utf-8")
         written.append({"region": region, "stem": stem, "path": str(p), "rows": len(used),

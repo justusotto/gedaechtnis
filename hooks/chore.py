@@ -21,6 +21,7 @@ import common
 # module object (common.VAULT) so PEP 562 re-resolves on every access.
 import names
 import context_economy
+import rootguard
 
 EV = "PostToolUse"
 UUID = re.compile(r"https://claude\.ai/code/artifact/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})")
@@ -104,6 +105,7 @@ def do_artifact(inp: dict) -> None:
     else:
         txt = txt.rstrip("\n") + "\n" + row
     tmp = index_path().with_suffix(".md.tmp-" + uid[:8])
+    rootguard.permit(index_path(), "artifacts index")
     tmp.write_text(txt, encoding="utf-8")
     os.replace(tmp, index_path())                                  # atomic: no reader ever sees a half-written index
     sha = commit_path_limited(common.VAULT, "Pharos/artifacts-index.md", f"artifacts-index: {title} ({uid[:8]})")
@@ -169,6 +171,7 @@ def map_row_for(p: Path, rel: str) -> str | None:
     new = "".join(lines)
     tmp = map_p.with_suffix(".md.tmp-" + stem)
     try:
+        rootguard.permit(map_p, "region Map.md index row")
         tmp.write_text(new, encoding="utf-8")
         os.replace(tmp, map_p)                   # atomic: no reader ever sees a half-written index
     except OSError as e:
@@ -320,6 +323,7 @@ def do_write(inp: dict) -> None:
         try:
             b = p.read_bytes()
             if b and not b.endswith(b"\n"):
+                rootguard.permit(p, "QLINT trailing-newline repair")
                 p.write_bytes(b + b"\n")
                 notes.append(f"Added the missing trailing newline to {rel} (QLINT-1: a row appended after a missing newline glues onto the previous line and no parser sees it).")
         except OSError:
@@ -443,6 +447,14 @@ def do_inbox(inp: dict) -> None:
     sid = inp.get("session_id", "-")
     inbox = common.VAULT / region / "Inbox.md"
     if not (common.VAULT / region).is_dir():
+        return
+    # `region` came out of another repo's CLAUDE.md, so it is data, not a name this package chose.
+    # `is_dir()` above is a check that the target EXISTS, which a traversal satisfies trivially —
+    # `~/Desktop` is a directory. The permit is the check that it is OURS. (BLASTRADIUS-1, 2026-09-15.)
+    try:
+        rootguard.permit(inbox, "inbox row")
+    except rootguard.OutsideRoot as e:
+        log("hook-errors", f"inbox-refused\t{inbox}\t{e}".replace("\n", " | "))
         return
     # one row per session × region × file; the seen-set lives in the state dir
     seen_f = common.STATE / "inbox-seen.txt"
