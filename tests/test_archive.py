@@ -7,7 +7,7 @@ BREAKS. An archive that has fallen out of the corpus returns no error, and a sea
 "no results", which is the same output as a question nobody ever wrote an answer to.
 """
 from __future__ import annotations
-import json, os, pathlib, subprocess, sys
+import json, os, pathlib, subprocess, sys, tempfile
 from pathlib import Path
 import pytest
 
@@ -558,13 +558,33 @@ def test_under_pytest_a_write_OUTSIDE_a_temp_directory_IS_REFUSED(tmp_path, monk
     it read were the fixture's 1,500 bytes.
 
     Nothing about that is visible at the call site, so the rule cannot be "remember to use a
-    subprocess". Under pytest, a memory file is rewritten in a temp directory or not at all."""
+    subprocess". Under pytest, a memory file is rewritten in a temp directory or not at all.
+
+    THE VICTIM PATH BELONGS TO NOBODY, and that is the whole point of how it is chosen. This
+    test used `Path.home() / "Atlas" / ...` — the owner's real vault — which is wrong three times
+    over, and a sibling session's sentinel caught the consequence: **on the day the door regresses,
+    this probe writes into the live vault.** A refusal test whose failure mode IS the incident is
+    not a safety test. It also baked one machine's vault name into a shipped plugin, and it broke
+    under a moved HOME, where `~/Atlas` sits INSIDE the temp root and the door correctly permits it
+    — the one failure in that session's 820-test canary run.
+
+    A path at the filesystem root is outside every temp root, owned by nobody, and unwritable
+    without privileges — so a regression fails loudly and touches nothing."""
     monkeypatch.setenv("PYTEST_CURRENT_TEST", "a test is running")
-    victim = Path.home() / "Atlas" / "definitely-not-written.md"
+    victim = Path("/gedaechtnis-refusal-probe") / "never-written.md"
+    # ASSERT THE PREMISE. If someone widens the door's allowed roots to cover this path, the test
+    # would silently start proving nothing; this makes that a failure instead. The same discipline
+    # the fixture above lacked, which is how it came to aim at a real vault.
+    assert not str(victim).startswith(tuple(
+        str(Path(r).resolve()) + os.sep
+        for r in (tempfile.gettempdir(), "/tmp", "/private/tmp", "/private/var/folders",
+                  "/var/folders") if Path(r).exists())), \
+        "the victim path is inside a temp root, so this test can no longer prove a refusal"
     with pytest.raises(RuntimeError) as e:
         archive.atomic_write(victim, "this must never land")
     assert "REFUSED" in str(e.value) and "temporary directory" in str(e.value)
     assert not victim.exists()
+    assert not victim.parent.exists(), "the door must refuse BEFORE creating anything"
 
 
 def test_the_door_lets_a_TEMP_path_through(tmp_path, monkeypatch):
