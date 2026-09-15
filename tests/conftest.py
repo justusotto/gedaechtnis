@@ -73,17 +73,48 @@ def changed(before, after) -> list[str]:
     return sorted(k for k in keys if before.get(k) != after.get(k))
 
 
+def compaction_signature(before, after) -> list[str]:
+    """The paths that changed in the shape a COMPACTION makes: a memory file that shrank, in a
+    session where `-archive` files also appeared.
+
+    ★ Why this is narrower than "anything changed". The plain version false-failed twice in one
+    afternoon on other lanes writing the vault while the suite ran, and a hard failure that cries
+    wolf is exactly how the real incident got skimmed past: it fired, printed `1 error`, and was
+    read as a neighbouring test's problem. A guard is worth what its failures mean.
+
+    The enforcement now lives in `archive.atomic_write`, which REFUSES a non-temp target under
+    pytest and cannot false-positive at all. This is the second net, so it is tuned to the one
+    signature the door exists for: a file got smaller and archives appeared beside it. A lane
+    editing prose in another region does not look like that."""
+    if before is None or after is None:
+        return []
+    new_archives = [p for p in after
+                    if p not in before and "-archive" in Path(p).stem and p.endswith(".md")]
+    shrunk = [p for p, v in after.items()
+              if p in before and p.endswith(".md") and v[0] < before[p][0]]
+    return sorted(shrunk) if (new_archives and shrunk) else []
+
+
 @pytest.fixture(scope="session", autouse=True)
 def the_suite_leaves_the_real_vault_alone():
     before = fingerprint(REAL_VAULT)
     yield
-    moved = changed(before, fingerprint(REAL_VAULT))
-    assert not moved, (
-        f"THE REAL VAULT AT {REAL_VAULT} CHANGED DURING THE SUITE. {len(moved)} path(s) moved:\n  "
-        + "\n  ".join(moved[:10])
-        + (f"\n  ... and {len(moved) - 10} more" if len(moved) > 10 else "")
-        + "\n\nIf those look like a test's fixture, a test pointed a module at the real vault "
-          "instead of its own — check for an in-process import of a module whose VAULT was already "
-          "resolved, and drive that code through a subprocess with the fixture's environment. "
-          "If they look like somebody's actual work, another writer touched the vault while the "
-          "suite ran and this is a false alarm; that ambiguity is why the paths are printed.")
+    after = fingerprint(REAL_VAULT)
+    moved = changed(before, after)
+    compacted = compaction_signature(before, after)
+    if moved and not compacted:
+        # Informational, NOT a failure: with concurrent writers this fires constantly, and a
+        # constant alarm is one nobody reads. The door is what enforces.
+        print(f"\n[vault watch] {len(moved)} path(s) under {REAL_VAULT} changed while the suite "
+              f"ran — most likely another session, since none of it looks like a compaction: "
+              + ", ".join(moved[:5]) + (" ..." if len(moved) > 5 else ""))
+    assert not compacted, (
+        f"A TEST COMPACTED THE REAL VAULT AT {REAL_VAULT}. {len(compacted)} file(s) shrank while "
+        f"archive files appeared beside them:\n  "
+        + "\n  ".join(compacted[:10])
+        + (f"\n  ... and {len(compacted) - 10} more" if len(compacted) > 10 else "")
+        + "\n\nThis is the signature of the 2026-09-15 incident: a module's VAULT was already "
+          "resolved when a test set GEDAECHTNIS_VAULT, so an in-process call reached the real "
+          "vault with a test-sized limit. Drive that code through a subprocess with "
+          "GEDAECHTNIS_VAULT set. Every byte is recoverable from git and from the archive files "
+          "beside each shrunken one — restore before doing anything else.")

@@ -489,12 +489,13 @@ def memory_files() -> list[Path]:
     except Exception:
         return []
     skip_dirs = (set(recall.SKIP_DIRS) | set(recall.NON_MEMORY_DIRS)
-                 | set(recall.GENERATED_DIRS) | set(recall.REMOVED_DIRS))
+                 | set(recall.GENERATED_DIRS))
     out = []
     try:
         for dirpath, dirnames, filenames in os.walk(VAULT):
             dirnames[:] = sorted(d for d in dirnames
-                                 if d not in skip_dirs and not d.startswith("."))
+                                 if d not in skip_dirs and not d.startswith(".")
+                                 and not recall.is_removed_dir(d))
             for name in sorted(filenames):
                 if not name.endswith(".md"):
                     continue
