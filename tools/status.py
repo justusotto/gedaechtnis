@@ -63,6 +63,9 @@ def main(argv=None) -> int:
                ("(would-be refusals are logged, nothing is blocked)" if mode == "warn"
                 else "(a write outside the partition is refused)"))
 
+    _tool, _claim_state, claim_why = config.claim_tool_state()
+    out.append(f"region claim: {claim_why}")
+
     rc, head = sh(["git", "-C", str(config.VAULT), "rev-parse", "--short", "HEAD"])
     dirty = commit_hook.dirty_paths() if (config.VAULT / ".git").exists() else set()
     out.append(f"vault HEAD: {head if rc == 0 else 'no commit yet'};  dirty paths: {len(dirty)}")

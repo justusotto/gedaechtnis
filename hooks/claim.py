@@ -31,10 +31,14 @@ whole interface, and three of its rules shape the code below:
     a lock that is stale before the session's first prompt. The pid handed over is therefore the
     Claude Code process itself, found by walking up the parent chain (`_claude_pid`).
 
-**Doing nothing is a first-class outcome.** The hook prints nothing and calls nothing when the
-claim helper is not installed, when no `.atlas-lane` marker resolves from the session's cwd, when
-the marker names no region, or when `auto_claim` is off. A stranger who installs this plugin has
-no claim helper and never sees this hook at all.
+**Doing nothing is a first-class outcome — but it is SAID, not silent.** The hook calls nothing
+when the claim helper is not installed, when no `.atlas-lane` marker resolves from the session's
+cwd, when the marker names no region, or when `auto_claim` is off. This package ships no copy of
+the helper (it is a fleet asset, and copying a trip-wired coordination mechanism forks it), so on
+an ordinary install the claim is OFF. Where a claim WOULD have been taken — the session is in a
+region — and was not, the session gets a one-line statement of which state it is in, because
+silence and a held claim look identical from inside a session and only one of them is safe to act
+on. Outside a region there is nothing to claim and nothing to say.
 
 **`auto_claim` defaults to TRUE.** Coordination that has to be switched on is coordination that is
 off: the sessions that most need a claim are the ones nobody configured.
@@ -197,10 +201,8 @@ def _write_claims(sid: str, doc: dict, claims: list[dict]) -> None:
 
 def _preflight(inp: dict) -> tuple[Path, str, list[str]] | None:
     """(tool, cwd, regions), or None for any of the ordinary reasons to do nothing."""
-    if not config.flag("auto_claim", True):
-        return None
-    tool = config.claim_tool()
-    if tool is None:
+    tool, state, _why = config.claim_tool_state()
+    if state != "ready":
         return None
     cwd = inp.get("cwd") or os.getcwd()
     _lane, regions = _regions_for(cwd)
@@ -209,9 +211,29 @@ def _preflight(inp: dict) -> tuple[Path, str, list[str]] | None:
     return tool, cwd, regions
 
 
+def _off_line(inp: dict) -> str | None:
+    """The facts line for a session that is in a region but takes no claim.
+
+    Silence and a held claim look identical from inside a session, and the second is the one worth
+    acting on — so where a claim WOULD have been taken and was not, the session is told, in the
+    same words `tools/status.py` uses. Outside a region there is nothing to claim and nothing to
+    say: the line marks a feature that is off, not every session on earth."""
+    _tool, state, why = config.claim_tool_state()
+    if state == "ready":
+        return None
+    _lane, regions = _regions_for(inp.get("cwd") or os.getcwd())
+    if not regions:
+        return None
+    return (f"- Region claim ({', '.join(regions)}): {why} The vault's one-writer-per-region rule "
+            f"still holds — coordinate by hand before writing there.")
+
+
 def cmd_start(inp: dict) -> None:
     pre = _preflight(inp)
     if pre is None:
+        off = _off_line(inp)
+        if off:
+            context(EV, off)
         return
     tool, cwd, regions = pre
     sid = inp.get("session_id", "-")

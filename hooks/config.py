@@ -39,9 +39,12 @@ Recognised JSON keys, all optional:
   python              interpreter used to run that script (default: the one running the hook)
   tool_root           the checkout the plugin lives in, used to find sibling tools it calls
                       (default: the directory two levels above this file)
-  claim_tool          the region-claim helper the session-claim hook calls
-                      (default: <tool_root>/skills/atlas-region/helpers/region_claim.sh; when
-                      no such file exists the hook does nothing at all)
+  claim_tool          the region-claim helper the session-claim hook calls (default:
+                      <tool_root>/skills/atlas-region/helpers/region_claim.sh). The package ships
+                      no copy of that helper, so on an ordinary install the file is absent and the
+                      region claim is simply OFF — a supported state, and a STATED one: the claim
+                      hook and `tools/status.py` print which state this install is in rather than
+                      falling silent (see `claim_tool_state` below)
   auto_claim          claim this session's region at SessionStart and release it at Stop
                       (default: true — see claim.py for why it is opt-out, not opt-in)
   auto_commit         at Stop, stage and commit this lane's declared vault paths (default: true;
@@ -215,10 +218,41 @@ def claim_tool() -> Path | None:
     (this file's own grandparent by default), and an install that does not carry one — the
     plugin symlinked on its own into a skills directory — simply has no claim hook. None is
     the ordinary answer, not an error: the caller no-ops silently."""
+    return claim_tool_state()[0]
+
+
+def claim_tool_state() -> tuple[Path | None, str, str]:
+    """(tool or None, state, one sentence naming the state) — the SAME answer `claim_tool()` gives,
+    plus why, so a session can be TOLD which of these it is in instead of inferring it from silence.
+
+    The helper is a fleet asset, not the package's: this plugin ships no copy of it (copying a
+    trip-wired coordination mechanism would fork it), so out of the box, away from the checkout it
+    grew in, the region claim is simply OFF. That is a supported state — one writer per region is a
+    vault convention, and a stranger with no lanes has no regions to serialize — but it must be a
+    STATED one. `hooks/claim.py` prints the line at SessionStart wherever a claim would otherwise
+    have been taken, and `tools/status.py` prints it unconditionally.
+
+    States: `ready` · `off-disabled` (auto_claim false) · `off-missing` (a path IS configured and
+    is not there — a misconfiguration, not a default) · `off-no-helper` (nothing configured and the
+    derived default does not exist: the ordinary stranger case)."""
     raw = os.environ.get("GEDAECHTNIS_CLAIM_TOOL") or _load().get("claim_tool")
+    configured = bool(raw)
     p = (Path(os.path.expanduser(str(raw))) if raw
          else tool_root() / "skills" / "atlas-region" / "helpers" / "region_claim.sh")
-    return p if p.is_file() else None
+    if not p.is_file():
+        if configured:
+            return None, "off-missing", (
+                f"OFF — the configured claim helper {p} does not exist. Nothing is claimed or "
+                f"released this session; fix `claim_tool` (or $GEDAECHTNIS_CLAIM_TOOL) or drop it.")
+        return None, "off-no-helper", (
+            f"OFF — this install carries no region-claim helper ({p} does not exist), so no region "
+            f"is claimed or released. Point `claim_tool` in {config_path()} (or "
+            f"$GEDAECHTNIS_CLAIM_TOOL) at one to turn it on.")
+    if not flag("auto_claim", True):
+        return p, "off-disabled", (
+            f"OFF — a helper is installed ({p}) but `auto_claim` is false, so nothing is claimed "
+            f"or released this session.")
+    return p, "ready", f"ON — claims are taken at SessionStart and released at Stop, via {p}."
 
 
 def owner_pages_status() -> Path | None:
