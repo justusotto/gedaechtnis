@@ -5,7 +5,7 @@
     "derived_from": "PRICE_ASOF, PRICE and MODEL_ALIASES in scripts/concilium.py of the private fleet repo this plugin was developed in — that module stays the source this file is derived FROM, never a second authority",
     "upstream": "platform.claude.com/docs/en/about-claude/pricing, read on the price_asof date above",
     "copied_on": "2026-09-14",
-    "drift_guard": "eval/pricing_sync.py --check <path to concilium.py> compares this file against that module — the numbers, the aliases, the as-of date AND the price a synthetic usage block computes to under both. It EXITS 1 on any disagreement; tests/test_pricing_sync.py in the fleet repo runs it unconditionally, and gedaechtnis/tests/test_memory_eval_live.py runs it wherever that module is present. Do not edit one side by hand without the other.",
+    "drift_guard": "eval/pricing.py --check <path to concilium.py> compares this file against that module — the numbers, the aliases, the as-of date AND the price a synthetic usage block computes to under both. It EXITS 1 on any disagreement; tests/gedaechtnis/test_pricing_sync.py in the fleet repo runs it unconditionally, and gedaechtnis/tests/test_memory_eval_live.py runs it wherever that module is present. Where the fleet module is absent — a published copy of this plugin alone — there is nothing to diff against and the table is trusted as of price_asof. Do not edit one side by hand without the other.",
     "when_this_file_is_used": "a run that passes --pricing PATH or sets GEDAECHTNIS_PRICING_PY uses that instead; this file is the default, so a copy of the plugin with no fleet around it can still price a live run"
   },
   "notes": [
