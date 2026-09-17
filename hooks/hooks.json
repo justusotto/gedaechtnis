@@ -123,6 +123,11 @@
             "type": "command",
             "command": "python3 -B \"${CLAUDE_PLUGIN_ROOT}\"/hooks/maintenance.py",
             "timeout": 60
+          },
+          {
+            "type": "command",
+            "command": "python3 -B \"${CLAUDE_PLUGIN_ROOT}\"/hooks/boot_check.py",
+            "timeout": 60
           }
         ]
       }

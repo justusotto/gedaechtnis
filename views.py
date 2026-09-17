@@ -50,12 +50,39 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import logstore
 import importer
-from logstore import VAULT, VIEW_DIR
+import rootguard
+import logstore
+# VAULT, VIEW_DIR deliberately NOT imported by name: a `from` import binds the value
+# ONCE, which is the frozen-path defect this package was bitten by. Read through the
+# module object (logstore.VAULT) so PEP 562 re-resolves on every access.
 
 GENERATED_PREFIX = "# GENERATED sha256:"
 # The cold build gets its OWN directory rather than overwriting the shadow's ordinary views: the two
 # answer different questions, and a cold run that clobbered `views/` would leave nothing to compare.
-COLD_DIR = VAULT / ".gedaechtnis" / "views-cold"
+# ★ Derived from the vault, so resolved PER CALL for the same reason the vault is: a constant
+# here would re-freeze the path one level down from the fix.
+
+def cold_dir():
+    """The cold build gets its OWN directory rather than overwriting the shadow's ordinary views:
+    the two answer different questions, and a cold run that clobbered `views/` would leave nothing
+    to compare."""
+    return logstore.VAULT / ".gedaechtnis" / "views-cold"
+
+
+# `VAULT` and `VIEW_DIR` are RE-EXPORTED here: `shadow_score` reads them as `views.VIEW_DIR`, and
+# this module used to carry them as `from logstore import ...` bindings. They are forwarded through
+# the accessor table rather than re-imported by name, so the forwarding is per-call too — a re-export
+# that froze would reintroduce the defect at the seam between two fixed modules.
+_ACCESSORS = {"COLD_DIR": cold_dir,
+              "VAULT": lambda: logstore.VAULT,
+              "VIEW_DIR": lambda: logstore.VIEW_DIR}
+
+
+def __getattr__(name: str):
+    fn = _ACCESSORS.get(name)
+    if fn is not None:
+        return fn()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def rows_by_file(rows=None) -> dict:
@@ -121,7 +148,7 @@ def build(region: str, stem: str, rows: list, vault: Path = None) -> tuple:
     identity count falls by exactly the files that have one. That fall is information: it says the
     log is carrying something the memory has dropped.
     """
-    vault = vault or VAULT
+    vault = vault or logstore.VAULT
     live = (vault / region / f"{stem}.md") if region != "." else (vault / f"{stem}.md")
     text = live.read_text(encoding="utf-8")
     preamble, entries = importer.split_entries(text)
@@ -216,7 +243,7 @@ def build_cold(region: str, stem: str, rows: list) -> tuple:
 
 
 def view_path(region: str, stem: str, cold: bool = False) -> Path:
-    root = COLD_DIR if cold else VIEW_DIR
+    root = cold_dir() if cold else logstore.VIEW_DIR
     return (root / region / f"{stem}.md") if region != "." else (root / f"{stem}.md")
 
 
@@ -253,6 +280,10 @@ def generate(only_region: str = "", only_stem: str = "", list_only: bool = False
                             + (" …" if len(orphans) > 3 else "")))
         p = view_path(region, stem, cold=cold)
         if not list_only:
+            # The region comes off a log row, i.e. out of a file, i.e. it is data. `logstore.append`
+            # now refuses a traversing region at write time, but rows written before that check
+            # existed are still on disk and this is the thing that turns one into a path.
+            rootguard.permit(p, f"generated view {region}/{stem}")
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(text, encoding="utf-8")
         written.append({"region": region, "stem": stem, "path": str(p), "rows": len(used),
@@ -264,7 +295,7 @@ def generate(only_region: str = "", only_stem: str = "", list_only: bool = False
                 ("rows whose heading the file's `# ORDER` row does not name" if cold else
                  "rows whose heading appears in no live entry of the file they belong to")
                 + ", counted over every (region, stem) the log carries"),
-            "view_dir": str(COLD_DIR if cold else VIEW_DIR)}
+            "view_dir": str(cold_dir() if cold else logstore.VIEW_DIR)}
 
 
 def compare(cold: bool = True, limit: int = 10) -> dict:
@@ -277,7 +308,7 @@ def compare(cold: bool = True, limit: int = 10) -> dict:
     differ is a number nobody can act on, so each differing file carries its byte counts and the
     first hunk of a real diff.
     """
-    root = COLD_DIR if cold else VIEW_DIR
+    root = cold_dir() if cold else logstore.VIEW_DIR
     same, differ = [], []
     for vp in sorted(root.rglob("*.md")) if root.is_dir() else []:
         rel = vp.relative_to(root)
@@ -287,7 +318,7 @@ def compare(cold: bool = True, limit: int = 10) -> dict:
             differ.append({"file": str(rel), "why": f"view unreadable: {str(e)[:100]}"})
             continue
         try:
-            want = (VAULT / rel).read_text(encoding="utf-8")
+            want = (logstore.VAULT / rel).read_text(encoding="utf-8")
         except OSError as e:
             differ.append({"file": str(rel), "why": f"live file unreadable: {str(e)[:100]}"})
             continue

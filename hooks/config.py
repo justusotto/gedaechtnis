@@ -39,9 +39,12 @@ Recognised JSON keys, all optional:
   python              interpreter used to run that script (default: the one running the hook)
   tool_root           the checkout the plugin lives in, used to find sibling tools it calls
                       (default: the directory two levels above this file)
-  claim_tool          the region-claim helper the session-claim hook calls
-                      (default: <tool_root>/skills/atlas-region/helpers/region_claim.sh; when
-                      no such file exists the hook does nothing at all)
+  claim_tool          the region-claim helper the session-claim hook calls (default:
+                      <tool_root>/skills/atlas-region/helpers/region_claim.sh). The package ships
+                      no copy of that helper, so on an ordinary install the file is absent and the
+                      region claim is simply OFF — a supported state, and a STATED one: the claim
+                      hook and `tools/status.py` print which state this install is in rather than
+                      falling silent (see `claim_tool_state` below)
   auto_claim          claim this session's region at SessionStart and release it at Stop
                       (default: true — see claim.py for why it is opt-out, not opt-in)
   auto_commit         at Stop, stage and commit this lane's declared vault paths (default: true;
@@ -84,29 +87,44 @@ from __future__ import annotations
 import json, os
 from pathlib import Path
 
-HOME = Path(os.path.expanduser("~"))
 
-CONFIG_PATH = Path(os.environ.get("GEDAECHTNIS_CONFIG",
-                                  str(HOME / ".claude" / "gedaechtnis" / "config.json"))).expanduser()
+def home() -> Path:
+    """`~`, resolved now. A test that moves HOME moves every path below it."""
+    return Path(os.path.expanduser("~"))
+
+
+def config_path() -> Path:
+    return Path(os.environ.get("GEDAECHTNIS_CONFIG",
+                               str(home() / ".claude" / "gedaechtnis" / "config.json"))).expanduser()
 
 
 def _load() -> dict:
     """The JSON layer. A missing or malformed file is not an error: the plugin falls through to
     its defaults rather than refusing to start — a config bug must never take a session down."""
     try:
-        data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        data = json.loads(config_path().read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
     return data if isinstance(data, dict) else {}
 
 
-FILE = _load()
+# `FILE` is NOT a cached snapshot any more. It was one, and every accessor that read it returned a
+# value frozen at import — the same defect as the frozen paths, one layer down: a user editing the
+# config file, or a test writing one, was not seen until the process restarted. It stays as a NAME
+# because it is part of this module's published surface, and resolves through the same PEP 562
+# `__getattr__` as the paths do, so every read of it re-reads the file.
 
 
 def _path(env: str | None, key: str, default) -> Path:
+    """Resolve ONE path, NOW — environment, then the config file re-read from disk, then a default.
+
+    The file layer is `_load()` and not the module-level `FILE`, because this function is what the
+    accessors below call on EVERY access and a cached dict would make the config file's value
+    frozen at import even when the path around it is not. `FILE` survives as the name other code
+    already reads; nothing here consults it."""
     raw = os.environ.get(env) if env else None
     if not raw:
-        v = FILE.get(key)
+        v = _load().get(key)
         raw = str(v) if v else None
     if not raw:
         raw = str(default() if callable(default) else default)
@@ -118,22 +136,79 @@ def _default_vault() -> Path:
 
     The test is the roster FILE, never the directory's name: `~/Atlas` proves it is a vault by
     carrying `Global/fleet-roster.md`. A bare directory called Atlas is somebody's photos."""
-    atlas = HOME / "Atlas"
-    return atlas if (atlas / "Global" / "fleet-roster.md").is_file() else HOME / "Gedaechtnis"
+    h = home()
+    atlas = h / "Atlas"
+    return atlas if (atlas / "Global" / "fleet-roster.md").is_file() else h / "Gedaechtnis"
 
 
-VAULT = _path("GEDAECHTNIS_VAULT", "vault", _default_vault)
-STATE = _path("GEDAECHTNIS_STATE_DIR", "state_dir", HOME / ".claude" / "gedaechtnis")
-# The user-level memory file Claude Code loads into EVERY session, whatever the project.
-# ~/.claude/CLAUDE.md is the tool's own convention, not one machine's layout, so the default
-# is portable — but it is still resolved here rather than named at a call site, because the
-# rule this module exists for has no exceptions: read it here or do not read it.
-USER_MEMORY = _path("GEDAECHTNIS_USER_MEMORY", "user_memory", HOME / ".claude" / "CLAUDE.md")
-ROSTER = _path("GEDAECHTNIS_FLEET_ROSTER", "fleet_roster", VAULT / "Global" / "fleet-roster.md")
-WORKTREES = _path("GEDAECHTNIS_WORKTREES", "worktrees_dir", HOME / ".claude" / "worktrees")
+# ---------------------------------------------------------------- the paths, resolved PER CALL
+#
+# ★ These are FUNCTIONS, and the module-level names that used to hold their values are gone.
+#
+# They were constants: `VAULT = _path(...)`, evaluated once when the module was first imported and
+# cached in `sys.modules` for the life of the process. On 2026-09-15 a test set GEDAECHTNIS_VAULT
+# and reloaded the module that uses it — but `config` had already been imported by an earlier test,
+# so the override was read by nobody and the package compacted 263 files of the user's real vault
+# under a 1,500-byte test bound.
+#
+# The lesson is not "reload harder". A path that can change during a process must be READ when it
+# is used, not when the module is loaded — the import order of an unrelated test is not a sensible
+# thing for the location of somebody's memory to depend on. The cost is a `_load()` and an
+# `expanduser()` per access, measured at roughly 20 µs; the hooks make a few dozen such calls per
+# invocation, so it is not a cost anyone can observe.
+#
+# `__getattr__` below keeps `config.VAULT` working as a spelling (PEP 562), and every read of it
+# now goes through `vault()`. `from config import VAULT` still binds once, which is why the
+# re-export sites were converted to attribute access — see `tests/test_percall_resolution.py`,
+# which fails if a module-level binding comes back.
+
+def vault() -> Path:
+    return _path("GEDAECHTNIS_VAULT", "vault", _default_vault)
 
 
-TOOL_ROOT = _path("GEDAECHTNIS_TOOL_ROOT", "tool_root", lambda: Path(__file__).resolve().parents[2])
+def state() -> Path:
+    return _path("GEDAECHTNIS_STATE_DIR", "state_dir", home() / ".claude" / "gedaechtnis")
+
+
+def user_memory() -> Path:
+    """The user-level memory file Claude Code loads into EVERY session, whatever the project.
+    `~/.claude/CLAUDE.md` is the tool's own convention, not one machine's layout, so the default is
+    portable — but it is still resolved here rather than named at a call site, because the rule
+    this module exists for has no exceptions: read it here or do not read it."""
+    return _path("GEDAECHTNIS_USER_MEMORY", "user_memory", home() / ".claude" / "CLAUDE.md")
+
+
+def roster() -> Path:
+    return _path("GEDAECHTNIS_FLEET_ROSTER", "fleet_roster", lambda: vault() / "Global" / "fleet-roster.md")
+
+
+def worktrees() -> Path:
+    return _path("GEDAECHTNIS_WORKTREES", "worktrees_dir", home() / ".claude" / "worktrees")
+
+
+def tool_root() -> Path:
+    return _path("GEDAECHTNIS_TOOL_ROOT", "tool_root", lambda: Path(__file__).resolve().parents[2])
+
+
+_ACCESSORS = {"FILE": _load, "HOME": home, "VAULT": vault, "STATE": state, "USER_MEMORY": user_memory,
+              "ROSTER": roster, "WORKTREES": worktrees, "TOOL_ROOT": tool_root,
+              "CONFIG_PATH": config_path}
+
+
+def __getattr__(name: str):
+    """`config.VAULT` -> `vault()`, freshly, on every read (PEP 562).
+
+    This is what lets the old spelling survive without the old defect. It fires only for names this
+    module does not define, so removing the assignments above was the load-bearing half: an
+    assignment would shadow it and silently restore the cached constant."""
+    fn = _ACCESSORS.get(name)
+    if fn is not None:
+        return fn()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__():
+    return sorted(list(globals()) + list(_ACCESSORS))
 
 
 def claim_tool() -> Path | None:
@@ -143,15 +218,46 @@ def claim_tool() -> Path | None:
     (this file's own grandparent by default), and an install that does not carry one — the
     plugin symlinked on its own into a skills directory — simply has no claim hook. None is
     the ordinary answer, not an error: the caller no-ops silently."""
-    raw = os.environ.get("GEDAECHTNIS_CLAIM_TOOL") or FILE.get("claim_tool")
+    return claim_tool_state()[0]
+
+
+def claim_tool_state() -> tuple[Path | None, str, str]:
+    """(tool or None, state, one sentence naming the state) — the SAME answer `claim_tool()` gives,
+    plus why, so a session can be TOLD which of these it is in instead of inferring it from silence.
+
+    The helper is a fleet asset, not the package's: this plugin ships no copy of it (copying a
+    trip-wired coordination mechanism would fork it), so out of the box, away from the checkout it
+    grew in, the region claim is simply OFF. That is a supported state — one writer per region is a
+    vault convention, and a stranger with no lanes has no regions to serialize — but it must be a
+    STATED one. `hooks/claim.py` prints the line at SessionStart wherever a claim would otherwise
+    have been taken, and `tools/status.py` prints it unconditionally.
+
+    States: `ready` · `off-disabled` (auto_claim false) · `off-missing` (a path IS configured and
+    is not there — a misconfiguration, not a default) · `off-no-helper` (nothing configured and the
+    derived default does not exist: the ordinary stranger case)."""
+    raw = os.environ.get("GEDAECHTNIS_CLAIM_TOOL") or _load().get("claim_tool")
+    configured = bool(raw)
     p = (Path(os.path.expanduser(str(raw))) if raw
-         else TOOL_ROOT / "skills" / "atlas-region" / "helpers" / "region_claim.sh")
-    return p if p.is_file() else None
+         else tool_root() / "skills" / "atlas-region" / "helpers" / "region_claim.sh")
+    if not p.is_file():
+        if configured:
+            return None, "off-missing", (
+                f"OFF — the configured claim helper {p} does not exist. Nothing is claimed or "
+                f"released this session; fix `claim_tool` (or $GEDAECHTNIS_CLAIM_TOOL) or drop it.")
+        return None, "off-no-helper", (
+            f"OFF — this install carries no region-claim helper ({p} does not exist), so no region "
+            f"is claimed or released. Point `claim_tool` in {config_path()} (or "
+            f"$GEDAECHTNIS_CLAIM_TOOL) at one to turn it on.")
+    if not flag("auto_claim", True):
+        return p, "off-disabled", (
+            f"OFF — a helper is installed ({p}) but `auto_claim` is false, so nothing is claimed "
+            f"or released this session.")
+    return p, "ready", f"ON — claims are taken at SessionStart and released at Stop, via {p}."
 
 
 def owner_pages_status() -> Path | None:
     """The optional answered-pages script, or None when nothing configures one."""
-    v = FILE.get("owner_pages_status")
+    v = _load().get("owner_pages_status")
     if not v:
         return None
     p = Path(os.path.expanduser(str(v)))
@@ -160,7 +266,7 @@ def owner_pages_status() -> Path | None:
 
 def python() -> str:
     """The interpreter used to run the optional script above."""
-    v = FILE.get("python")
+    v = _load().get("python")
     if v:
         p = Path(os.path.expanduser(str(v)))
         if p.is_file():
@@ -213,7 +319,7 @@ def write_keys(updates: dict, path=None) -> None:
     MERGE rather than a write, because two commands write this file for different reasons — the
     installer names the vault, `--decline` records a refusal — and either one replacing it wholesale
     would silently drop the other's key."""
-    p = Path(os.path.expanduser(str(path))) if path else CONFIG_PATH
+    p = Path(os.path.expanduser(str(path))) if path else config_path()
     data = {}
     try:
         loaded = json.loads(p.read_text(encoding="utf-8"))

@@ -38,7 +38,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config
 import names
-from common import read_input, context, log, lane_for, git_root, VAULT, STATE, guarded
+from common import read_input, context, log, lane_for, git_root, guarded
+import common
+# VAULT, STATE deliberately NOT imported by name: a `from` import binds the value
+# ONCE, which is the frozen-path defect this package was bitten by. Read through the
+# module object (common.VAULT) so PEP 562 re-resolves on every access.
 
 EV = "SessionStart"
 
@@ -128,38 +132,38 @@ def main() -> None:
     cwd = inp.get("cwd") or os.getcwd()
     sid = inp.get("session_id", "-")
     lane, prefixes, marker = lane_for(cwd)
-    rc, head, _ = sh(["git", "-C", str(VAULT), "rev-parse", "HEAD"])
+    rc, head, _ = sh(["git", "-C", str(common.VAULT), "rev-parse", "HEAD"])
     vault_head = head if rc == 0 else None
     import hashlib as _h
     _key = _h.sha1(cwd.encode()).hexdigest()[:10]
     if inp.get("source") in ("compact", "resume"):
         try:                                            # the session began earlier: keep ITS start head, do not re-stamp
-            prev = json.loads((STATE / f"session-start-{_key}.json").read_text(encoding="utf-8"))
+            prev = json.loads((common.STATE / f"session-start-{_key}.json").read_text(encoding="utf-8"))
             if prev.get("vault_head"):
                 vault_head = prev["vault_head"]
         except (OSError, json.JSONDecodeError):
             pass
-    rc, dirt, _ = sh(["git", "-C", str(VAULT), "status", "--porcelain"])
+    rc, dirt, _ = sh(["git", "-C", str(common.VAULT), "status", "--porcelain"])
     n_dirty = len([l for l in dirt.splitlines() if l.strip()]) if rc == 0 else None
     mode = "warn"
     try:
-        v = (STATE / "partition.mode").read_text(encoding="utf-8").strip().lower()
+        v = (common.STATE / "partition.mode").read_text(encoding="utf-8").strip().lower()
         mode = v if v in ("warn", "deny") else "warn"
     except OSError:
         pass
     boot_bytes, boot_files = boot_chain([config.USER_MEMORY, Path(cwd) / "CLAUDE.md"])
-    STATE.mkdir(parents=True, exist_ok=True)
+    common.STATE.mkdir(parents=True, exist_ok=True)
     import hashlib
     key = hashlib.sha1(cwd.encode()).hexdigest()[:10]
     payload = json.dumps({
         "session_id": sid, "cwd": cwd, "lane": lane, "marker": str(marker) if marker else None,
         "vault_head": vault_head, "partition_mode": mode, "boot_bytes": boot_bytes,
         "boot_files": boot_files, "ts": time.strftime("%Y-%m-%dT%H:%M:%S")}, indent=1)
-    sid_file = STATE / f"session-start-{sid}.json"
+    sid_file = common.STATE / f"session-start-{sid}.json"
     if not sid_file.exists() or inp.get("source") == "startup":
         sid_file.write_text(payload, encoding="utf-8")                              # per SESSION: two sessions in one repo never collide
-    (STATE / f"session-start-{key}.json").write_text(payload, encoding="utf-8")   # per cwd, for a reader that knows only its cwd
-    (STATE / "session-start.json").write_text(payload, encoding="utf-8")            # the latest
+    (common.STATE / f"session-start-{key}.json").write_text(payload, encoding="utf-8")   # per cwd, for a reader that knows only its cwd
+    (common.STATE / "session-start.json").write_text(payload, encoding="utf-8")            # the latest
     lines = ["Gedächtnis session facts (hook-generated):", f"- Session id {sid}; this session's start record is ~/.claude/gedaechtnis/session-start-{sid}.json (pass that path to the debriefer)."]
     if lane:
         lines.append(f"- Lane {lane}, declared by {marker}; vault write partition: {', '.join(prefixes)}.")
@@ -168,11 +172,11 @@ def main() -> None:
         lines.append(no_memory_line(cwd))
     lines.append(f"- Partition hook mode: {mode.upper()} (" + ("logs would-be refusals to ~/.claude/gedaechtnis/partition.log, blocks nothing" if mode == "warn" else "writes outside the partition are refused") + ").")
     if vault_head:
-        lines.append(f"- Vault {VAULT}: HEAD at session start {vault_head[:8]}; dirty paths in the vault right now: {n_dirty}.")
-    elif VAULT.is_dir():
-        lines.append(f"- Vault {VAULT}: no commit yet" + ("" if (VAULT / ".git").exists() else " (not a git repository)") + ".")
+        lines.append(f"- Vault {common.VAULT}: HEAD at session start {vault_head[:8]}; dirty paths in the vault right now: {n_dirty}.")
+    elif common.VAULT.is_dir():
+        lines.append(f"- Vault {common.VAULT}: no commit yet" + ("" if (common.VAULT / ".git").exists() else " (not a git repository)") + ".")
     else:
-        lines.append(f"- Vault {VAULT} does not exist: run `python3 {Path(__file__).resolve().parent.parent / 'init.py'}` in this repo to create it.")
+        lines.append(f"- Vault {common.VAULT} does not exist: run `python3 {Path(__file__).resolve().parent.parent / 'init.py'}` in this repo to create it.")
     if boot_files:
         lines.append(f"- boot: {boot_bytes:,} B across {boot_files} files (@-import chain) — the user-level "
                      "CLAUDE.md, this repo's, and everything they @-import, transitively. A measurement, not a budget.")
@@ -190,6 +194,17 @@ def main() -> None:
         # anywhere to distinguish that from nothing having fired.
         import traceback as _tb
         log("hook-errors", "session_start/maintenance: " + _tb.format_exc().replace("\n", " | "))
+    # The same contract for the boot check: read what the last session end computed, say nothing
+    # when nothing failed, and never let this organ's bug cost the session its other facts.
+    try:
+        import boot_check
+        _b = json.loads(boot_check.state_path().read_text(encoding="utf-8"))
+        lines.extend(boot_check.facts_lines(_b))
+    except FileNotFoundError:
+        pass                                           # no session has ended yet; nothing to report
+    except Exception:
+        import traceback as _tb
+        log("hook-errors", "session_start/boot_check: " + _tb.format_exc().replace("\n", " | "))
     ops = config.owner_pages_status()                  # None unless config.json names a script
     if ops:
         rc, out, err = sh([config.python(), str(ops), "--json"], timeout=8)
@@ -209,7 +224,7 @@ def main() -> None:
         # Inbox rows in this lane's regions (paths declared as `<Umbrella>/<Region>` dirs)
         for pre in prefixes:
             if pre.count("/") == 1 and not pre.endswith(".md"):
-                ib = VAULT / pre / "Inbox.md"
+                ib = common.VAULT / pre / "Inbox.md"
                 if ib.is_file():
                     n = sum(1 for l in ib.read_text(encoding="utf-8").splitlines() if l.startswith("- "))
                     if n:
@@ -247,7 +262,7 @@ def memory_files_lines(prefixes: list) -> list:
         p = pre.rstrip("/")
         if not p or p.endswith(".md"):
             continue
-        d = VAULT / p
+        d = common.VAULT / p
         if not d.is_dir():
             continue
         present = [s for s in names.ordered() if (d / f"{s}.md").is_file()]
@@ -273,12 +288,12 @@ def no_memory_line(cwd: str) -> str:
     offer per repo per day, because a `no` that gets asked again at the next boot is a nag, and a
     nagging tool is turned off."""
     repo = git_root(cwd)
-    if repo is None or not VAULT.is_dir():
+    if repo is None or not common.VAULT.is_dir():
         return NO_MARKER
     if str(repo) in config.declined() or str(Path(os.path.realpath(str(repo)))) in config.declined():
         return NO_MARKER
     import hashlib
-    stamp = STATE / ("offer-" + hashlib.sha1(str(repo).encode()).hexdigest() + ".stamp")
+    stamp = common.STATE / ("offer-" + hashlib.sha1(str(repo).encode()).hexdigest() + ".stamp")
     today = time.strftime("%Y-%m-%d")
     try:
         if stamp.read_text(encoding="utf-8").strip() == today:
@@ -286,7 +301,7 @@ def no_memory_line(cwd: str) -> str:
     except OSError:
         pass
     try:
-        STATE.mkdir(parents=True, exist_ok=True)
+        common.STATE.mkdir(parents=True, exist_ok=True)
         stamp.write_text(today + "\n", encoding="utf-8")
     except OSError:
         pass
@@ -335,7 +350,7 @@ def rules_conditions() -> dict[str, bool]:
     except Exception:
         skip = {".git", "Cleanup", "Pharos", "Channels", ".gedaechtnis"}
     try:
-        for dirpath, dirnames, filenames in os.walk(VAULT):
+        for dirpath, dirnames, filenames in os.walk(common.VAULT):
             dirnames[:] = [d for d in dirnames if d not in skip and not d.startswith(".")]
             if "Kernel.md" in filenames:
                 has_kernel = True

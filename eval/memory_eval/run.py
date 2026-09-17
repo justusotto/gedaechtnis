@@ -47,10 +47,13 @@ does not amortize the prefix — every step here is a fresh process).
 routing decision. The model is also checked against the price table BEFORE the first call: an
 unknown model refuses rather than producing an unpriced run.
 
-*Cost* is computed by IMPORTING the price table and pricing functions from `scripts/concilium.py`
-(`--pricing PATH`, or `$GEDAECHTNIS_PRICING_PY`, else `<plugin>/../scripts/concilium.py`). Nothing
-here carries a copy of that table: a generator that carries a copy of its authority document
-diverges silently. Every call's whole result JSON is written to
+*Cost* is computed from a price table LOADED, never written into this file: `--pricing PATH`, or
+`$GEDAECHTNIS_PRICING_PY`, else the table this package ships at `eval/pricing.json`. Either shape
+loads — the fleet's `scripts/concilium.py` (still the source the packaged file is derived FROM) or
+that JSON. Nothing here carries a copy of the numbers, and the packaged copy is guarded rather than
+trusted: `eval/pricing.py --check <concilium.py>` fails loudly when the two drift, because a
+generator that carries a copy of its authority document diverges silently. Every call's whole
+result JSON is written to
 `<out>/<arm>-<task>-<day>.usage.json` alongside the argv it was launched with, and `--ceiling-usd`
 REFUSES to start another call once the priced sum reaches it, printing what was completed.
 
@@ -122,13 +125,14 @@ answer would mean the model is guessing well, not reading the vault; this arm is
 apart.
 """
 from __future__ import annotations
-import argparse, datetime, importlib.util, json, os, re, subprocess, sys, tempfile
+import argparse, datetime, json, os, re, subprocess, sys, tempfile
 from pathlib import Path
 
 PLUGIN = Path(__file__).resolve().parents[2]
 EVAL = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(EVAL))
 from _stub_client import call_claude, usage_tokens  # noqa: E402
+import pricing as pricing_mod  # noqa: E402  — eval/pricing.py, the packaged price table + loader
 
 STUB = EVAL / "stub_claude.py"
 DEFAULT_TASKS_DIR = Path(__file__).resolve().parent / "tasks"
@@ -523,30 +527,33 @@ def measure_boot_bytes(repo: Path, env: dict) -> int | None:
 
 
 # ------------------------------------------------------------------ pricing ----
-DEFAULT_PRICING = PLUGIN.parent / "scripts" / "concilium.py"
-PRICING_ATTRS = ("PRICE", "PRICE_ASOF", "price_usage", "resolve_price_key", "usage_from_model_usage")
+DEFAULT_PRICING = pricing_mod.PACKAGED            # eval/pricing.json, shipped with the package
+PRICING_ATTRS = pricing_mod.PRICING_ATTRS
 
 
 def load_pricing(explicit: str | None = None):
-    """Import the fleet's price table and pricing functions from `scripts/concilium.py`.
+    """The price table and pricing functions a live run is costed with.
 
-    IMPORTED, never copied: the table carries its own `PRICE_ASOF` date and refuses an unknown
-    model, and a second copy of it here would drift the first time a price moved. Resolution
-    order: `--pricing PATH`, `$GEDAECHTNIS_PRICING_PY`, then `<plugin>/../scripts/concilium.py`."""
+    Resolution order, unchanged: `--pricing PATH`, `$GEDAECHTNIS_PRICING_PY`, then the table this
+    package SHIPS (`eval/pricing.json`). Either shape loads — a `.py` module exposing
+    PRICE/PRICE_ASOF/price_usage/resolve_price_key/usage_from_model_usage (the fleet's
+    `scripts/concilium.py`, still the source the packaged file is derived FROM), or that JSON.
+
+    The default used to be `<plugin>/../scripts/concilium.py`, which exists only inside the repo
+    this plugin grew up in; a published copy could not price a run at all. The packaged file
+    carries its provenance and `eval/pricing.py --check` FAILS when the two drift — the copy is
+    guarded, not trusted."""
     raw = explicit or os.environ.get("GEDAECHTNIS_PRICING_PY") or str(DEFAULT_PRICING)
     path = Path(raw).expanduser()
     if not path.is_file():
         raise LiveRefusal(
-            f"no pricing module at {path} — a live run must price every call from the fleet's own "
-            "table, not from a guess. Pass --pricing PATH (or set GEDAECHTNIS_PRICING_PY) to the "
-            "concilium.py that carries PRICE/PRICE_ASOF.")
-    spec = importlib.util.spec_from_file_location("_memory_eval_pricing", path)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    missing = [a for a in PRICING_ATTRS if not hasattr(mod, a)]
-    if missing:
-        raise LiveRefusal(f"{path} is not a usable pricing module: missing {', '.join(missing)}")
-    return mod
+            f"no pricing module at {path} — a live run must price every call from a real table, "
+            "not from a guess. Pass --pricing PATH (or set GEDAECHTNIS_PRICING_PY) to a "
+            "concilium.py carrying PRICE/PRICE_ASOF, or to a pricing.json in the packaged shape.")
+    try:
+        return pricing_mod.load(path)
+    except pricing_mod.PricingError as e:
+        raise LiveRefusal(str(e)) from e
 
 
 def price_result(pricing, result: dict) -> dict:
@@ -940,8 +947,9 @@ def main(argv=None) -> int:
                          "priced calls reaches it, the next call is refused and the run reports "
                          "what it completed.")
     ap.add_argument("--pricing", default=None,
-                    help="--live only: path to the module carrying PRICE/PRICE_ASOF (default: "
-                         "$GEDAECHTNIS_PRICING_PY, else concilium.py in the sibling scripts/ dir)")
+                    help="--live only: a .py module carrying PRICE/PRICE_ASOF, or a pricing.json "
+                         "in the packaged shape (default: $GEDAECHTNIS_PRICING_PY, else the "
+                         "eval/pricing.json this package ships)")
     ap.add_argument("--claude-home", choices=("real", "fixture"), default="real",
                     help="--live only: HOME for the claude process. `real` (default) keeps the "
                          "user's credentials reachable and isolates via --setting-sources project; "

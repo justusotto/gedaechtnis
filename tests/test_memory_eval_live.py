@@ -32,16 +32,21 @@ EVAL = PLUGIN / "eval"
 STUB = EVAL / "stub_claude.py"
 MEMORY_EVAL_RUN = EVAL / "memory_eval" / "run.py"
 TASKS = EVAL / "memory_eval" / "tasks"
-# The fleet's price table lives outside the plugin (it is not the plugin's to carry) — the live
-# path imports it. Where it is absent, as in a published copy of this plugin alone, the live tests
-# that need a price skip and the "refuses without a pricing module" test still runs.
+# The package SHIPS its price table, so the live path prices a run with no fleet around it and
+# every test below runs in a published copy of the plugin alone. The fleet's module is still a
+# supported `--pricing` target and is still the source the packaged file is derived from; the few
+# tests that speak specifically about THAT module are marked `@fleet_pricing_required` and skip
+# where it is absent — nothing else does.
+PACKAGED_PRICING = PLUGIN / "eval" / "pricing.json"
+PRICING_PY = PLUGIN / "eval" / "pricing.py"
 PRICING = PLUGIN.parent / "scripts" / "concilium.py"
 MODEL = "claude-sonnet-5"
 EFFORT = "low"
 LEAK = "LEAKED-STDIN-MARKER-DO-NOT-APPEND-ME"
 
-pricing_required = pytest.mark.skipif(
-    not PRICING.is_file(), reason=f"no pricing module at {PRICING} — live pricing cannot be proven")
+fleet_pricing_required = pytest.mark.skipif(
+    not PRICING.is_file(),
+    reason=f"no fleet pricing module at {PRICING} — only tests ABOUT that module skip")
 
 
 def _env(home: Path) -> dict:
@@ -84,8 +89,12 @@ def run_eval(tmp: Path, *args, stdin_text: str | None = None, timeout: int = 300
 
 def live_args(model: str = MODEL, effort: str | None = EFFORT, ceiling: str | None = None,
               pricing: Path | None = None) -> list[str]:
-    args = ["--live", "--claude", str(STUB), "--model", model,
-            "--pricing", str(pricing if pricing is not None else PRICING)]
+    """`pricing=None` passes NO `--pricing` flag, so the run resolves the table the package ships.
+    That is the path a stranger's copy takes, and it is therefore the one the whole live suite is
+    proven over; the override order gets its own tests below."""
+    args = ["--live", "--claude", str(STUB), "--model", model]
+    if pricing is not None:
+        args += ["--pricing", str(pricing)]
     if effort is not None:
         args += ["--effort", effort]
     if ceiling is not None:
@@ -118,7 +127,6 @@ def live_run(tmp_path_factory):
 
 
 # ------------------------------------------------------- model / effort pinning ----
-@pricing_required
 def test_model_and_effort_are_pinned_in_every_child_argv(live_run):
     p, out, _base = live_run
     assert p.returncode == 0, p.stderr
@@ -139,7 +147,6 @@ def test_model_and_effort_are_pinned_in_every_child_argv(live_run):
         assert r["result"]["stub"]["effort"] == EFFORT
 
 
-@pricing_required
 def test_live_without_effort_refuses_and_makes_no_call(tmp_path):
     """Negative control for the test above: the same run minus --effort must not start."""
     p, out, _base = run_eval(tmp_path, *live_args(effort=None, ceiling="10"))
@@ -149,15 +156,13 @@ def test_live_without_effort_refuses_and_makes_no_call(tmp_path):
 
 
 def test_live_without_claude_refuses(tmp_path):
-    p, out, _base = run_eval(tmp_path, "--live", "--model", MODEL, "--effort", EFFORT,
-                             "--pricing", str(PRICING))
+    p, out, _base = run_eval(tmp_path, "--live", "--model", MODEL, "--effort", EFFORT)
     assert p.returncode == 2, p.stdout
     assert "--claude" in p.stderr
     assert usage_files(out) == []
 
 
 # ------------------------------------------------------------------- stdin ----
-@pricing_required
 def test_child_stdin_is_devnull(live_run):
     """The harness's OWN stdin carried a marker (`stdin_text=LEAK`); no child may have seen it."""
     p, out, _base = live_run
@@ -170,7 +175,6 @@ def test_child_stdin_is_devnull(live_run):
             "the child read something off stdin — `claude -p` appends inherited stdin to the prompt")
 
 
-@pricing_required
 def test_stdin_extra_can_actually_carry_a_leak(live_run, tmp_path):
     """Negative control for the test above: replay one recorded argv with an INHERITED pipe instead
     of DEVNULL and the very same field comes back carrying the marker. Without this, `stdin_extra
@@ -184,7 +188,6 @@ def test_stdin_extra_can_actually_carry_a_leak(live_run, tmp_path):
 
 
 # ------------------------------------------------------------- usage records ----
-@pricing_required
 def test_every_call_writes_a_priced_usage_file(live_run):
     p, out, _base = live_run
     names = {f.name for f in usage_files(out)}
@@ -211,7 +214,6 @@ def test_dry_run_writes_no_usage_files(tmp_path):
 
 
 # ---------------------------------------------------------------- the ceiling ----
-@pricing_required
 def test_ceiling_refuses_to_start_another_call(tmp_path):
     """A ceiling below one call's price lets the FIRST call run (nothing was spent yet) and refuses
     the second — the guard is on STARTING a call, which is the only point where money is still
@@ -229,7 +231,6 @@ def test_ceiling_refuses_to_start_another_call(tmp_path):
     assert rows == [], "the interrupted cell is not reported as a completed row"
 
 
-@pricing_required
 def test_a_generous_ceiling_completes_the_whole_run(live_run):
     """Negative control for the test above — same code path, ceiling far above the run's cost."""
     p, out, _base = live_run
@@ -266,7 +267,6 @@ def test_dry_run_rows_and_table_are_unchanged_by_the_live_path(dry_run):
     assert p.stdout.endswith(")\n") and "throwaway homes kept for inspection" in p.stdout
 
 
-@pricing_required
 def test_the_dry_run_assertion_is_not_vacuous(live_run):
     """Negative control for the test above: a LIVE run's rows DO carry the extra keys and its
     stdout DOES carry the cost lines — so the dry-run check is asserting a real difference."""
@@ -284,7 +284,6 @@ def test_dry_run_and_live_are_mutually_exclusive(tmp_path):
 
 
 # ------------------------------------------------------------ unknown model ----
-@pricing_required
 def test_unknown_model_refuses_before_any_call(tmp_path):
     p, out, _base = run_eval(tmp_path, *live_args(model="claude-not-a-real-model-9", ceiling="10"))
     assert p.returncode == 2, p.stdout
@@ -293,7 +292,6 @@ def test_unknown_model_refuses_before_any_call(tmp_path):
     assert usage_files(out) == [], "an unpriceable run must not spend anything first"
 
 
-@pricing_required
 def test_a_priced_model_is_accepted(live_run):
     """Negative control for the test above: the identical path with a model that IS in the table."""
     p, out, _base = live_run
@@ -310,25 +308,112 @@ def test_missing_pricing_module_refuses(tmp_path):
     assert usage_files(out) == []
 
 
-@pricing_required
-def test_the_price_table_is_imported_not_copied(live_run):
-    """The recorded price date must be the PRICING MODULE's own — proof the table was imported
-    rather than duplicated into the harness, where it would drift on the next price change."""
-    _p, out, _base = live_run
-    src = MEMORY_EVAL_RUN.read_text(encoding="utf-8")
-    asof = None
-    for line in PRICING.read_text(encoding="utf-8").splitlines():
-        if line.startswith("PRICE_ASOF"):
-            asof = line.split("=", 1)[1].strip().strip('"\'')
-            break
-    assert asof, "the pricing module no longer declares PRICE_ASOF"
-    assert asof not in src, "run.py carries a copy of the price date — import it instead"
+def packaged_table() -> dict:
+    return json.loads(PACKAGED_PRICING.read_text(encoding="utf-8"))
+
+
+def test_the_package_ships_a_price_table_carrying_its_provenance():
+    """The whole point of the file: a copy of this plugin ALONE can price a live run, and the copy
+    says where its numbers came from rather than presenting itself as an authority."""
+    doc = packaged_table()
+    assert doc["schema"] == "gedaechtnis-pricing/1"
+    assert doc["price_asof"]
+    assert doc["prices_usd_per_mtok"], "an empty table prices nothing"
+    prov = doc["provenance"]
+    for key in ("derived_from", "upstream", "copied_on", "drift_guard"):
+        assert prov.get(key), f"the copy does not say {key}"
+
+
+def test_the_default_price_table_is_the_packaged_one(live_run):
+    """No `--pricing`, no `$GEDAECHTNIS_PRICING_PY` — the run must still price itself, and with the
+    SHIPPED table's own as-of date. This is the case that used to be unreachable outside the repo
+    the plugin grew up in."""
+    p, out, _base = live_run
+    assert p.returncode == 0, p.stderr
     summary = json.loads((out / "live-summary.json").read_text(encoding="utf-8"))
+    assert summary["prices_as_of"] == packaged_table()["price_asof"]
+
+
+def test_the_price_date_is_not_copied_into_the_harness_source():
+    """The table is LOADED, never written into `run.py`, where it would drift on the next price
+    change. (The table itself is a derived copy — guarded by the drift check below.)"""
+    src = MEMORY_EVAL_RUN.read_text(encoding="utf-8")
+    assert packaged_table()["price_asof"] not in src, \
+        "run.py carries a copy of the price date — load it instead"
+
+
+def test_explicit_pricing_flag_overrides_the_packaged_default(tmp_path):
+    """The override order still works: a `--pricing` table with a distinct as-of date must be the
+    one the run reports. Its negative control is the test above (no flag = the packaged date)."""
+    other = tmp_path / "other-pricing.json"
+    doc = packaged_table()
+    doc["price_asof"] = "1999-01-01"
+    other.write_text(json.dumps(doc), encoding="utf-8")
+    p, out, _base = run_eval(tmp_path, *live_args(pricing=other, ceiling="10"))
+    assert p.returncode == 0, p.stderr
+    summary = json.loads((out / "live-summary.json").read_text(encoding="utf-8"))
+    assert summary["prices_as_of"] == "1999-01-01"
+
+
+def test_the_env_var_overrides_the_packaged_default(tmp_path):
+    """Same for `$GEDAECHTNIS_PRICING_PY`, which sits between the flag and the packaged file."""
+    other = tmp_path / "env-pricing.json"
+    doc = packaged_table()
+    doc["price_asof"] = "1998-02-02"
+    other.write_text(json.dumps(doc), encoding="utf-8")
+    out = tmp_path / "out"
+    cmd = [sys.executable, str(MEMORY_EVAL_RUN), "--out", str(out), "--base", str(tmp_path / "base"),
+           "--tasks-dir", str(one_task_dir(tmp_path)), *live_args(ceiling="10")]
+    env = _env(tmp_path / "home")
+    (tmp_path / "home").mkdir(parents=True, exist_ok=True)
+    env["GEDAECHTNIS_PRICING_PY"] = str(other)
+    p = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=300,
+                       stdin=subprocess.DEVNULL)
+    assert p.returncode == 0, p.stderr
+    summary = json.loads((out / "live-summary.json").read_text(encoding="utf-8"))
+    assert summary["prices_as_of"] == "1998-02-02"
+
+
+@fleet_pricing_required
+def test_a_py_pricing_module_still_loads(tmp_path):
+    """A `.py` module exposing PRICE/PRICE_ASOF — the fleet's `scripts/concilium.py` — is still a
+    supported `--pricing` target, not a shape that stopped working when the JSON arrived."""
+    p, out, _base = run_eval(tmp_path, *live_args(pricing=PRICING, ceiling="10"))
+    assert p.returncode == 0, p.stderr
+    summary = json.loads((out / "live-summary.json").read_text(encoding="utf-8"))
+    asof = next(line.split("=", 1)[1].strip().strip('"\'')
+                for line in PRICING.read_text(encoding="utf-8").splitlines()
+                if line.startswith("PRICE_ASOF"))
     assert summary["prices_as_of"] == asof
 
 
+@fleet_pricing_required
+def test_the_packaged_table_has_not_drifted_from_the_module_it_came_from():
+    """The copy is guarded, not trusted. Where the source module is present, the two must agree —
+    numbers, aliases, as-of date, and what a probe usage block prices to under each. This is the
+    thing that fails loudly instead of a comment asking someone to remember."""
+    p = subprocess.run([sys.executable, str(PRICING_PY), "--check", str(PRICING)],
+                       capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    assert p.returncode == 0, p.stdout + p.stderr
+
+
+@fleet_pricing_required
+def test_the_drift_check_bites(tmp_path):
+    """Positive control for the test above: a table with one number moved must FAIL the check, or
+    its green says nothing. Without this, a check that could never fire would read as agreement."""
+    doc = packaged_table()
+    first = sorted(doc["prices_usd_per_mtok"])[0]
+    doc["prices_usd_per_mtok"][first]["input"] += 1.0
+    drifted = tmp_path / "drifted.json"
+    drifted.write_text(json.dumps(doc), encoding="utf-8")
+    p = subprocess.run([sys.executable, str(PRICING_PY), "--table", str(drifted),
+                        "--check", str(PRICING)],
+                       capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    assert p.returncode == 1, p.stdout + p.stderr
+    assert "PRICE DRIFT" in p.stderr and first in p.stderr
+
+
 # ------------------------------------------------- the gedaechtnis arm's plugin ----
-@pricing_required
 @pytest.mark.parametrize("arm", ["gedaechtnis", "swapped"])
 def test_the_vault_arms_stage_the_plugin_via_project_settings(live_run, arm):
     """`--setting-sources project` drops user-level plugins, so the arm's hooks must reach the
@@ -356,7 +441,6 @@ DAY1_MARKER = "Decide and record"          # appears in the day-1 prompt only
 DAY_N_MARKER = "What database did we"      # appears in the day-N prompt only
 
 
-@pricing_required
 def test_a_day1_turn_exhaustion_is_absorbed_and_reported(tmp_path):
     p, out, _base = run_eval(tmp_path, *live_args(ceiling="10"), fail_on=DAY1_MARKER)
     assert p.returncode == 0, p.stdout + p.stderr
@@ -370,7 +454,6 @@ def test_a_day1_turn_exhaustion_is_absorbed_and_reported(tmp_path):
     assert summary["usd_total"] > 0, "the failed call is still priced — it spent real tokens"
 
 
-@pricing_required
 def test_a_day_n_turn_exhaustion_still_refuses(tmp_path):
     """Negative control for the test above, and the one that matters: day N's answer IS the
     measurement. Absorbing a truncated one would silently score the cell as a FAIL."""
@@ -391,7 +474,6 @@ def test_the_stub_fail_switch_is_off_by_default(live_run):
     assert summary["tolerated_day1_failures"] == []
 
 
-@pricing_required
 def test_the_other_arms_get_no_plugin(live_run):
     """Negative control for the test above: an arm that is not a vault arm must have no settings
     file at all, or the arms would not be distinguishable."""
@@ -400,7 +482,6 @@ def test_the_other_arms_get_no_plugin(live_run):
         assert not (base / f"{arm}__001-db-choice" / "home" / "repo" / ".claude" / "settings.json").exists()
 
 
-@pricing_required
 def test_the_swapped_arm_records_the_swapped_sentence_not_the_true_one(live_run):
     """The swap must reach the SUBSTRATE, not just the task file. Read the fixture vault's own
     Canon.md back: it must carry the swap's sentence and not the true one, and the gedaechtnis

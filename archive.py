@@ -48,8 +48,24 @@ file or creates a new one.
 from __future__ import annotations
 import os
 import re
+import sys
 import tempfile
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
+import rootguard        # noqa: E402
+
+# ★ THE TEST-ONLY DOOR THAT STOOD HERE IS GONE, replaced by `rootguard.permit`. It was written
+# after the 2026-09-15 incident and it worked — but a sibling session had written a second guard
+# for the same rule, and the two disagreed about the same path: a path mine PERMITTED, theirs
+# REFUSED, each of us reasoning correctly about our own implementation. That is the duplicate-rule
+# defect this package has now produced at four levels (the entry splitter, the Boot-file test, the
+# quarantine name, this), and the answer is the same every time: one implementation.
+#
+# `permit` is also STRICTER than what it replaces. Mine was silent outside pytest; this refuses any
+# write outside the package's own roots at ALL times. Every caller of `atomic_write` was traced
+# before the swap — compaction, the boot window, the cleanup applier, the boot-check state file —
+# and each resolves into the vault or the state directory, both of which are roots.
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
@@ -88,6 +104,7 @@ def atomic_write(path: Path, text: str) -> None:
     made. The temp file is cleaned up if any of that fails, so a crashed
     run does not litter the vault with debris the next search would try to read.
     """
+    rootguard.permit(path, "archive write")
     tmp = None
     try:
         # The original's MODE, read before anything replaces it. `mkstemp` creates 0600 and
@@ -126,6 +143,40 @@ def atomic_write(path: Path, text: str) -> None:
                 tmp.unlink()
             except OSError:
                 pass
+
+
+def split_entries(text: str) -> tuple[str, list[str]]:
+    """(head, entries) splitting on a `## ` heading, but NEVER inside a fenced code block.
+
+    ★ THIS IS THE PACKAGE'S ONE ENTRY SPLITTER, and it lives here because four places had their
+    own. `compact_file`, `append_entries`, `cleanup.py`'s duplicate detector and row R6's window
+    each did `text.split("\\n## ")`, and every one of them tore a fenced code block containing a
+    `## ` line: the opener carried off to an archive, the orphaned closing fence left behind, and
+    a fence-interior line promoted to a live Markdown heading. A fence is content, not structure.
+    Row R6 was rejected three times for that corruption and fixed it in ONE caller twice before
+    the shape of the answer became clear — the splitter was never the window's, it was the
+    package's.
+
+    ★ It SLICES the original string rather than reassembling one. The first version joined lines
+    back together with `"\n"` and lost a byte per entry — caught by the round-trip property test
+    rather than by review, which is the only reason it is not in the archive of somebody's memory.
+    `head + "".join(entries) == text` is an identity here, and that is what makes the compaction's
+    conservation check an equality instead of an approximation.
+
+    An entry keeps the newline that precedes its heading, because that is the unit `archive.py`
+    splits on (`\n## `) and a mismatch there would break its retry-deduplication."""
+    fence, offsets, pos = False, [], 0
+    for line in text.splitlines(keepends=True):
+        if not fence and line.startswith("## "):
+            offsets.append(pos - 1 if pos and text[pos - 1] == "\n" else pos)
+        stripped = line.lstrip()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            fence = not fence
+        pos += len(line)
+    if not offsets:
+        return text, []
+    bounds = offsets + [len(text)]
+    return text[:offsets[0]], [text[a:b] for a, b in zip(bounds, bounds[1:])]
 
 
 def segment_limit() -> int:
@@ -247,15 +298,14 @@ def compact_file(live: Path, limit: int | None = None, floor_share: float = 0.4,
         return 0
     if not byte_mode and measure(text) <= limit:
         return 0
-    parts = text.split("\n## ")
-    head, entries_ = parts[0], parts[1:]
+    head, entries_ = split_entries(text)
     if not entries_:
         return 0                     # a head with no entries: there is nothing to move
     target = limit * floor_share
     size = measure(text)
     moved, removed = 0, 0
     while moved < len(entries_) and size - removed > target:
-        removed += measure("\n## " + entries_[moved])
+        removed += measure(entries_[moved])
         moved += 1
     if not moved:
         return 0
@@ -272,7 +322,7 @@ def compact_file(live: Path, limit: int | None = None, floor_share: float = 0.4,
     # live file it re-reads may have changed, so it moves a different number of entries and the
     # overlap is partial. Filtering entry by entry handles both, and an entry is identified by its
     # exact text, so a legitimately superseded entry sharing a heading is not mistaken for a copy.
-    outgoing = ["\n## " + e for e in entries_[:moved]]
+    outgoing = list(entries_[:moved])
     existing = segments(live)
     if existing:
         try:
@@ -288,7 +338,7 @@ def compact_file(live: Path, limit: int | None = None, floor_share: float = 0.4,
             archived = set()
             for s in existing:
                 body = s.read_text(encoding="utf-8")
-                archived.update("\n## " + part for part in body.split("\n## ")[1:])
+                archived.update(split_entries(body)[1])
             outgoing = [e for e in outgoing if e not in archived]
         except OSError:
             pass
@@ -297,7 +347,7 @@ def compact_file(live: Path, limit: int | None = None, floor_share: float = 0.4,
         # segment roll would size segments in the wrong unit — a 200-"byte" segment per line
         # limit, one entry per file.
         append_entries(live, "".join(outgoing), limit=limit if byte_mode else None)
-    atomic_write(live, head + ("\n## " + "\n## ".join(entries_[moved:]) if entries_[moved:] else "\n"))
+    atomic_write(live, head + ("".join(entries_[moved:]) if entries_[moved:] else "\n"))
     return moved
 
 
@@ -317,8 +367,11 @@ def append_entries(live: Path, text: str, limit: int | None = None) -> Path:
     limit = segment_limit() if limit is None else limit
     # Split on entry boundaries, never mid-entry: an entry cut in half is worse than an oversize
     # file, because both halves read as complete.
-    parts = text.split("\n## ")
-    chunks = ([parts[0]] if parts[0] else []) + ["\n## " + s for s in parts[1:]]
+    # ★ THE SAME SPLITTER. Segment rollover re-split the joined text naively, so a fence that the
+    # caller had carefully kept whole was torn again the moment a segment boundary fell inside it —
+    # reproduced by row R6's third reviewer across two archive segments.
+    _head, _entries = split_entries(text)
+    chunks = ([_head] if _head else []) + _entries
     # ★ THE ROLL DECISION USES THE PROJECTED SIZE, NOT THE ON-DISK SIZE. Batching the writes means
     # the file does not grow as the loop runs, so asking `current_segment` each time — which stats
     # the disk — put every chunk in the same segment and the split silently stopped happening. The

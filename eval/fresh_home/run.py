@@ -77,7 +77,8 @@ class Refusal(Exception):
 def _load_memory_eval():
     """Import `memory_eval/run.py` by path, for its pricing machinery ONLY
     (`load_pricing`/`price_result`/`LiveRefusal`) — imported, never copied, same reasoning as that
-    module's own docstring about the price table it in turn imports from `scripts/concilium.py`."""
+    module's own docstring about the price table it in turn loads (`eval/pricing.json` by default,
+    or whatever `--pricing`/`$GEDAECHTNIS_PRICING_PY` names)."""
     spec = importlib.util.spec_from_file_location("_fresh_home_memory_eval", MEMORY_EVAL_RUN)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
@@ -314,8 +315,9 @@ def main(argv=None) -> int:
                     help="--live only: printed/recorded as a POSTCONDITION check (one call is made "
                          "either way — the price is not known until after it runs); default $1")
     ap.add_argument("--pricing", default=None,
-                    help="--live only: path to the module carrying PRICE/PRICE_ASOF "
-                         "(default: $GEDAECHTNIS_PRICING_PY, else scripts/concilium.py)")
+                    help="--live only: a .py module carrying PRICE/PRICE_ASOF, or a pricing.json "
+                         "in the packaged shape (default: $GEDAECHTNIS_PRICING_PY, else the "
+                         "eval/pricing.json this package ships)")
     a = ap.parse_args(argv)
 
     if a.dry_run and a.live:

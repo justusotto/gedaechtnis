@@ -124,9 +124,14 @@ required and pinned on every call; a missing one refuses.
 
 Money:
 
-- **Every call is priced** by IMPORTING `PRICE`/`price_usage` from `scripts/concilium.py`
-  (`--pricing PATH` or `$GEDAECHTNIS_PRICING_PY` to point elsewhere). An unknown model refuses
-  BEFORE the first call — an unpriceable run does not start.
+- **Every call is priced** from `eval/pricing.json`, the table this package ships (`--pricing PATH`
+  or `$GEDAECHTNIS_PRICING_PY` to point elsewhere — a `.py` module exposing `PRICE`/`PRICE_ASOF`,
+  such as the fleet's `scripts/concilium.py`, loads just as well). An unknown model refuses BEFORE
+  the first call — an unpriceable run does not start.
+- **The packaged table is a derived copy, and it is guarded.** `pricing.json` names in its
+  `provenance` block where the numbers came from and as of when; `python3 eval/pricing.py --check
+  <path to concilium.py>` compares the two — numbers, aliases, as-of date, and what a probe usage
+  block prices to under both — and exits 1 on any difference. Re-derive, never hand-edit one side.
 - **`--ceiling-usd` is a total across the whole run.** Once the sum of priced calls reaches it, the
   next call is refused, the run stops and prints what it completed. It is a value checkpoint, not a
   kill switch: re-evaluate and widen it rather than treating a stop as a verdict.

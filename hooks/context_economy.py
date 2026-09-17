@@ -36,7 +36,11 @@ from __future__ import annotations
 import hashlib, json, re, shlex, time
 from pathlib import Path
 import config
-from common import STATE, expand, log
+from common import expand, log
+import common
+# STATE deliberately NOT imported by name: a `from` import binds the value
+# ONCE, which is the frozen-path defect this package was bitten by. Read through the
+# module object (common.VAULT) so PEP 562 re-resolves on every access.
 
 BYTES_PER_TOKEN = 4
 HASH_SIZE_LIMIT = 2 * 1024 * 1024   # hashing above this is skipped with no notice — keep the hook fast
@@ -48,7 +52,7 @@ BINARY_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico", ".t
 # ---------------------------------------------------------------------- per-session state ----
 
 def _state_path(sid: str) -> Path:
-    return STATE / f"context-economy-{sid or '-'}.json"
+    return common.STATE / f"context-economy-{common.safe_sid(sid)}.json"
 
 
 def _load(sid: str) -> dict:
@@ -66,8 +70,8 @@ def _update(sid: str, mutate) -> dict:
     import fcntl
     path = _state_path(sid)
     try:
-        STATE.mkdir(parents=True, exist_ok=True)
-        with open(STATE / f"context-economy-{(sid or '-')}.lock", "w") as lk:
+        common.STATE.mkdir(parents=True, exist_ok=True)
+        with open(common.STATE / f"context-economy-{common.safe_sid(sid)}.lock", "w") as lk:
             fcntl.flock(lk, fcntl.LOCK_EX)
             try:
                 doc = json.loads(path.read_text(encoding="utf-8"))

@@ -31,10 +31,14 @@ whole interface, and three of its rules shape the code below:
     a lock that is stale before the session's first prompt. The pid handed over is therefore the
     Claude Code process itself, found by walking up the parent chain (`_claude_pid`).
 
-**Doing nothing is a first-class outcome.** The hook prints nothing and calls nothing when the
-claim helper is not installed, when no `.atlas-lane` marker resolves from the session's cwd, when
-the marker names no region, or when `auto_claim` is off. A stranger who installs this plugin has
-no claim helper and never sees this hook at all.
+**Doing nothing is a first-class outcome — but it is SAID, not silent.** The hook calls nothing
+when the claim helper is not installed, when no `.atlas-lane` marker resolves from the session's
+cwd, when the marker names no region, or when `auto_claim` is off. This package ships no copy of
+the helper (it is a fleet asset, and copying a trip-wired coordination mechanism forks it), so on
+an ordinary install the claim is OFF. Where a claim WOULD have been taken — the session is in a
+region — and was not, the session gets a one-line statement of which state it is in, because
+silence and a held claim look identical from inside a session and only one of them is safe to act
+on. Outside a region there is nothing to claim and nothing to say.
 
 **`auto_claim` defaults to TRUE.** Coordination that has to be switched on is coordination that is
 off: the sessions that most need a claim are the ones nobody configured.
@@ -51,7 +55,11 @@ import json, os, subprocess, sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config
-from common import read_input, context, log, lane_for, region_of_repo, repo_root_of, VAULT, STATE, guarded
+from common import read_input, context, log, lane_for, region_of_repo, repo_root_of, guarded
+import common
+# VAULT, STATE deliberately NOT imported by name: a `from` import binds the value
+# ONCE, which is the frozen-path defect this package was bitten by. Read through the
+# module object (common.VAULT) so PEP 562 re-resolves on every access.
 
 EV = "SessionStart"
 
@@ -68,7 +76,7 @@ def _run_tool(tool: Path, sub: str, region: str, pid: int) -> tuple[int, str]:
     different vault than the one the rest of the plugin is looking at."""
     argv = [str(tool)] if os.access(str(tool), os.X_OK) else ["/bin/bash", str(tool)]
     argv += [sub, region, str(pid)]
-    env = dict(os.environ, ATLAS=str(VAULT))
+    env = dict(os.environ, ATLAS=str(common.VAULT))
     try:
         p = subprocess.run(argv, capture_output=True, text=True, stdin=subprocess.DEVNULL,
                            timeout=10, env=env)
@@ -159,13 +167,13 @@ def _regions_for(cwd: str) -> tuple[str | None, list[str]]:
             continue
         if p not in regions:
             regions.append(p)
-    return lane, [r for r in regions if (VAULT / r).is_dir()]
+    return lane, [r for r in regions if (common.VAULT / r).is_dir()]
 
 
 # ---- the session's own record of what it holds -------------------------------------------
 
 def _state_file(sid: str) -> Path:
-    return STATE / f"session-start-{sid}.json"
+    return common.STATE / f"session-start-{sid}.json"
 
 
 def _read_claims(sid: str) -> tuple[dict, list[dict]]:
@@ -183,7 +191,7 @@ def _write_claims(sid: str, doc: dict, claims: list[dict]) -> None:
     doc = dict(doc)
     doc["claims"] = claims
     try:
-        STATE.mkdir(parents=True, exist_ok=True)
+        common.STATE.mkdir(parents=True, exist_ok=True)
         _state_file(sid).write_text(json.dumps(doc, indent=1), encoding="utf-8")
     except OSError as e:
         log("hook-errors", f"claim\tcannot write {_state_file(sid)}: {e}")
@@ -193,10 +201,8 @@ def _write_claims(sid: str, doc: dict, claims: list[dict]) -> None:
 
 def _preflight(inp: dict) -> tuple[Path, str, list[str]] | None:
     """(tool, cwd, regions), or None for any of the ordinary reasons to do nothing."""
-    if not config.flag("auto_claim", True):
-        return None
-    tool = config.claim_tool()
-    if tool is None:
+    tool, state, _why = config.claim_tool_state()
+    if state != "ready":
         return None
     cwd = inp.get("cwd") or os.getcwd()
     _lane, regions = _regions_for(cwd)
@@ -205,9 +211,29 @@ def _preflight(inp: dict) -> tuple[Path, str, list[str]] | None:
     return tool, cwd, regions
 
 
+def _off_line(inp: dict) -> str | None:
+    """The facts line for a session that is in a region but takes no claim.
+
+    Silence and a held claim look identical from inside a session, and the second is the one worth
+    acting on — so where a claim WOULD have been taken and was not, the session is told, in the
+    same words `tools/status.py` uses. Outside a region there is nothing to claim and nothing to
+    say: the line marks a feature that is off, not every session on earth."""
+    _tool, state, why = config.claim_tool_state()
+    if state == "ready":
+        return None
+    _lane, regions = _regions_for(inp.get("cwd") or os.getcwd())
+    if not regions:
+        return None
+    return (f"- Region claim ({', '.join(regions)}): {why} The vault's one-writer-per-region rule "
+            f"still holds — coordinate by hand before writing there.")
+
+
 def cmd_start(inp: dict) -> None:
     pre = _preflight(inp)
     if pre is None:
+        off = _off_line(inp)
+        if off:
+            context(EV, off)
         return
     tool, cwd, regions = pre
     sid = inp.get("session_id", "-")

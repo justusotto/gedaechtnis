@@ -1,0 +1,32 @@
+{
+  "schema": "gedaechtnis-pricing/1",
+  "price_asof": "2026-09-10",
+  "provenance": {
+    "derived_from": "PRICE_ASOF, PRICE and MODEL_ALIASES in scripts/concilium.py of the private fleet repo this plugin was developed in — that module stays the source this file is derived FROM, never a second authority",
+    "upstream": "platform.claude.com/docs/en/about-claude/pricing, read on the price_asof date above",
+    "copied_on": "2026-09-14",
+    "drift_guard": "eval/pricing.py --check <path to concilium.py> compares this file against that module — the numbers, the aliases, the as-of date AND the price a synthetic usage block computes to under both. It EXITS 1 on any disagreement; tests/gedaechtnis/test_pricing_sync.py in the fleet repo runs it unconditionally, and gedaechtnis/tests/test_memory_eval_live.py runs it wherever that module is present. Where the fleet module is absent — a published copy of this plugin alone — there is nothing to diff against and the table is trusted as of price_asof. Do not edit one side by hand without the other.",
+    "when_this_file_is_used": "a run that passes --pricing PATH or sets GEDAECHTNIS_PRICING_PY uses that instead; this file is the default, so a copy of the plugin with no fleet around it can still price a live run"
+  },
+  "notes": [
+    "usd per million tokens. cache_read_multiplier applies to the input price (0.10 everywhere except Fable 5.1 / Mythos 5.1 at 0.025).",
+    "cache WRITE is a multiple of the input price: 1.25x for a 5-minute entry, 2x for a 1-hour entry; the transcript's cache_creation block says which, and without it 5-minute is assumed.",
+    "there is NO long-context premium: the 1M window is standard-priced.",
+    "an UNKNOWN model REFUSES rather than defaulting — a priced-by-guess figure is a fabrication with a dollar sign."
+  ],
+  "cache_write_multiplier": {
+    "ephemeral_5m": 1.25,
+    "ephemeral_1h": 2.0
+  },
+  "prices_usd_per_mtok": {
+    "claude-opus-5": {"input": 5.0, "output": 25.0, "cache_read_multiplier": 0.10},
+    "claude-fable-5-1": {"input": 10.0, "output": 50.0, "cache_read_multiplier": 0.025},
+    "claude-sonnet-5": {"input": 2.0, "output": 10.0, "cache_read_multiplier": 0.10},
+    "claude-haiku-4-5-20251001": {"input": 1.0, "output": 5.0, "cache_read_multiplier": 0.10}
+  },
+  "model_aliases": {
+    "claude-haiku-4-5": "claude-haiku-4-5-20251001",
+    "claude-fable-5.1": "claude-fable-5-1",
+    "claude-fable-5-1-20260101": "claude-fable-5-1"
+  }
+}

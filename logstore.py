@@ -66,11 +66,42 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
 import config  # noqa: E402  (path is set above; this is the only place a directory is named)
+from common import region_is_contained  # noqa: E402  (a function, not a path — safe to bind)
+import rootguard  # noqa: E402
 
-VAULT = config.VAULT
-LOG_DIR = VAULT / ".gedaechtnis" / "log"
-VIEW_DIR = VAULT / ".gedaechtnis" / "views"
-START_FILE = VAULT / ".gedaechtnis" / "shadow-start.json"
+# ★ Resolved PER CALL, never at import. The constants these replace were evaluated once when
+# this module was first imported, and on 2026-09-15 that freeze rewrote 263 files of a real
+# memory vault: a test set GEDAECHTNIS_VAULT after the module was already in `sys.modules`, so
+# the override was read by nobody. PEP 562 `__getattr__` below keeps the old spelling working
+# while making every read a fresh resolution — but `from <this module> import VAULT` binds ONCE
+# and brings the bug straight back, which is why the importers use attribute access and
+# `tests/test_percall_resolution.py` fails if a module-level binding returns.
+
+def log_dir():
+    return config.vault() / ".gedaechtnis" / "log"
+
+
+def view_dir():
+    return config.vault() / ".gedaechtnis" / "views"
+
+
+def start_file():
+    return config.vault() / ".gedaechtnis" / "shadow-start.json"
+
+
+_ACCESSORS = {"VAULT": lambda: config.vault(), "LOG_DIR": log_dir,
+              "VIEW_DIR": view_dir, "START_FILE": start_file}
+
+
+def __getattr__(name: str):
+    fn = _ACCESSORS.get(name)
+    if fn is not None:
+        return fn()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__():
+    return sorted(list(globals()) + list(_ACCESSORS))
 
 KINDS = ("decision", "lesson", "state", "question", "note")
 STEMS = ("Canon", "Errata", "Patterns", "Position", "Aporia")
@@ -158,12 +189,12 @@ def split_id(row_id: str):
 # --------------------------------------------------------------------- reading ----
 
 def log_files() -> list:
-    return sorted(LOG_DIR.glob("*.tsv")) if LOG_DIR.is_dir() else []
+    return sorted(log_dir().glob("*.tsv")) if log_dir().is_dir() else []
 
 
 def month_file(ts: str = "") -> Path:
     ts = ts or time.strftime("%Y-%m")
-    return LOG_DIR / f"{ts[:7]}.tsv"
+    return log_dir() / f"{ts[:7]}.tsv"
 
 
 def parse_line(line: str):
@@ -235,8 +266,20 @@ def append(region: str, kind: str, stem: str, heading: str, body: str,
         raise ValueError(f"stem must be one of {STEMS}, not {stem!r}")
     if src not in SRCS:
         raise ValueError(f"src must be one of {SRCS}, not {src!r}")
+    # ★ The region is JOINED ONTO A FILESYSTEM PATH downstream — `views.view_path` builds
+    # `root / region / f"{stem}.md"` and `views.generate` creates the parent and writes it. So the
+    # check is CONTAINMENT, not merely "no tab and no `·`": `..` is a legal path segment and
+    # `pathlib` discards the left operand entirely when the right one is absolute, so a region of
+    # `../../tmp/evil` or `/etc/x` composed a grammar-valid row and a write outside every root.
+    # Found by the BLASTRADIUS-1 code review, 2026-09-15; reproduced by construction. A plain CLI
+    # typo was enough — no attacker required.
     if "·" in region or "\t" in region or not region:
         raise ValueError(f"region must be a vault-relative folder with no tab and no `·`: {region!r}")
+    if region != "." and not region_is_contained(region):
+        raise ValueError(
+            f"region must stay inside the vault: {region!r} escapes it (a `..`/`.` segment, an "
+            f"absolute path, or a symlink leading out). The region is joined onto a real path by "
+            f"`views.generate`, so this is a write target, not a label.")
     digest = content_hash(region, stem, heading, body)
     idx = known if known is not None else _index(all_rows())
     hit = idx.get((region, digest))
@@ -248,7 +291,8 @@ def append(region: str, kind: str, stem: str, heading: str, body: str,
     line = "\t".join((row_id, ts, region, kind, stem, escape(heading), escape(body), flag_s, src))
     if not ROW.match(line):
         raise ValueError(f"refused: the composed row does not match the grammar: {line[:160]}")
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    rootguard.permit(log_dir(), "append-only log")
+    log_dir().mkdir(parents=True, exist_ok=True)
     f = month_file(ts)
     new = not f.exists()
     with open(f, "a", encoding="utf-8") as fh:      # "a" and only ever "a": the file is append-only
@@ -369,7 +413,9 @@ def migrate(dry_run: bool = False) -> dict:
         if dry_run:
             continue
         bak = f.with_name(f.name + ".pre-srccol-" + time.strftime("%Y-%m-%d"))
+        rootguard.permit(f, "log migration")
         if not bak.exists():                            # check-before-clobber, once per day
+            rootguard.permit(bak, "log migration backup")
             bak.write_text(f.read_text(encoding="utf-8"), encoding="utf-8")
         tmp = f.with_name(f.name + ".tmp-srccol")
         tmp.write_text("\n".join(out) + "\n", encoding="utf-8")

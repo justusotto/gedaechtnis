@@ -58,10 +58,36 @@ import limits                                                             # noqa
 import archive                                                            # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
 import maintenance                                                        # noqa: E402
+import rootguard                                                          # noqa: E402
 
-VAULT = config.VAULT
+# ★ Resolved PER CALL, never at import. The constants these replace were evaluated once when
+# this module was first imported, and on 2026-09-15 that freeze rewrote 263 files of a real
+# memory vault: a test set GEDAECHTNIS_VAULT after the module was already in `sys.modules`, so
+# the override was read by nobody. PEP 562 `__getattr__` below keeps the old spelling working
+# while making every read a fresh resolution — but `from <this module> import VAULT` binds ONCE
+# and brings the bug straight back, which is why the importers use attribute access and
+# `tests/test_percall_resolution.py` fails if a module-level binding returns.
+
+_ACCESSORS = {"VAULT": lambda: config.vault()}
+
+
+def __getattr__(name: str):
+    fn = _ACCESSORS.get(name)
+    if fn is not None:
+        return fn()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__():
+    return sorted(list(globals()) + list(_ACCESSORS))
 BUNDLE_DIR = "Cleanup"
 README_NAME = "README-what-went-where.html"
+def _bootfile():
+    """`bootfile.py`, lazily — it owns the one definition of "a session loads this file"."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import bootfile
+    return bootfile
 
 # `**Last revisited:** 2026-08-01`, `Last revisited: 2026-08-01`, and the spellings in between.
 LAST_REVISITED_RE = re.compile(r"Last revisited[:*\s]+([0-9]{4}-[0-9]{2}-[0-9]{2})?", re.I)
@@ -80,13 +106,15 @@ def lines_of(text: str) -> int:
 
 
 def split_entries(text: str) -> tuple[str, list[str]]:
-    """(head, entries) where each entry is its raw text INCLUDING its leading `\\n## `.
+    """`archive.split_entries` — the package's ONE entry splitter.
 
-    The same split `archive.py` uses, for the same reason: an entry is the unit a heading owns, and
-    re-joining head + entries reproduces the file byte for byte. That property is what lets the
-    conservation check be an equality rather than an approximation."""
-    parts = text.split("\n## ")
-    return parts[0], ["\n## " + p for p in parts[1:]]
+    This was a second copy, and it split naively on `\\n## `. Row R6's third reviewer reproduced
+    what that does here: a duplicate entry containing a fenced code block with a `## ` line inside
+    it was "deduplicated" by this applier, and the fence was torn — the closer orphaned, a
+    fence-interior line promoted to a live heading. In a tool that applies straight away and never
+    asks. Re-joining head + entries still reproduces the file byte for byte, which is what lets the
+    conservation check be an equality."""
+    return archive.split_entries(text)
 
 
 def heading_of(entry: str) -> str:
@@ -178,14 +206,22 @@ def propose(day: str | None = None) -> dict:
     environment, so a second vault passed in here would be honoured by the path arithmetic and
     ignored by the file walk: half the function would scan one vault and describe another. The
     tests point GEDAECHTNIS_VAULT and run this as the product does."""
-    vault = VAULT
+    vault = config.vault()
     day = day or today()
+    _chain = _bootfile().always_loaded(os.getcwd())
     proposals, unparsable, unreadable = [], 0, []
     for path in maintenance.memory_files():
         # A sidecar is APPEND-ONLY by contract ("nothing here is ever rewritten or moved: a link
         # into an archive segment stays valid"). Rewriting one to drop a duplicate would break
         # exactly the promise the archive exists to make.
         if archive.is_sidecar(path.stem):
+            continue
+        if _bootfile().is_protected(path, chain=_chain):
+            # The same rule `maintenance.compact_vault` follows, for the same reason and found in
+            # the same review: a file a session LOADS is not tidied by an unattended pass. Keyed on
+            # the filename until 2026-09-15, when a vault's top-level index fell through elsewhere
+            # for exactly that — a name is not a property. Not enough that `role_soft_limits_lines` happens to
+            # carry no `Kernel` key today: nothing declared that it must not.
             continue
         try:
             rel = str(path.relative_to(vault))
@@ -217,6 +253,7 @@ def _bundle_copy(bundle: Path, rel: str, entry: str, why: str) -> str:
     path itself, and a restore is a copy back along the same relative path rather than an exercise
     in reading the README."""
     dest = bundle / "removed" / rel
+    rootguard.permit(dest, "cleanup bundle copy")
     dest.parent.mkdir(parents=True, exist_ok=True)
     header = ""
     if not dest.exists():
@@ -281,6 +318,7 @@ they are on purpose: filing an unanswered question away is how it stops being an
 {rows(reported, ["path", "heading", "last_revisited", "why"])}</table>
 {f'<p class="q">{unparsable} entry(ies) carry a “Last revisited” marker whose date could not be read. They are UNCHECKED, never assumed fresh.</p>' if unparsable else ''}
 """
+    rootguard.permit(bundle, "cleanup bundle receipt")
     bundle.mkdir(parents=True, exist_ok=True)
     (bundle / README_NAME).write_text(doc, encoding="utf-8")
 
@@ -290,7 +328,7 @@ def apply(found: dict) -> dict:
 
     Order matters: duplicates are removed BEFORE a file is folded, so an entry that is both a
     duplicate and old is not archived as a second copy first."""
-    vault = VAULT
+    vault = config.vault()
     day = found["day"]
     proposals = found["proposals"]
     if not proposals:
@@ -355,7 +393,7 @@ def apply(found: dict) -> dict:
 
 def touched_paths(receipt: dict) -> list[str]:
     """Every vault-relative path the apply wrote, for the commit."""
-    vault = VAULT
+    vault = config.vault()
     out = []
     bundle = receipt.get("bundle")
     for m in receipt.get("moved") or []:
@@ -421,7 +459,7 @@ def render(receipt: dict) -> str:
     for f in receipt.get("failed") or []:
         out.append(f"  - left untouched: {f}")
     if receipt.get("bundle"):
-        out.append(f"  Receipt: {VAULT / receipt['bundle'] / README_NAME}")
+        out.append(f"  Receipt: {config.vault() / receipt['bundle'] / README_NAME}")
     return "\n".join(out)
 
 
@@ -432,8 +470,8 @@ def main(argv=None) -> int:
     ap.add_argument("--json", action="store_true", help="machine-readable receipt")
     ap.add_argument("--session-id", default="-")
     args = ap.parse_args(argv)
-    if not VAULT.is_dir():
-        print(f"No vault at {VAULT}; nothing to clean.")
+    if not config.vault().is_dir():
+        print(f"No vault at {config.vault()}; nothing to clean.")
         return 0
     found = propose()
     if args.dry_run:
