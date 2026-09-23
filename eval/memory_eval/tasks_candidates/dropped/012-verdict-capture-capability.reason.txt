@@ -1,0 +1,1 @@
+R2: the swap side's checker_must_contain is 'downloadable JSON export file' — a description, not a distinctive token (authoring spec rule 5). A correct swapped answer phrased any other way would score FAIL, so the cell would measure phrasing, not memory.
