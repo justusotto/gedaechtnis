@@ -1,0 +1,11 @@
+{
+  "name": "gedaechtnis",
+  "displayName": "Gedächtnis",
+  "version": "0.2.0",
+  "description": "A memory for Claude Code that lives in plain Markdown files on your own disk. It gives each project a small set of notes (status, decisions, mistakes, open questions), loads them at session start, commits what a session wrote with git, and stops the tool calls that would damage those notes.",
+  "author": {
+    "name": "the Gedächtnis authors"
+  },
+  "license": "MIT",
+  "commands": "./commands"
+}

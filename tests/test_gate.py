@@ -1,0 +1,1415 @@
+"""Gedächtnis hook tests — every rule gets a POSITIVE control (the violation is denied) and a
+NEGATIVE control (the legitimate form is allowed). All state is redirected into tmp_path: the
+suite never reads the real vault or writes the real ~/.claude/gedaechtnis (Global/Errata: a suite
+that writes the application's real sidecar makes its own verdict depend on the machine's state).
+"""
+from __future__ import annotations
+import json, os, re, subprocess, sys
+from pathlib import Path
+import pytest
+
+HOOKS = Path(__file__).resolve().parents[1] / "hooks"
+
+
+@pytest.fixture
+def world(tmp_path):
+    vault = tmp_path / "Vault"
+    (vault / "Global").mkdir(parents=True)
+    (vault / "Queues" / "regions").mkdir(parents=True)
+    (vault / "Studio" / "Cards").mkdir(parents=True)
+    (vault / "Toolkit").mkdir()
+    (vault / "Toolkit" / "Kernel.md").write_text("# Toolkit\n")   # a one-segment region PROVES itself
+    (vault / "Council").mkdir()
+    subprocess.run(["git", "init", "-q", str(vault)], check=True)
+    subprocess.run(["git", "-C", str(vault), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "root"], check=True)
+    (vault / "Global" / "fleet-roster.md").write_text("```fleet-roster\nlane: CURSUS\nrepo: src/nope\n```\n")
+    repo = tmp_path / "repo"; repo.mkdir()
+    (repo / ".atlas-lane").write_text("lane: CARD\npath: Studio/Cards/\npath: Global/\npath: Queues/regions/cards.md\n")
+    state = tmp_path / "state"
+    # THE SANDBOX'S OWN TOPOLOGY. The queue, artifact-index, shared-append and reserved-stem rules
+    # all read the vault's shape from here; a sandbox naming none would pass their cases with the
+    # rule OFF rather than with the write allowed, which is the opposite of what they assert.
+    cfg = tmp_path / "config.json"
+    cfg.write_text(json.dumps({"topology": {
+        "non_region_tops": ["Global", "Queues", "Channels", "Council"],
+        "queues_dir": "Queues/regions",
+        "artifacts_index": "Queues/artifacts-index.md",
+        "shared_append_files": ["Studio/Canon.md", "Studio/Position.md"],
+        "stem_rule_dir": "Council",
+    }}))
+    # The config file below is the sandbox's, so a real ~/.claude/gedaechtnis/
+    # config.json on the host cannot reach the hooks under test (it would otherwise supply
+    # `owner_pages_status` and make this suite's verdict depend on the machine).
+    # GEDAECHTNIS_USER_MEMORY points at a file that does not exist for the same reason as
+    # GEDAECHTNIS_CONFIG below: otherwise the host's real ~/.claude/CLAUDE.md would be walked
+    # by the boot-cost measurement and every assertion about it would move with the machine.
+    env = dict(os.environ, GEDAECHTNIS_VAULT=str(vault), GEDAECHTNIS_STATE_DIR=str(state),
+               GEDAECHTNIS_FLEET_ROSTER=str(vault / "Global" / "fleet-roster.md"),
+               GEDAECHTNIS_USER_MEMORY=str(tmp_path / "no-such-user-memory.md"),
+               GEDAECHTNIS_CONFIG=str(cfg))
+    return dict(vault=vault, repo=repo, state=state, env=env, cfg=cfg)
+
+
+def run(script, which, payload, env):
+    p = subprocess.run([sys.executable, str(HOOKS / script), which], input=json.dumps(payload),
+                       capture_output=True, text=True, env=env, timeout=30)
+    assert p.returncode == 0, p.stderr
+    out = p.stdout.strip()
+    return json.loads(out) if out else None
+
+
+def decision(res):
+    return (res or {}).get("hookSpecificOutput", {}).get("permissionDecision")
+
+
+def bash(w, cmd, cwd=None):
+    return run("gate.py", "bash", {"cwd": cwd or str(w["repo"]), "tool_name": "Bash", "tool_input": {"command": cmd}, "session_id": "t"}, w["env"])
+
+
+# ------------------------------------------------------------------ vault git law ----
+def test_add_A_in_vault_denied(world):
+    v = world["vault"]
+    assert decision(bash(world, f"git -C {v} add -A && git -C {v} commit -m 'x' -- Global/Map.md")) == "deny"
+
+def test_add_path_limited_allowed(world):
+    v = world["vault"]
+    assert bash(world, f"git -C {v} add -- Global/Map.md && git -C {v} commit -m 'x' -- Global/Map.md") is None
+
+def test_bare_commit_denied_and_assert_form_allowed(world):
+    v = world["vault"]
+    assert decision(bash(world, f"git -C {v} commit -m 'msg'")) == "deny"
+    assert_form = (f"git -C {v} rm --cached -- a.md; S=$(git -C {v} diff --cached --name-only | sort | tr '\\n' '|'); "
+                   f"[ \"$S\" = 'a.md|' ] || exit 9; git -C {v} commit -F /tmp/m")
+    assert bash(world, assert_form) is None
+
+def test_amend_denied(world):
+    v = world["vault"]
+    assert decision(bash(world, f"git -C {v} commit --amend --no-edit -- Global/Map.md")) == "deny"
+
+def test_backtick_in_double_quoted_m_denied_single_quotes_allowed(world):
+    v = world["vault"]
+    assert decision(bash(world, f'git -C {v} commit -m "fix `verdict` field" -- Global/Map.md')) == "deny"
+    assert bash(world, f"git -C {v} commit -m 'fix `verdict` field' -- Global/Map.md") is None
+
+def test_cd_then_git_tracks_cwd(world):
+    v = world["vault"]
+    assert decision(bash(world, f"cd {v} && git add -A")) == "deny"
+
+def test_git_law_does_not_bind_other_repos(world):
+    assert bash(world, "git add -A && git commit -m 'repo commit'", cwd=str(world["repo"])) is None
+
+def test_push_backup_allowed_push_origin_denied(world):
+    v = world["vault"]
+    assert bash(world, f"git -C {v} push backup") is None
+    assert decision(bash(world, f"git -C {v} push origin main")) == "deny"
+
+def test_reset_hard_in_vault_denied(world):
+    v = world["vault"]
+    assert decision(bash(world, f"git -C {v} reset --hard HEAD~1")) == "deny"
+
+
+# --------------------------------------------------------------- launch pins model ----
+def test_claude_launch_without_model_denied(world):
+    world["env"]["GEDAECHTNIS_REQUIRE_LAUNCH_MODEL"] = "1"       # the owner's policy; off for a stranger
+    assert decision(bash(world, "claude -p 'hello' --setting-sources project")) == "deny"
+
+def test_claude_launch_pinned_allowed(world):
+    assert bash(world, "claude -p 'hello' --model claude-sonnet-5 --effort medium") is None
+
+def test_claude_launch_model_but_no_effort_denied_only_under_owner_policy(world):
+    assert bash(world, "claude -p 'hello' --model claude-sonnet-5") is None
+    env = dict(world["env"], GEDAECHTNIS_REQUIRE_LAUNCH_EFFORT="1")
+    res = run("gate.py", "bash", {"cwd": str(world["repo"]), "tool_name": "Bash", "tool_input": {"command": "claude -p 'hello' --model claude-sonnet-5"}}, env)
+    assert decision(res) == "deny"
+
+def test_claude_subcommands_exempt(world):
+    assert bash(world, "claude plugin list") is None
+    assert bash(world, "claude --version") is None
+
+
+# ------------------------------------------------------------------ data integrity ----
+# `HOMEDIR` is COMPOSED rather than written as a literal home path: the `_PROTECTED` table matches
+# both `~/Pictures` and an absolute `/Users/<name>/Pictures`, so the absolute branch needs a
+# positive control — but a literal home path in a source file is exactly what tools/publish_check.py
+# refuses, and that check has no allowlist. Composing it keeps both true.
+HOMEDIR = "/" + "Users/someone"
+
+
+@pytest.mark.parametrize("cmd", [
+    "rm ~/src/miner/whisper_cache.json",
+    f"rm -rf {HOMEDIR}/Pictures/holiday-cull",
+    "rm -rf ~/.Trash/*",
+    "osascript -e 'tell application \"Finder\" to empty the trash'",
+    "rm -rf ~/Vault",          # the sandbox vault's own name — the rule is built from `common.VAULT`, never a literal
+    "sqlite3 anki_mining.db 'DELETE FROM cards'",
+    "find media/ -name '*.mp3' -delete",
+])
+def test_destructive_on_protected_refuses_and_asks(world, cmd):
+    world["env"]["GEDAECHTNIS_PROTECT_EVERYWHERE"] = "1"         # the owner's data classes everywhere; off for a stranger
+    assert decision(bash(world, cmd)) == "ask"          # refuse AND ask: the owner may still say yes
+
+@pytest.mark.parametrize("cmd", [
+    "rm -rf /tmp/build",
+    "ls ~/Pictures",
+    "rm ~/Vault/.atlas-locks/Toolkit.lock",
+    "cat whisper_cache.json | head",
+    "sqlite3 anki_mining.db 'SELECT count(*) FROM cards'",
+])
+def test_benign_allowed(world, cmd):
+    assert bash(world, cmd) is None
+
+
+# --------------------------------------------------------- artifact page, not file:// ----
+def test_open_answer_store_page_denied_plain_html_allowed(world, tmp_path):
+    page = tmp_path / "judge.html"; page.write_text('<title>x</title><script>const db=await claude.use("db")</script>')
+    plain = tmp_path / "plain.html"; plain.write_text("<title>x</title><p>hi</p>")
+    assert decision(bash(world, f"open {page}")) == "deny"
+    assert bash(world, f"open {plain}") is None
+    assert decision(bash(world, f"open file://{page}")) == "deny"
+
+
+# ---------------------------------------------------------------- write partition ----
+def write(w, path, mode=None, cwd=None):
+    if mode:
+        w["state"].mkdir(parents=True, exist_ok=True); (w["state"] / "partition.mode").write_text(mode)
+    return run("gate.py", "write", {"cwd": cwd or str(w["repo"]), "tool_name": "Edit", "session_id": "t",
+                                    "tool_input": {"file_path": str(path), "old_string": "", "new_string": "x"}}, w["env"])
+
+def test_partition_warn_mode_logs_but_allows(world):
+    foreign = world["vault"] / "Toolkit" / "Position.md"
+    assert write(world, foreign) is None
+    log = (world["state"] / "partition.log").read_text()
+    assert "warn\tCARD\tToolkit/Position.md" in log
+
+def test_partition_deny_mode_refuses_foreign_allows_own_and_global(world):
+    v = world["vault"]
+    assert decision(write(world, v / "Toolkit" / "Position.md", mode="deny")) == "deny"
+    assert write(world, v / "Studio" / "Cards" / "Position.md", mode="deny") is None
+    assert write(world, v / "Global" / "Patterns.md", mode="deny") is None
+    assert write(world, v / "Queues" / "regions" / "cards.md", mode="deny") is None
+
+def test_partition_ignores_non_vault_paths(world, tmp_path):
+    assert write(world, tmp_path / "repo" / "x.py", mode="deny") is None
+
+def test_unknown_lane_denied_in_deny_mode(world, tmp_path):
+    nolane = tmp_path / "nolane"; nolane.mkdir()
+    assert decision(write(world, world["vault"] / "Global" / "Map.md", mode="deny", cwd=str(nolane))) == "deny"
+
+def test_council_stem_always_denied(world):
+    assert decision(write(world, world["vault"] / "Council" / "Position.md")) == "deny"
+    assert write(world, world["vault"] / "Council" / "Positio.md") is None
+
+
+# ------------------------------------------------------------------- agent pins model ----
+def agent(w, ti):
+    return run("gate.py", "agent", {"cwd": str(w["repo"]), "tool_name": "Agent", "tool_input": ti}, w["env"])
+
+def test_agent_without_model_denied_only_under_owner_policy(world):
+    assert agent(world, {"subagent_type": "general-purpose", "prompt": "x"}) is None
+    world["env"]["GEDAECHTNIS_REQUIRE_AGENT_MODEL"] = "1"
+    assert decision(agent(world, {"subagent_type": "general-purpose", "prompt": "x"})) == "deny"
+
+def test_agent_pinned_or_fork_or_defined_allowed(world):
+    world["env"]["GEDAECHTNIS_REQUIRE_AGENT_MODEL"] = "1"
+    assert agent(world, {"subagent_type": "general-purpose", "prompt": "x", "model": "sonnet"}) is None
+    assert agent(world, {"subagent_type": "fork", "prompt": "x"}) is None
+    d = world["repo"] / ".claude" / "agents"; d.mkdir(parents=True)
+    (d / "mine.md").write_text("---\nname: mine\nmodel: sonnet\n---\nbody\n")
+    assert agent(world, {"subagent_type": "mine", "prompt": "x"}) is None
+    (d / "unpinned.md").write_text("---\nname: unpinned\n---\nbody\n")
+    assert decision(agent(world, {"subagent_type": "unpinned", "prompt": "x"})) == "deny"
+
+
+# ---------------------------------------------------------------------- chores ----
+def test_queue_newline_repaired_and_reported(world):
+    q = world["vault"] / "Queues" / "regions" / "cards.md"
+    q.write_bytes(b"- [ ] `q:X-1` row")
+    res = run("chore.py", "write", {"cwd": str(world["repo"]), "tool_name": "Write",
+                                    "tool_input": {"file_path": str(q), "content": "- [ ] `q:X-1` row"}}, world["env"])
+    assert q.read_bytes().endswith(b"\n")
+    assert "trailing newline" in res["hookSpecificOutput"]["additionalContext"]
+
+def test_sha_check_reports_unresolvable_and_accepts_real(world):
+    v = world["vault"]; f = v / "Global" / "Map.md"
+    real = subprocess.run(["git", "-C", str(v), "log", "-1", "--format=%h"], capture_output=True, text=True).stdout.strip()
+    f.write_text(f"see `{real}` and `deadbee`\n")
+    res = run("chore.py", "write", {"cwd": str(world["repo"]), "tool_name": "Write",
+                                    "tool_input": {"file_path": str(f), "content": f"see `{real}` and `deadbee`"}}, world["env"])
+    ctx = res["hookSpecificOutput"]["additionalContext"]
+    assert "deadbee" in ctx and real not in ctx
+
+def test_artifact_index_row_appended_and_committed(world):
+    v = world["vault"]; idx = v / "Queues" / "artifacts-index.md"
+    idx.write_text("# Artifacts\n\n| date | title | id |\n|---|---|---|\n| 2026-07-23 | Old | `aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa` |\n\nPrefix every id with `https://claude.ai/code/artifact/`.\n")
+    subprocess.run(["git", "-C", str(v), "add", "--", "Queues/artifacts-index.md"], check=True)
+    subprocess.run(["git", "-C", str(v), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "idx", "--", "Queues/artifacts-index.md"], check=True)
+    page = world["repo"] / "p.html"; page.write_text("<title>My Page</title><p>x</p>")
+    uid = "181a58fd-f036-42ce-885e-d51f442b0430"
+    res = run("chore.py", "artifact", {"cwd": str(world["repo"]), "tool_name": "Artifact",
+              "tool_input": {"file_path": str(page)}, "tool_response": f"Published {page} at https://claude.ai/code/artifact/{uid}"}, world["env"])
+    txt = idx.read_text()
+    assert f"| My Page | `{uid}` |" in txt and txt.index(uid) < txt.index("Prefix every id")
+    log = subprocess.run(["git", "-C", str(v), "log", "-1", "--format=%an %s"], capture_output=True, text=True).stdout
+    assert log.startswith("atlas artifacts-index: My Page")
+    assert "committed" in res["hookSpecificOutput"]["additionalContext"]
+    # idempotent: a second publish of the same id adds nothing
+    assert run("chore.py", "artifact", {"cwd": str(world["repo"]), "tool_name": "Artifact", "tool_input": {"file_path": str(page)},
+               "tool_response": f"at https://claude.ai/code/artifact/{uid}"}, world["env"]) is None
+    assert idx.read_text().count(uid) == 1
+
+def test_session_start_writes_state_and_context(world):
+    res = run("session_start.py", "", {"cwd": str(world["repo"]), "session_id": "s1", "source": "startup"}, world["env"])
+    j = json.loads((world["state"] / "session-start.json").read_text())
+    assert j["lane"] == "CARD" and len(j["vault_head"]) == 40
+    ctx = res["hookSpecificOutput"]["additionalContext"]
+    assert "Lane CARD" in ctx and "WARN" in ctx
+    assert "Answered review pages" not in ctx          # nothing configured → the hook says nothing
+
+def test_session_start_runs_the_answered_pages_script_only_when_configured(world, tmp_path):
+    """The optional `owner_pages_status` seam: absent by default (negative control above), used
+    when config.json names a script that exists (positive control here)."""
+    script = tmp_path / "pages.py"
+    script.write_text('print(\'{"status": "3 uncollected", "uncollected": 3}\')\n', encoding="utf-8")
+    cfg = tmp_path / "config.json"
+    cfg.write_text(json.dumps({"owner_pages_status": str(script)}), encoding="utf-8")
+    env = dict(world["env"], GEDAECHTNIS_CONFIG=str(cfg))
+    res = run("session_start.py", "", {"cwd": str(world["repo"]), "session_id": "s3", "source": "startup"}, env)
+    ctx = res["hookSpecificOutput"]["additionalContext"]
+    assert "Answered review pages (swept by name): 3 uncollected" in ctx and '"uncollected": 3' in ctx
+
+def test_hook_bug_never_crashes_session(world):
+    p = subprocess.run([sys.executable, str(HOOKS / "gate.py"), "bash"], input="not json", capture_output=True, text=True, env=world["env"])
+    assert p.returncode == 0 and p.stdout.strip() == ""
+
+
+def test_change_everywhere_lookup_lists_other_occurrences(world):
+    v = world["vault"]
+    (v / "Toolkit" / "Canon.md").write_text("## The old heading name\n\ntext\n")
+    (v / "Global" / "Map.md").write_text("see [[../Toolkit/Canon#The old heading name]] and `q:CU-2026-09-07-GEDAECHTNIS-1`\n")
+    (v / "Global" / "Patterns.md").write_text("cites `q:CU-2026-09-07-GEDAECHTNIS-1` too\n")
+    res = run("chore.py", "write", {"cwd": str(world["repo"]), "tool_name": "Edit", "tool_input": {
+        "file_path": str(v / "Toolkit" / "Canon.md"),
+        "old_string": "## The old heading name\n\nsee `q:CU-2026-09-07-GEDAECHTNIS-1`",
+        "new_string": "## A new heading name\n\nsee `q:CU-2026-09-07-RENAMED-1`"}}, world["env"])
+    ctx = res["hookSpecificOutput"]["additionalContext"]
+    assert "The old heading name" in ctx and "Global/Map.md" in ctx
+    assert "q:CU-2026-09-07-GEDAECHTNIS-1" in ctx and "Global/Patterns.md" in ctx
+
+def test_change_everywhere_silent_when_nothing_vanished(world):
+    v = world["vault"]; f = v / "Toolkit" / "Canon.md"; f.write_text("## Kept heading\n\ntext\n")
+    res = run("chore.py", "write", {"cwd": str(world["repo"]), "tool_name": "Edit", "tool_input": {
+        "file_path": str(f), "old_string": "## Kept heading\n\ntext", "new_string": "## Kept heading\n\nmore text"}}, world["env"])
+    assert res is None
+
+def test_session_start_sets_no_bytecode_env(world, tmp_path):
+    envf = tmp_path / "env.sh"
+    env = dict(world["env"], CLAUDE_ENV_FILE=str(envf))
+    run("session_start.py", "", {"cwd": str(world["repo"]), "session_id": "s2", "source": "startup"}, env)
+    assert "PYTHONDONTWRITEBYTECODE=1" in envf.read_text()
+
+
+# ------------------------------------------------ shared surfaces: any lane may APPEND a keyed row ----
+def test_foreign_queue_append_allowed_in_deny_mode_but_rewrite_denied(world):
+    q = world["vault"] / "Queues" / "regions" / "other.md"     # not CARD's queue file
+    q.write_text("- [ ] `q:MN-2026-09-01-X-1` existing row | q:MN-2026-09-01-X-1\n")
+    world["state"].mkdir(parents=True, exist_ok=True); (world["state"] / "partition.mode").write_text("deny")
+    append = run("gate.py", "write", {"cwd": str(world["repo"]), "tool_name": "Write", "session_id": "t", "tool_input": {
+        "file_path": str(q), "content": q.read_text() + "- [ ] `q:MN-2026-09-08-NEW-1` a row CARD needs MINING-OPS to see | q:MN-2026-09-08-NEW-1\n"}}, world["env"])
+    assert append is None
+    # A whole-file REWRITE is refused twice over, and D1 is the outer door: it does not even reach
+    # the shared-surface rule, because "you may have lost content you never read" outranks "this is
+    # not a keyed row". Both refusals are proven — D1 on the `Write` shape, the shared-surface rule
+    # on the anchored `Edit` that gets past D1.
+    rewrite = run("gate.py", "write", {"cwd": str(world["repo"]), "tool_name": "Write", "session_id": "t", "tool_input": {
+        "file_path": str(q), "content": "- [x] `q:MN-2026-09-01-X-1` I closed your row | q:MN-2026-09-01-X-1\n"}}, world["env"])
+    assert decision(rewrite) == "deny" and "Whole-file Write" in reason(rewrite)
+    edit_rewrite = run("gate.py", "write", {"cwd": str(world["repo"]), "tool_name": "Edit", "session_id": "t", "tool_input": {
+        "file_path": str(q), "old_string": "existing row", "new_string": "row I closed for you"}}, world["env"])
+    assert decision(edit_rewrite) == "deny" and "SHARED surface" in reason(edit_rewrite)
+    prose = run("gate.py", "write", {"cwd": str(world["repo"]), "tool_name": "Write", "session_id": "t", "tool_input": {
+        "file_path": str(q), "content": q.read_text() + "some prose that is not a row\n"}}, world["env"])
+    assert decision(prose) == "deny"
+
+def test_foreign_inbox_and_ledger_append_allowed(world):
+    v = world["vault"]; (v / "Toolkit").mkdir(exist_ok=True); (v / "Channels" / "ledger").mkdir(parents=True)
+    world["state"].mkdir(parents=True, exist_ok=True); (world["state"] / "partition.mode").write_text("deny")
+    ib = v / "Toolkit" / "Inbox.md"; ib.write_text("# Toolkit — Inbox\n\n")
+    ok = run("gate.py", "write", {"cwd": str(world["repo"]), "tool_name": "Edit", "session_id": "t", "tool_input": {
+        "file_path": str(ib), "old_string": "# Toolkit — Inbox\n\n", "new_string": "# Toolkit — Inbox\n\n- 2026-09-08 CARD found a stale line in Kernel.md\n"}}, world["env"])
+    assert ok is None
+    led = v / "Channels" / "ledger" / "2026-09.tsv"; led.write_text("# hdr\n")
+    row = "N-2026-09-08-0001\t2026-09-08T10:00:00\tCARD\tCURSUS\tfact\t-\thello\n"
+    assert run("gate.py", "write", {"cwd": str(world["repo"]), "tool_name": "Write", "session_id": "t", "tool_input": {
+        "file_path": str(led), "content": "# hdr\n" + row}}, world["env"]) is None
+    bad = run("gate.py", "write", {"cwd": str(world["repo"]), "tool_name": "Write", "session_id": "t", "tool_input": {
+        "file_path": str(led), "content": "# hdr\n" + row + "not a row\n"}}, world["env"])
+    assert decision(bad) == "deny"
+
+
+# ------------------------------------------- foreign work is recorded WHERE IT HAPPENED (region Inbox) ----
+def test_inbox_row_for_work_in_another_region(world):
+    v = world["vault"]; target = v / "Toolkit" / "Position.md"; target.write_text("x\n")
+    subprocess.run(["git", "-C", str(v), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(v), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "seed"], check=True)
+    res = run("chore.py", "inbox", {"cwd": str(world["repo"]), "session_id": "sess1234", "tool_name": "Edit",
+                                    "tool_input": {"file_path": str(target), "old_string": "x", "new_string": "y"}}, world["env"])
+    ib = v / "Toolkit" / "Inbox.md"
+    assert ib.is_file() and "CARD wrote `vault file Toolkit/Position.md`" in ib.read_text()
+    assert "Recorded in Toolkit/Inbox.md" in res["hookSpecificOutput"]["additionalContext"]
+    log = subprocess.run(["git", "-C", str(v), "log", "-1", "--format=%an %s"], capture_output=True, text=True).stdout
+    assert log.startswith("atlas Toolkit Inbox: CARD wrote Position.md")
+    # same session, same file: no second row
+    assert run("chore.py", "inbox", {"cwd": str(world["repo"]), "session_id": "sess1234", "tool_name": "Edit",
+                                     "tool_input": {"file_path": str(target), "old_string": "y", "new_string": "z"}}, world["env"]) is None
+    assert ib.read_text().count("- 2026-") == 1
+
+def test_inbox_row_for_work_in_another_lanes_repo(world, tmp_path):
+    v = world["vault"]; other = tmp_path / "miner"; other.mkdir()
+    subprocess.run(["git", "init", "-q", str(other)], check=True)
+    (other / "CLAUDE.md").write_text(f"@{v}/Global/Map.md\n@{v}/Studio/AnkiAutoMiner/Kernel.md\n")
+    (v / "Studio" / "AnkiAutoMiner").mkdir(parents=True)
+    f = other / "verify" / "x.py"; f.parent.mkdir(); f.write_text("print(1)\n")
+    res = run("chore.py", "inbox", {"cwd": str(world["repo"]), "session_id": "s9", "tool_name": "Write",
+                                    "tool_input": {"file_path": str(f), "content": "print(1)\n"}}, world["env"])
+    ib = v / "Studio" / "AnkiAutoMiner" / "Inbox.md"
+    assert ib.is_file() and "CARD wrote `miner/verify/x.py`" in ib.read_text()
+    assert res is not None
+
+def test_no_inbox_row_for_own_lane_or_shared_surface(world):
+    v = world["vault"]
+    own = v / "Studio" / "Cards" / "Position.md"; own.write_text("x\n")
+    assert run("chore.py", "inbox", {"cwd": str(world["repo"]), "session_id": "s1", "tool_name": "Edit", "tool_input": {"file_path": str(own)}}, world["env"]) is None
+    q = v / "Queues" / "regions" / "other.md"; q.write_text("- [ ] `q:MN-2026-09-08-A-1` r\n")
+    assert run("chore.py", "inbox", {"cwd": str(world["repo"]), "session_id": "s1", "tool_name": "Edit", "tool_input": {"file_path": str(q)}}, world["env"]) is None
+    assert not (v / "Studio" / "Cards" / "Inbox.md").exists()
+
+def test_session_start_reports_inbox_and_ledger(world):
+    v = world["vault"]; ib = v / "Studio" / "Cards" / "Inbox.md"
+    ib.write_text("# x\n\n- 2026-09-08 CURSUS wrote `a` …\n- 2026-09-08 VOCAB wrote `b` …\n")
+    led = Path(__file__).resolve().parents[1] / "ledger.py"
+    subprocess.run([sys.executable, str(led), "append", "--from", "CURSUS", "--to", "CARD", "--kind", "fact", "--ref", "-", "a fact for CARD"], env=world["env"], check=True, capture_output=True)
+    res = run("session_start.py", "", {"cwd": str(world["repo"]), "session_id": "s1", "source": "startup"}, world["env"])
+    ctx = res["hookSpecificOutput"]["additionalContext"]
+    assert "Inbox.md holds 2 unfolded row(s)" in ctx and "ledger: 1 row(s) addressed to CARD" in ctx
+    res2 = run("session_start.py", "", {"cwd": str(world["repo"]), "session_id": "s2", "source": "startup"}, world["env"])
+    assert "ledger: 1 row(s)" in res2["hookSpecificOutput"]["additionalContext"]    # re-announced until ACTED on
+    rid = json.loads(subprocess.run([sys.executable, str(led), "read", "--to", "CARD", "--unacked", "--json"], env=world["env"], capture_output=True, text=True).stdout)[0]["id"]
+    subprocess.run([sys.executable, str(led), "ack", "--from", "CARD", rid], env=world["env"], check=True, capture_output=True)
+    res3 = run("session_start.py", "", {"cwd": str(world["repo"]), "session_id": "s3", "source": "startup"}, world["env"])
+    assert "ledger:" not in res3["hookSpecificOutput"]["additionalContext"]         # the ack is the receipt
+
+
+# ------------------------------------------------------------------------------ the ledger CLI ----
+def test_ledger_append_read_ack_check(world):
+    led = Path(__file__).resolve().parents[1] / "ledger.py"; env = world["env"]
+    def L(*a): return subprocess.run([sys.executable, str(led), *a], env=env, capture_output=True, text=True)
+    r1 = L("append", "--from", "CARD", "--to", "MINING-OPS", "--kind", "request", "--ref", "q:MN-2026-09-08-X-1", "please re-mine   S01E05"); assert r1.returncode == 0, r1.stderr
+    rid = r1.stdout.strip(); assert rid.startswith("N-") and rid.endswith("-0001")
+    r2 = L("append", "--from", "VOCAB", "--to", "MINING-OPS", "--kind", "fact", "--ref", "-", "second"); assert r2.stdout.strip().endswith("-0002")
+    rd = L("read", "--to", "MINING-OPS", "--since-cursor", "--json"); rows = json.loads(rd.stdout); assert [r["id"] for r in rows] == [rid, r2.stdout.strip()]
+    assert rows[0]["body"] == "please re-mine S01E05"
+    ack = L("ack", "--from", "MINING-OPS", rid); assert ack.returncode == 0 and ack.stdout.strip().endswith("-0003")
+    back = json.loads(L("read", "--to", "CARD", "--json").stdout); assert back[0]["kind"] == "read" and back[0]["ref"] == rid
+    assert L("ack", "--from", "MINING-OPS", "N-2026-01-01-9999").returncode != 0
+    assert L("check").returncode == 0
+    f = next((world["vault"] / "Channels" / "ledger").glob("*.tsv")); f.write_text(f.read_text() + "garbage line\n")
+    assert L("check").returncode == 1
+
+
+# ------------------------------------------------------------------ copy-on-write clone worktrees ----
+def test_clone_worktree_create_and_clean_remove(tmp_path):
+    src = tmp_path / "src"; src.mkdir(); subprocess.run(["git", "init", "-q", str(src)], check=True)
+    (src / "a.txt").write_text("a\n"); (src / "untracked.bin").write_bytes(b"u")
+    subprocess.run(["git", "-C", str(src), "add", "a.txt"], check=True)
+    subprocess.run(["git", "-C", str(src), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "one"], check=True)
+    env = dict(os.environ, GEDAECHTNIS_WORKTREES=str(tmp_path / "wts"), GEDAECHTNIS_NO_TRASH="1")
+    wt = Path(__file__).resolve().parents[1] / "hooks" / "worktree.py"
+    p = subprocess.run([sys.executable, str(wt), "create"], input=json.dumps({"cwd": str(src), "name": "feat/x"}), capture_output=True, text=True, env=env)
+    clone = Path(p.stdout.strip().splitlines()[-1]); assert clone.is_dir() and (clone / "untracked.bin").exists(), p.stderr
+    (clone / "b.txt").write_text("b\n"); subprocess.run(["git", "-C", str(clone), "add", "b.txt"], check=True)
+    subprocess.run(["git", "-C", str(clone), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "two"], check=True)
+    p = subprocess.run([sys.executable, str(wt), "remove"], input=json.dumps({"cwd": str(src), "worktree_path": str(clone)}), capture_output=True, text=True, env=env)
+    assert p.returncode == 0 and not clone.exists(), p.stderr
+    refs = subprocess.run(["git", "-C", str(src), "for-each-ref", "--format=%(refname)", "refs/gedaechtnis/"], capture_output=True, text=True).stdout
+    assert "refs/gedaechtnis/feat-x" in refs
+    # a clone with NEW uncommitted work is never deleted
+    p = subprocess.run([sys.executable, str(wt), "create"], input=json.dumps({"cwd": str(src), "name": "dirty"}), capture_output=True, text=True, env=env)
+    clone2 = Path(p.stdout.strip().splitlines()[-1]); (clone2 / "unique.txt").write_text("keep me\n")
+    p = subprocess.run([sys.executable, str(wt), "remove"], input=json.dumps({"cwd": str(src), "worktree_path": str(clone2)}), capture_output=True, text=True, env=env)
+    assert clone2.exists() and "unique to the clone" in p.stderr
+
+
+# ------------------------------------------------ council iteration-1 findings (blind seat), fixed ----
+def test_the_SHARED_top_level_folder_is_never_read_as_a_region(world, monkeypatch):
+    """`Global/` is shared memory, not a region, and the difference is load-bearing: read as one,
+    it is claimed by whichever lane boots first and every other lane serializes behind it. The
+    rule is `config.non_region_tops()`; this is the case that reddens when that set is emptied —
+    before it, only the importer's own suite caught that (reviewer, 2026-09-20)."""
+    for k, v in world["env"].items():
+        if k.startswith("GEDAECHTNIS_"):
+            monkeypatch.setenv(k, v)
+    sys.path.insert(0, str(HOOKS))
+    import config
+    assert "Global" in config.non_region_tops()
+    # a shared-folder file is attributable to NO region, so no foreign-write inbox row is minted
+    import importlib
+    chore = importlib.import_module("chore")
+    assert chore._inbox_target(world["vault"] / "Global" / "Map.md", str(world["repo"])) == (None, None)
+    # while an ordinary region's file IS attributed
+    assert chore._inbox_target(world["vault"] / "Toolkit" / "Position.md",
+                               str(world["repo"]))[0] == "Toolkit"
+
+
+def test_region_of_repo_handles_one_segment_region(world, tmp_path):
+    from pathlib import Path as P
+    import importlib.util, sys as _s
+    _s.modules.pop("config", None)   # common.py imports `config`; a copy cached by an earlier test would pin ITS vault
+    spec = importlib.util.spec_from_file_location("common_t", str(HOOKS / "common.py")); m = importlib.util.module_from_spec(spec)
+    _s.modules["common_t"] = m; os.environ["GEDAECHTNIS_VAULT"] = str(world["vault"]); spec.loader.exec_module(m)
+    r = tmp_path / ("atlas-" + "system"); r.mkdir(); (r / "CLAUDE.md").write_text(f"@{world['vault']}/Global/Map.md\n@{world['vault']}/Toolkit/Kernel.md\n")
+    assert m.region_of_repo(r) == "Toolkit"
+    r2 = tmp_path / "card"; r2.mkdir(); (r2 / "CLAUDE.md").write_text(f"@{world['vault']}/Studio/Cards/Kernel.md\n")
+    assert m.region_of_repo(r2) == "Studio/Cards"
+
+def test_bash_writes_go_through_the_partition_door(world):
+    v = world["vault"]; world["state"].mkdir(parents=True, exist_ok=True); (world["state"] / "partition.mode").write_text("deny")
+    assert decision(bash(world, f"echo hi >> {v}/Toolkit/Position.md")) == "deny"
+    assert decision(bash(world, f"sed -i '' 's/a/b/' {v}/Toolkit/Position.md")) == "deny"
+    assert decision(bash(world, f"cp /tmp/x.md {v}/Toolkit/Position.md")) == "deny"
+    assert bash(world, f"echo hi >> {v}/Studio/Cards/Position.md") is None                     # own lane
+    assert decision(bash(world, f"echo '- 2026-09-08 CARD x' >> {v}/Toolkit/Inbox.md")) == "deny"      # a Bash append is unchecked: refused
+    assert decision(bash(world, f"echo x > {v}/Toolkit/Inbox.md")) == "deny"                              # overwrite of a shared surface
+    assert decision(bash(world, f"touch {v}/Council/Position.md")) == "deny"                             # stem rule via Bash
+
+def test_umbrella_shared_files_are_append_only_even_for_declaring_lanes(world):
+    v = world["vault"]; (v / "Studio" / "Position.md").write_text("# Studio Position\n\n- old\n")
+    marker = world["repo"] / ".atlas-lane"; marker.write_text(marker.read_text() + "path: Studio/Position.md\n")
+    world["state"].mkdir(parents=True, exist_ok=True); (world["state"] / "partition.mode").write_text("deny")
+    f = v / "Studio" / "Position.md"
+    ok = run("gate.py", "write", {"cwd": str(world["repo"]), "tool_name": "Edit", "session_id": "t", "tool_input": {
+        "file_path": str(f), "old_string": "- old\n", "new_string": "- old\n- CARD: new line\n"}}, world["env"])
+    assert ok is None
+    bad = run("gate.py", "write", {"cwd": str(world["repo"]), "tool_name": "Edit", "session_id": "t", "tool_input": {
+        "file_path": str(f), "old_string": "- old", "new_string": "- rewritten"}}, world["env"])
+    assert decision(bad) == "deny"
+
+
+
+# ------------------------------------------------ council iteration-1 findings (Caspar, Melchior, Balthasar), fixed ----
+def test_quoted_semicolon_in_commit_message_is_not_a_bare_commit(world):
+    v = world["vault"]
+    assert bash(world, f"git -C {v} commit -m 'fix a; b | c' -- Global/Map.md") is None
+    heredoc = "\n".join([f'git -C {v} commit -m "$(cat <<' + "'EOF'", "one; two | three", "EOF", ')" -- Global/Map.md'])
+    assert bash(world, heredoc) is None
+
+def test_commit_am_and_bash_c_and_git_dir_are_caught(world):
+    v = world["vault"]
+    assert decision(bash(world, f'git -C {v} commit -am "x" -- Global/Map.md')) == "deny"
+    assert decision(bash(world, f'bash -c "git -C {v} add -A"')) == "deny"
+    assert decision(bash(world, f"git --git-dir={v}/.git add -A")) == "deny"
+
+def test_git_rm_cached_is_not_a_data_deletion_but_the_pathspec_commit_trap_is_caught(world):
+    v = world["vault"]
+    res = bash(world, f"git -C {v} rm --cached -- x.md && git -C {v} commit -m 'untrack' -- x.md")
+    assert decision(res) == "deny" and "DISCARDS the staged deletion" in res["hookSpecificOutput"]["permissionDecisionReason"]
+    assert bash(world, f"git -C {v} rm --cached -- x.md; S=$(git -C {v} diff --cached --name-only); [ \"$S\" = x.md ] || exit 9; git -C {v} commit -F /tmp/m") is None
+
+def test_vault_cwd_session_is_the_owners_hand(world):
+    world["state"].mkdir(parents=True, exist_ok=True); (world["state"] / "partition.mode").write_text("deny")
+    assert write(world, world["vault"] / "Toolkit" / "Position.md", cwd=str(world["vault"])) is None
+
+def test_queue_continuation_must_be_keyed(world):
+    q = world["vault"] / "Queues" / "regions" / "other.md"; q.write_text("- [ ] `q:MN-2026-09-01-X-1` r | q:MN-2026-09-01-X-1\n")
+    world["state"].mkdir(parents=True, exist_ok=True); (world["state"] / "partition.mode").write_text("deny")
+    ok = run("gate.py", "write", {"cwd": str(world["repo"]), "tool_name": "Write", "session_id": "t", "tool_input": {"file_path": str(q), "content": q.read_text() + "  - note: from CARD\n"}}, world["env"])
+    assert ok is None
+    bad = run("gate.py", "write", {"cwd": str(world["repo"]), "tool_name": "Write", "session_id": "t", "tool_input": {"file_path": str(q), "content": q.read_text() + "  - free prose\n"}}, world["env"])
+    assert decision(bad) == "deny"
+
+def test_clone_remove_keeps_side_branches_and_files_in_untracked_dirs(tmp_path):
+    src = tmp_path / "src"; src.mkdir(); subprocess.run(["git", "init", "-q", str(src)], check=True)
+    (src / "a.txt").write_text("a\n"); (src / "scratch").mkdir(); (src / "scratch" / "old.txt").write_text("o\n")
+    subprocess.run(["git", "-C", str(src), "add", "a.txt"], check=True)
+    subprocess.run(["git", "-C", str(src), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "one"], check=True)
+    env = dict(os.environ, GEDAECHTNIS_WORKTREES=str(tmp_path / "wts"), GEDAECHTNIS_NO_TRASH="1")
+    wt = Path(__file__).resolve().parents[1] / "hooks" / "worktree.py"
+    p = subprocess.run([sys.executable, str(wt), "create"], input=json.dumps({"cwd": str(src), "name": "side"}), capture_output=True, text=True, env=env)
+    clone = Path(p.stdout.strip().splitlines()[-1])
+    subprocess.run(["git", "-C", str(clone), "checkout", "-q", "-b", "side-branch"], check=True)
+    (clone / "b.txt").write_text("b\n"); subprocess.run(["git", "-C", str(clone), "add", "b.txt"], check=True)
+    subprocess.run(["git", "-C", str(clone), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "side"], check=True)
+    subprocess.run(["git", "-C", str(clone), "checkout", "-q", "-"], check=True)
+    p = subprocess.run([sys.executable, str(wt), "remove"], input=json.dumps({"cwd": str(src), "worktree_path": str(clone)}), capture_output=True, text=True, env=env)
+    refs = subprocess.run(["git", "-C", str(src), "for-each-ref", "--format=%(refname)", "refs/gedaechtnis/"], capture_output=True, text=True).stdout
+    assert re.search(r"refs/gedaechtnis/side-[0-9-]+/branches/side-branch", refs), refs
+    p = subprocess.run([sys.executable, str(wt), "create"], input=json.dumps({"cwd": str(src), "name": "dirt"}), capture_output=True, text=True, env=env)
+    clone2 = Path(p.stdout.strip().splitlines()[-1]); (clone2 / "scratch" / "new.txt").write_text("unique\n")
+    p = subprocess.run([sys.executable, str(wt), "remove"], input=json.dumps({"cwd": str(src), "worktree_path": str(clone2)}), capture_output=True, text=True, env=env)
+    assert clone2.exists() and "unique to the clone" in p.stderr
+
+
+def test_every_redirect_spelling_is_seen_by_the_partition_door(world):
+    v = world["vault"]; world["state"].mkdir(parents=True, exist_ok=True); (world["state"] / "partition.mode").write_text("deny")
+    for form in ("1>", "&>", ">|", "2>", "1>>", "&>>"):
+        cmd = f"echo x {form} {v}/Toolkit/Position.md"
+        assert decision(bash(world, cmd)) == "deny", form
+    assert decision(bash(world, f"echo x >|{v}/Toolkit/Position.md")) == "deny"
+    assert bash(world, f"echo x 2>&1 | grep y") is None                                   # fd dup is not a file write
+    assert decision(bash(world, f"echo '- 2026-09-09 CARD x' 1>> {v}/Toolkit/Inbox.md")) == "deny"   # any spelling: refused
+
+
+# ------------------------------------------------ council iteration-2 findings (Melchior, Caspar), fixed ----
+def test_mv_out_of_the_vault_asks(world):
+    v = world["vault"]
+    assert decision(bash(world, f"mv {v}/Toolkit/Canon.md /tmp/")) == "ask"
+    assert bash(world, f"mv /tmp/x.md {v}/Studio/Cards/notes.md") is None      # into own lane: fine
+
+def test_fleet_roster_is_append_only_for_everyone(world):
+    v = world["vault"]; r = v / "Global" / "fleet-roster.md"; r.write_text("# roster\n\n```fleet-roster\nlane: CURSUS\nrepo: Projects/x\n```\n\ntrailing prose\n")
+    world["state"].mkdir(parents=True, exist_ok=True); (world["state"] / "partition.mode").write_text("deny")
+    cur = r.read_text(); inside = cur.replace("repo: Projects/x\n```", "repo: Projects/x\npath: Queues/new\n```")
+    under_other = run("gate.py", "write", {"cwd": str(world["repo"]), "tool_name": "Write", "session_id": "t", "tool_input": {"file_path": str(r), "content": inside}}, world["env"])
+    assert decision(under_other) == "deny"                                                    # CARD appending under CURSUS's block: refused
+    own_block = cur.replace("repo: Projects/x\n```", "repo: Projects/x\nlane: CARD\nrepo: Projects/card\n```")
+    ok = run("gate.py", "write", {"cwd": str(world["repo"]), "tool_name": "Write", "session_id": "t", "tool_input": {"file_path": str(r), "content": own_block}}, world["env"])
+    assert ok is None                                                                         # a NEW block for the appender's own lane
+    r.write_text(own_block); cur = own_block
+    inside_own = cur.replace("repo: Projects/card\n```", "repo: Projects/card\npath: Studio/Cards\n```")
+    assert run("gate.py", "write", {"cwd": str(world["repo"]), "tool_name": "Write", "session_id": "t", "tool_input": {"file_path": str(r), "content": inside_own}}, world["env"]) is None
+    foreign_head = cur.replace("repo: Projects/card\n```", "repo: Projects/card\nlane: VOCAB\nrepo: Projects/v\n```")
+    assert decision(run("gate.py", "write", {"cwd": str(world["repo"]), "tool_name": "Write", "session_id": "t", "tool_input": {"file_path": str(r), "content": foreign_head}}, world["env"])) == "deny"
+    past = run("gate.py", "write", {"cwd": str(world["repo"]), "tool_name": "Write", "session_id": "t", "tool_input": {"file_path": str(r), "content": cur + "path: Queues/new\n"}}, world["env"])
+    assert decision(past) == "deny"                                                           # a row after the fence: invisible to marker_check
+    edit_ok = run("gate.py", "write", {"cwd": str(world["repo"]), "tool_name": "Edit", "session_id": "t", "tool_input": {"file_path": str(r), "old_string": "repo: Projects/card\n", "new_string": "repo: Projects/card\npath: Queues/other\n"}}, world["env"])
+    assert edit_ok is None
+    bad = run("gate.py", "write", {"cwd": str(world["repo"]), "tool_name": "Write", "session_id": "t", "tool_input": {"file_path": str(r), "content": "lane: CARD\nrepo: mine\n"}}, world["env"])
+    assert decision(bad) == "deny"                                                            # a rewrite, even though Global/ is declared
+
+def test_git_rm_cached_does_not_ask(world):
+    v = world["vault"]
+    assert bash(world, f"git -C {v} rm --cached -- x.md; S=$(git -C {v} diff --cached --name-only); [ \"$S\" = x.md ] || exit 9; git -C {v} commit -F /tmp/m") is None
+
+def test_foreign_shared_append_is_committed_by_the_chore(world):
+    v = world["vault"]; q = v / "Queues" / "regions" / "other.md"
+    q.write_text("- [ ] `q:MN-2026-09-01-X-1` r | q:MN-2026-09-01-X-1\n")
+    subprocess.run(["git", "-C", str(v), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(v), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "seed"], check=True)
+    q.write_text(q.read_text() + "- [ ] `q:MN-2026-09-09-NEW-1` from CARD | q:MN-2026-09-09-NEW-1\n")
+    res = run("chore.py", "write", {"cwd": str(world["repo"]), "tool_name": "Write", "session_id": "t", "tool_input": {"file_path": str(q), "content": q.read_text()}}, world["env"])
+    assert "committed as atlas@local" in res["hookSpecificOutput"]["additionalContext"]
+    log = subprocess.run(["git", "-C", str(v), "log", "-1", "--format=%an %s"], capture_output=True, text=True).stdout
+    assert log.startswith("atlas queue: append by CARD")
+
+def test_in_partition_bash_write_is_logged_as_ok(world):
+    v = world["vault"]; bash(world, f"echo x >> {v}/Studio/Cards/Position.md")
+    assert "ok\tCARD\tStudio/Cards/Position.md\tbash=redirect-append" in (world["state"] / "partition.log").read_text()
+
+
+# ------------------------------------------------ council iteration-2 findings (Balthasar), fixed ----
+def test_flags_inside_the_message_are_not_flags(world):
+    v = world["vault"]
+    assert bash(world, f"git -C {v} commit -m 'never use -a or --amend here' -- Global/Errata.md") is None
+    assert bash(world, f'git -C {v} commit -m "the -am trap" -- Global/Errata.md') is None
+
+def test_vault_cwd_bash_write_is_the_owners_hand(world):
+    world["state"].mkdir(parents=True, exist_ok=True); (world["state"] / "partition.mode").write_text("deny")
+    v = world["vault"]
+    assert bash(world, f"echo x >> {v}/Toolkit/Position.md", cwd=str(v)) is None
+
+def test_compact_does_not_restamp_vault_head(world):
+    import hashlib
+    run("session_start.py", "", {"cwd": str(world["repo"]), "session_id": "s1", "source": "startup"}, world["env"])
+    key = hashlib.sha1(str(world["repo"]).encode()).hexdigest()[:10]
+    f = world["state"] / f"session-start-{key}.json"; j = json.loads(f.read_text()); j["vault_head"] = "0" * 40; f.write_text(json.dumps(j))
+    run("session_start.py", "", {"cwd": str(world["repo"]), "session_id": "s1", "source": "compact"}, world["env"])
+    assert json.loads(f.read_text())["vault_head"] == "0" * 40
+    run("session_start.py", "", {"cwd": str(world["repo"]), "session_id": "s2", "source": "startup"}, world["env"])
+    assert json.loads(f.read_text())["vault_head"] != "0" * 40
+
+def test_clone_is_not_unique_when_only_the_source_moved_on(tmp_path):
+    src = tmp_path / "src"; src.mkdir(); subprocess.run(["git", "init", "-q", str(src)], check=True)
+    (src / "a.txt").write_text("a\n"); (src / "log.txt").write_text("1\n")
+    subprocess.run(["git", "-C", str(src), "add", "a.txt", "log.txt"], check=True)
+    subprocess.run(["git", "-C", str(src), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "one"], check=True)
+    (src / "log.txt").write_text("1\n2\n")                                        # dirty in the source at clone time
+    env = dict(os.environ, GEDAECHTNIS_WORKTREES=str(tmp_path / "wts"), GEDAECHTNIS_NO_TRASH="1")
+    wt = Path(__file__).resolve().parents[1] / "hooks" / "worktree.py"
+    p = subprocess.run([sys.executable, str(wt), "create"], input=json.dumps({"cwd": str(src), "name": "x"}), capture_output=True, text=True, env=env)
+    clone = Path(p.stdout.strip().splitlines()[-1])
+    (src / "log.txt").write_text("1\n2\n3\n")                                     # the SOURCE moves on after cloning
+    p = subprocess.run([sys.executable, str(wt), "remove"], input=json.dumps({"cwd": str(src), "worktree_path": str(clone)}), capture_output=True, text=True, env=env)
+    assert not clone.exists(), p.stderr                                            # nothing unique to the clone: removed
+
+
+# ------------------------------------------------ council closure round (Melchior), fixed ----
+def test_git_rm_without_cached_in_the_vault_asks(world):
+    v = world["vault"]
+    assert decision(bash(world, f"git -C {v} rm -r -- Studio/Cards")) == "ask"
+    assert bash(world, f"git -C {v} rm --cached -- x.md; S=$(git -C {v} diff --cached --name-only); [ \"$S\" = x.md ] || exit 9; git -C {v} commit -F /tmp/m") is None
+
+def test_mv_out_asks_from_the_vault_cwd_too(world):
+    v = world["vault"]
+    assert decision(bash(world, f"mv {v}/Toolkit/Canon.md /tmp/", cwd=str(v))) == "ask"
+
+def test_roster_rewrite_via_sed_is_denied(world):
+    v = world["vault"]; (v / "Global" / "fleet-roster.md").write_text("lane: CURSUS\n")
+    world["state"].mkdir(parents=True, exist_ok=True); (world["state"] / "partition.mode").write_text("deny")
+    assert decision(bash(world, f"sed -i '' 's/CURSUS/CARD/' {v}/Global/fleet-roster.md")) == "deny"
+    (v / "Global" / "fleet-roster.md").write_text("```fleet-roster\nlane: CURSUS\n```\n")
+    assert decision(bash(world, f"echo 'path: Queues/new' >> {v}/Global/fleet-roster.md")) == "deny"
+
+
+def test_session_start_is_keyed_by_session_id(world):
+    import hashlib
+    run("session_start.py", "", {"cwd": str(world["repo"]), "session_id": "guardian", "source": "startup"}, world["env"])
+    g = world["state"] / "session-start-guardian.json"; j = json.loads(g.read_text()); j["vault_head"] = "1" * 40; g.write_text(json.dumps(j))
+    run("session_start.py", "", {"cwd": str(world["repo"]), "session_id": "worker", "source": "startup"}, world["env"])
+    assert json.loads(g.read_text())["vault_head"] == "1" * 40                                   # the worker did not overwrite the guardian's record
+    assert (world["state"] / "session-start-worker.json").is_file()
+
+def test_heredoc_message_with_inner_quote_is_not_refused(world):
+    v = world["vault"]
+    cmd = "\n".join([f'git -C {v} commit -m "$(cat <<' + "'EOF'", 'he said "no -a here"; fine', "EOF", ')" -- Global/Map.md'])
+    assert bash(world, cmd) is None
+
+
+# ---------------------------------------------------------------- the boot-cost fact ----
+# A session cannot see its own boot: the @-imported files arrive as context with no size
+# attached. The hook measures the chain and states it. These controls hold the measurement
+# honest — the SET of files walked, the SUM over them, and the two ways a real chain goes
+# wrong (a dangling import, and one file reachable from both entrypoints).
+
+def _chain_world(world, tmp_path, home):
+    """A synthetic two-entrypoint chain of known sizes -> (env, expected_files).
+
+    `expected_files` is written out explicitly rather than derived from the walker, so the
+    assertion is an INDEPENDENT construction of the answer: if the closure walk visits a
+    different set, the count and the sum both move and the test says so.
+    """
+    home.mkdir(parents=True, exist_ok=True)
+    leaf_a = home / "leaf-a.md"; leaf_a.write_bytes(b"a" * 1_000)
+    deep = home / "deep.md"; deep.write_bytes(b"d" * 700)            # reached via leaf_b, 2 hops
+    leaf_b = home / "leaf-b.md"
+    leaf_b.write_bytes(b"@%s\n" % str(deep).encode() + b"b" * 2_500)
+    user_md = home / "CLAUDE.md"
+    user_md.write_text("prose that mentions @-imports but is not one\n@%s\n@%s\n" % (leaf_a, leaf_b),
+                       encoding="utf-8")
+    repo_md = world["repo"] / "CLAUDE.md"
+    repo_leaf = home / "repo-leaf.md"; repo_leaf.write_bytes(b"r" * 4_242)
+    repo_md.write_text("@%s\n" % repo_leaf, encoding="utf-8")
+    env = dict(world["env"], GEDAECHTNIS_USER_MEMORY=str(user_md))
+    return env, [user_md, leaf_a, leaf_b, deep, repo_md, repo_leaf]
+
+
+def test_session_start_reports_the_boot_chain_cost(world, tmp_path):
+    env, expected = _chain_world(world, tmp_path, tmp_path / "home")
+    total = sum(p.stat().st_size for p in expected)
+    res = run("session_start.py", "", {"cwd": str(world["repo"]), "session_id": "b1",
+                                       "source": "startup"}, env)
+    ctx = res["hookSpecificOutput"]["additionalContext"]
+    assert f"boot: {total:,} B across {len(expected)} files (@-import chain)" in ctx, ctx
+    j = json.loads((world["state"] / "session-start-b1.json").read_text())
+    assert j["boot_bytes"] == total and j["boot_files"] == len(expected)
+    # and the walk really did follow BOTH entrypoints and a second hop, not just the entry files
+    assert total > 1_000 + 2_500 + 700 + 4_242
+
+
+def test_a_missing_import_is_skipped_not_fatal(world, tmp_path):
+    """Claude Code does not fail a session over a dangling @-import, so neither may this. The
+    line still appears, the total simply does not include what is not there."""
+    home = tmp_path / "home"
+    env, expected = _chain_world(world, tmp_path, home)
+    user_md = home / "CLAUDE.md"
+    with open(user_md, "a", encoding="utf-8") as fh:
+        fh.write("@%s\n" % (home / "vanished.md"))
+    res = run("session_start.py", "", {"cwd": str(world["repo"]), "session_id": "b2",
+                                       "source": "startup"}, env)
+    ctx = res["hookSpecificOutput"]["additionalContext"]
+    j = json.loads((world["state"] / "session-start-b2.json").read_text())
+    assert j["boot_files"] == len(expected), "the missing file is skipped, not counted"
+    assert f"across {len(expected)} files" in ctx
+    assert j["boot_bytes"] == user_md.stat().st_size + sum(
+        p.stat().st_size for p in expected if p != user_md)
+
+
+def test_a_file_in_both_chains_is_counted_once(world, tmp_path):
+    """The common real case: the repo's CLAUDE.md and the user's both reach the same vault
+    file. Counting it twice would overstate every boot on every fleet repo."""
+    home = tmp_path / "home"; home.mkdir(parents=True)
+    shared = home / "shared.md"; shared.write_bytes(b"s" * 3_000)
+    user_md = home / "CLAUDE.md"; user_md.write_text("@%s\n" % shared, encoding="utf-8")
+    repo_md = world["repo"] / "CLAUDE.md"; repo_md.write_text("@%s\n" % shared, encoding="utf-8")
+    env = dict(world["env"], GEDAECHTNIS_USER_MEMORY=str(user_md))
+    run("session_start.py", "", {"cwd": str(world["repo"]), "session_id": "b3",
+                                 "source": "startup"}, env)
+    j = json.loads((world["state"] / "session-start-b3.json").read_text())
+    assert j["boot_files"] == 3, "user CLAUDE.md + repo CLAUDE.md + ONE shared file"
+    assert j["boot_bytes"] == 3_000 + user_md.stat().st_size + repo_md.stat().st_size
+
+
+def test_an_import_cycle_terminates(world, tmp_path):
+    home = tmp_path / "home"; home.mkdir(parents=True)
+    a = home / "a.md"; b = home / "b.md"
+    a.write_text("@%s\n" % b, encoding="utf-8")
+    b.write_text("@%s\n" % a, encoding="utf-8")
+    user_md = home / "CLAUDE.md"; user_md.write_text("@%s\n" % a, encoding="utf-8")
+    env = dict(world["env"], GEDAECHTNIS_USER_MEMORY=str(user_md))
+    run("session_start.py", "", {"cwd": str(world["repo"]), "session_id": "b4",
+                                 "source": "startup"}, env)
+    j = json.loads((world["state"] / "session-start-b4.json").read_text())
+    assert j["boot_files"] == 3                       # CLAUDE.md + a + b, each once
+
+
+def test_no_chain_at_all_says_nothing_rather_than_zero(world):
+    """The `world` fixture has neither a user CLAUDE.md nor a repo one. A '0 B across 0 files'
+    line would read as a measured empty chain; nothing was measured, so nothing is said."""
+    res = run("session_start.py", "", {"cwd": str(world["repo"]), "session_id": "b5",
+                                       "source": "startup"}, world["env"])
+    assert "boot:" not in res["hookSpecificOutput"]["additionalContext"]
+    j = json.loads((world["state"] / "session-start-b5.json").read_text())
+    assert j["boot_files"] == 0 and j["boot_bytes"] == 0
+
+
+def test_trailing_pathspec_without_double_dash_is_path_limited(world):
+    """Council 2 dad test (Balthasar iter 1): `git commit -m x <path>` is a path-limited commit in
+    git's own grammar and must not be refused as bare; a truly bare commit still is."""
+    v = world["vault"]
+    assert bash(world, f"git -C {v} commit -m 'x' Global/Map.md") is None
+    assert bash(world, f"git -C {v} commit -m 'x' -- Global/Map.md") is None
+    assert decision(bash(world, f"git -C {v} commit -m 'x'")) == "deny"
+    assert decision(bash(world, f"git -C {v} commit -F /tmp/msg")) == "deny"          # -F consumed its value; still bare
+    assert bash(world, f"git -C {v} commit -F /tmp/msg Toolkit/Position.md") is None
+# ------------------------------------------------------------ the injected operating rules ----
+RULES_MARKER = "A decision becomes settled"          # a line of rules/operating-rules.md itself
+
+
+def test_operating_rules_are_injected_at_startup(world):
+    """POSITIVE control: a starting session is handed the memory-writing discipline, so a
+    stranger's CLAUDE.md can stay empty."""
+    res = run("session_start.py", "", {"cwd": str(world["repo"]), "session_id": "r1",
+                                       "source": "startup"}, world["env"])
+    ctx = res["hookSpecificOutput"]["additionalContext"]
+    assert RULES_MARKER in ctx and "Cleanup YYYY-MM-DD/" in ctx and "Needs a decision:" in ctx
+    assert "Lane CARD" in ctx                        # the facts block is still there
+
+
+def test_operating_rules_are_not_repeated_on_resume_or_compact(world):
+    """NEGATIVE control: a session that already has them pays no tokens to be told twice."""
+    for source in ("resume", "compact"):
+        res = run("session_start.py", "", {"cwd": str(world["repo"]), "session_id": "r2",
+                                           "source": source}, world["env"])
+        ctx = res["hookSpecificOutput"]["additionalContext"]
+        assert RULES_MARKER not in ctx, source
+        assert "Lane CARD" in ctx, source            # everything else is unchanged
+
+
+def test_operating_rules_can_be_switched_off(world):
+    """NEGATIVE control: an install whose own CLAUDE.md already says all this turns it off."""
+    env = dict(world["env"], GEDAECHTNIS_INJECT_RULES="0")
+    res = run("session_start.py", "", {"cwd": str(world["repo"]), "session_id": "r3",
+                                       "source": "startup"}, env)
+    ctx = res["hookSpecificOutput"]["additionalContext"]
+    assert RULES_MARKER not in ctx and "Lane CARD" in ctx
+
+
+def test_operating_rules_file_is_generic_and_small():
+    """The file is loaded into every session that starts, so its size is a contract; and it
+    speaks the six-file vocabulary rather than any one vault's private names.
+
+    The ceiling was 2,500 B and is 4,500 B since the questions bullet landed: the rules text is
+    where "nothing else asks the user anything" has to be stated, and a budget that pushes that
+    sentence out buys a few hundred bytes at the price of the discipline it exists to carry.
+    What a session is actually handed is the ASSEMBLED text (row R5), which is this file or less;
+    `test_rules.py` owns that and asserts every standing rule survives every vault shape.
+
+    ★ Since WP3 (DESIGN §6) each of the six core files is named as its DISPLAY name, bolded, with
+    the stem once alongside — "**Decisions** (`Canon.md`)" — not the bare stem bolded; the display
+    name is what a session should call the file, the stem is what it is on disk."""
+    rules = Path(__file__).resolve().parents[1] / "rules" / "operating-rules.md"
+    text = rules.read_text(encoding="utf-8")
+    assert len(text.encode("utf-8")) <= 4500
+    for stem, disp in (("Map", "Index"), ("Position", "Status"), ("Canon", "Decisions"),
+                       ("Patterns", "Patterns"), ("Errata", "Mistakes"), ("Aporia", "Open questions")):
+        assert f"**{disp}**" in text, disp
+        assert f"`{stem}.md`" in text, stem
+
+
+# The questions contract moved to `test_rules.py` at row R5, and the move is the finding.
+# This test asserted THREE questions, the third being the cleanup approval — which row R2 had
+# already removed from the product. It stayed green for as long as the contradiction existed,
+# because it pinned what the rules file SAID against the rules file itself. Its replacement
+# asserts the count AND that no question exists in `cleanup.py`, so neither half can move alone.
+
+
+def test_commit_dot_is_breadth_and_a_quoted_path_is_a_pathspec(world):
+    """Council 2, Balthasar iteration 2: `commit -m x .` must not pass as path-limited; a quoted path must."""
+    v = world["vault"]
+    assert decision(bash(world, f"git -C {v} commit -m 'x' .")) == "deny"
+    assert bash(world, f"git -C {v} commit -m 'x' 'Global/Map.md'") is None
+    assert bash(world, f'git -C {v} commit -m "x" -- "Toolkit/Position.md"') is None
+
+
+def test_owner_data_classes_are_scoped_unless_protect_everywhere(world, monkeypatch):
+    """A stranger deleting his own build/media/ or a cache outside the vault is not asked; the vault
+    and the Trash are always protected; the owner turns protect_everywhere on in config."""
+    v = world["vault"]
+    world["env"].pop("GEDAECHTNIS_PROTECT_EVERYWHERE", None)
+    assert bash(world, "rm -rf /tmp/somewhere/build/media/") is None
+    assert bash(world, "rm /tmp/x/whisper_cache.json") is None
+    assert decision(bash(world, f"rm -rf {v}/Studio/AnkiAutoMiner/media/")) == "ask"
+    assert decision(bash(world, "rm -rf ~/.Trash/*")) == "ask"
+    world["env"]["GEDAECHTNIS_PROTECT_EVERYWHERE"] = "1"
+    assert decision(bash(world, "rm -rf /tmp/somewhere/build/media/")) == "ask"
+
+
+def test_launch_model_door_is_off_for_strangers(world, monkeypatch):
+    world["env"].pop("GEDAECHTNIS_REQUIRE_LAUNCH_MODEL", None)
+    assert bash(world, "claude -p 'hello'") is None
+    world["env"]["GEDAECHTNIS_REQUIRE_LAUNCH_MODEL"] = "1"
+    assert decision(bash(world, "claude -p 'hello'")) == "deny"
+
+
+def test_the_vault_is_protected_whatever_it_is_called(world):
+    """Council 2 closure (Balthasar): the never-delete-the-vault rule matched the literal `/Atlas`."""
+    v = world["vault"]                                  # the world's vault is NOT called Atlas
+    assert decision(bash(world, f"rm -rf {v}/Recipes/media/")) == "ask"
+    assert decision(bash(world, f"rm -rf {v}")) == "ask"
+    assert decision(bash(world, f"rm -rf ~/{v.name}/Recipes")) == "ask"
+
+
+# ------------------------------------------- the display-name-as-filename door (DESIGN §6.3) ----
+# The display layer shows `Canon.md` as "Decisions". A model told to "write it to Decisions" may
+# create `Decisions.md`; then the region has two files for one role and every ROLE_STEMS consumer
+# sees only one of them. POSITIVE controls: every display name, in every language column, under
+# every separator spelling. NEGATIVE controls: the real stems, a stranger's own files, an existing
+# file, a non-markdown file.
+
+def wwrite(w, path, content="x", cwd=None, env=None):
+    """A `Write` creating `path` — the shape the door actually meets."""
+    return run("gate.py", "write", {"cwd": cwd or str(w["repo"]), "tool_name": "Write", "session_id": "t",
+                                    "tool_input": {"file_path": str(path), "content": content}}, env or w["env"])
+
+
+def reason(res):
+    return (res or {}).get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
+
+
+def test_display_name_as_filename_is_denied_naming_the_stem_and_the_path(world):
+    """PROVES: creating `Decisions.md` is refused, and the deny carries both halves a model needs
+    to recover — which stem the display name means, and the exact path to write instead."""
+    region = world["vault"] / "Studio" / "Cards"
+    res = wwrite(world, region / "Decisions.md")
+    assert decision(res) == "deny"
+    r = reason(res)
+    assert "`Canon.md`" in r and '"Decisions"' in r
+    assert "`Studio/Cards/Canon.md`" in r
+
+
+def test_the_door_reads_every_language_column_whatever_language_is_set(world):
+    """PROVES [R4]: `Entscheidungen.md` and `Fehler.md` are denied under `en` exactly as their
+    English twins are — the door is a fact about the TABLE, not about the configured language."""
+    region = world["vault"] / "Studio" / "Cards"
+    env = dict(world["env"], GEDAECHTNIS_LANGUAGE="en")
+    assert decision(wwrite(world, region / "Entscheidungen.md", env=env)) == "deny"
+    assert "`Canon.md`" in reason(wwrite(world, region / "Entscheidungen.md", env=env))
+    assert decision(wwrite(world, region / "Fehler.md", env=env)) == "deny"
+    assert "`Errata.md`" in reason(wwrite(world, region / "Fehler.md", env=env))
+
+
+@pytest.mark.parametrize("name,stem", [("Mistakes.md", "Errata"), ("open-questions.md", "Aporia"),
+                                       ("Open Questions.md", "Aporia"), ("open_questions.md", "Aporia"),
+                                       ("STATUS.md", "Position"), ("Index.md", "Map")])
+def test_the_door_folds_case_and_separators(world, name, stem):
+    """PROVES the folding: `-`/`_` become a space and case is ignored, so the spellings a model
+    actually produces are all caught, and each deny names its own stem."""
+    res = wwrite(world, world["vault"] / "Studio" / "Cards" / name)
+    assert decision(res) == "deny", name
+    assert "`%s.md`" % stem in reason(res), name
+
+
+@pytest.mark.parametrize("name", ["Canon.md", "Patterns.md", "Inbox.md", "notes.md",
+                                  "meeting-notes.md", "Decisions.json"])
+def test_the_door_leaves_real_stems_and_a_strangers_own_files_alone(world, name):
+    """NEGATIVE controls. `Canon.md`/`Patterns.md` are stems; `Inbox` is BOTH a stem and its own
+    display name, so the door must not eat the file its own chores create; `notes.md` is the
+    stranger's file and none of the door's business; `.json` is not a role file at all."""
+    assert wwrite(world, world["vault"] / "Studio" / "Cards" / name) is None, name
+
+
+def test_an_existing_display_named_file_is_someones_data_and_is_left_alone(world):
+    """NEGATIVE control on the NEW-file half: the door refuses a creation, never an edit. A
+    `Decisions.md` already on disk is data, and a door that denied writes to it would strand it."""
+    f = world["vault"] / "Studio" / "Cards" / "Decisions.md"
+    f.write_text("someone's real notes\n")
+    assert write(world, f) is None
+    # A whole-file `Write` to it IS refused — by D1, which owns every whole-file overwrite of an
+    # existing prose file, and never by the display door. The distinction matters: the display
+    # door's refusal would tell the stranger their file name is wrong, which it is not.
+    res = wwrite(world, f, content="more")
+    assert decision(res) == "deny" and "Whole-file Write" in reason(res)
+    assert "display names are never file names" not in reason(res)
+
+
+def test_a_bash_redirect_to_a_display_name_is_denied_too(world):
+    """PROVES the Bash half: the door is on the redirect/verb write path, not only Edit/Write."""
+    region = world["vault"] / "Studio" / "Cards"
+    res = bash(world, "echo hi > %s/Decisions.md" % region)
+    assert decision(res) == "deny"
+    assert "`Canon.md`" in reason(res) and "Bash write via redirect" in reason(res)
+    assert bash(world, "echo hi > %s/Canon.md" % region) is None
+
+
+# ------------------------------------ born on first write: the Map row chore (DESIGN §3.1) ----
+# NEW-FILE DETECTION: the PreToolUse gate stamps `<state>/pre-exists-<sha1(path)>` with 0/1 — the
+# last moment anything can still tell a creation from an edit — and the chore reads it back and
+# consumes it. No marker means "not proven new", so the row is never added on a guess.
+
+MAP = """# UkrainianCard — Map
+
+## Purpose
+
+What this project is for.
+
+## Files in this folder
+
+- [[Position|Status]] — where it stands now
+- [[Canon|Decisions]] — settled, with reasons
+
+Other files appear here as they are needed; nothing has to be created in advance.
+"""
+
+
+def new_file(w, path, content="x", tool="Write", env=None):
+    """The real three-step sequence: gate sees the path absent, the tool creates it, the chore runs."""
+    payload = {"cwd": str(w["repo"]), "tool_name": tool, "session_id": "t",
+               "tool_input": {"file_path": str(path), "content": content}}
+    env = env or w["env"]
+    run("gate.py", "write", payload, env)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content)
+    return run("chore.py", "write", payload, env), payload
+
+
+def ctx(res):
+    return (res or {}).get("hookSpecificOutput", {}).get("additionalContext", "")
+
+
+def test_a_new_role_file_gets_exactly_one_map_row_after_the_last_existing_row(world):
+    """PROVES the birth rule: writing `Eidos.md` puts one row in the region's Map, in display-name
+    form, after the last existing row and before the trailing paragraph — and says so once."""
+    region = world["vault"] / "Studio" / "Cards"
+    (region / "Map.md").write_text(MAP)
+    res, _ = new_file(world, region / "Eidos.md", "# Architecture\n")
+    text = (region / "Map.md").read_text()
+    lines = text.splitlines()
+    rows = [l for l in lines if l.startswith("- [[")]
+    assert rows == ["- [[Position|Status]] — where it stands now",
+                    "- [[Canon|Decisions]] — settled, with reasons",
+                    "- [[Eidos|Architecture]] — how it is built"]
+    assert lines[lines.index(rows[-1]) + 1].strip() == ""          # the trailing paragraph is untouched
+    assert "Other files appear here" in text
+    assert "- [[Eidos|Architecture]] — how it is built" in ctx(res)
+
+
+def test_the_map_row_is_added_once_however_often_the_write_is_repeated(world):
+    """PROVES idempotence on BOTH arms: the second chore call has no creation marker to read, and
+    a third call whose gate saw the file PRESENT is refused by the marker too. Byte-identical."""
+    region = world["vault"] / "Studio" / "Cards"
+    (region / "Map.md").write_text(MAP)
+    _, payload = new_file(world, region / "Eidos.md", "# Architecture\n")
+    once = (region / "Map.md").read_bytes()
+    again = run("chore.py", "write", payload, world["env"])        # same input, no gate in between
+    assert (region / "Map.md").read_bytes() == once
+    assert "Map.md" not in ctx(again)
+    run("gate.py", "write", payload, world["env"])                 # a gate call too: the file now EXISTS
+    assert run("chore.py", "write", payload, world["env"]) is None
+    assert (region / "Map.md").read_bytes() == once
+
+
+def test_no_map_is_written_where_the_region_has_none(world):
+    """NEGATIVE control: a region with no Map.md is left exactly as it is — the chore never
+    CREATES an index, because a file nobody asked for is a file nobody maintains."""
+    region = world["vault"] / "Studio" / "Cards"
+    res, _ = new_file(world, region / "Eidos.md", "# Architecture\n")
+    assert not (region / "Map.md").exists()
+    assert res is None
+
+
+def test_a_file_that_is_not_a_role_file_gets_no_row(world):
+    """NEGATIVE control: `notes.md` is the stranger's own file; the Map indexes role files."""
+    region = world["vault"] / "Studio" / "Cards"
+    (region / "Map.md").write_text(MAP)
+    res, _ = new_file(world, region / "notes.md", "free text\n")
+    assert (region / "Map.md").read_text() == MAP
+    assert res is None
+
+
+def test_a_stem_the_map_already_links_is_not_linked_twice(world):
+    """NEGATIVE control on the already-indexed arm, independent of the creation marker: a Map that
+    already points at Eidos under ANY display name is left byte-identical."""
+    region = world["vault"] / "Studio" / "Cards"
+    (region / "Map.md").write_text(MAP.replace(
+        "- [[Canon|Decisions]] — settled, with reasons",
+        "- [[Canon|Decisions]] — settled, with reasons\n- [[Eidos|Aufbau]] — wie es gebaut ist"))
+    before = (region / "Map.md").read_bytes()
+    res, _ = new_file(world, region / "Eidos.md", "# Architecture\n")
+    assert (region / "Map.md").read_bytes() == before
+    assert res is None
+
+
+def test_the_row_lands_only_when_the_file_is_new(world):
+    """PROVES the detection mechanism itself: the SAME Edit against an EXISTING `Eidos.md` — same
+    region, same stem, same Map — adds nothing, because the gate saw the path present."""
+    region = world["vault"] / "Studio" / "Cards"
+    (region / "Map.md").write_text(MAP)
+    eidos = region / "Eidos.md"
+    eidos.write_text("# Architecture\n")
+    payload = {"cwd": str(world["repo"]), "tool_name": "Edit", "session_id": "t",
+               "tool_input": {"file_path": str(eidos), "old_string": "", "new_string": "more"}}
+    run("gate.py", "write", payload, world["env"])
+    assert run("chore.py", "write", payload, world["env"]) is None
+    assert (region / "Map.md").read_text() == MAP
+
+
+def test_the_map_row_is_committed_iff_the_vault_already_has_a_commit(world, tmp_path):
+    """PROVES both arms of the commit rule init uses. With history: a path-limited commit lands and
+    the report names its sha. Without history: the row is still written, nothing is committed, and
+    the report does not claim a commit it did not make."""
+    region = world["vault"] / "Studio" / "Cards"
+    (region / "Map.md").write_text(MAP)
+    res, _ = new_file(world, region / "Eidos.md", "# Architecture\n")
+    assert "committed" in ctx(res)
+    log = subprocess.run(["git", "-C", str(world["vault"]), "log", "-1", "--format=%h %an", "--",
+                          "Studio/Cards/Map.md"], capture_output=True, text=True).stdout
+    assert "atlas" in log
+
+    v2 = tmp_path / "Vault2"
+    (v2 / "Studio" / "Cards").mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(v2)], check=True)     # a repo with NO commit yet
+    (v2 / "Studio" / "Cards" / "Map.md").write_text(MAP)
+    env = dict(world["env"], GEDAECHTNIS_VAULT=str(v2), GEDAECHTNIS_STATE_DIR=str(tmp_path / "state2"))
+    res2, _ = new_file(world, v2 / "Studio" / "Cards" / "Eidos.md", "# Architecture\n", env=env)
+    assert "- [[Eidos|Architecture]]" in (v2 / "Studio" / "Cards" / "Map.md").read_text()
+    assert "committed" not in ctx(res2)
+    assert subprocess.run(["git", "-C", str(v2), "rev-parse", "--verify", "-q", "HEAD"],
+                          capture_output=True).returncode != 0
+
+
+# ------------------------------------------- the inherited-tag door (MIRRORTAGS-1, 2026-09-10) ----
+# A public mirror clone inherits the tags of the private repo it was cloned from, and `git push
+# --tags` publishes the private commits they point at. Positive control: the push is refused, by
+# tag name. Negative control: the SAME command from a clone whose tags are all releases is allowed —
+# without that half the door would just be a ban on `--tags`, which is not the rule.
+
+def _git(*args, cwd=None):
+    return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *args],
+                          cwd=str(cwd) if cwd else None, capture_output=True, text=True,
+                          check=True, timeout=120)
+
+
+@pytest.fixture
+def mirror(tmp_path):
+    """A clone carrying one tag inherited from its upstream, exactly as the real mirror did."""
+    up = tmp_path / "upstream"; up.mkdir()
+    _git("init", "-q", "-b", "main", str(up))
+    (up / "hello.txt").write_text("hello\n", encoding="utf-8")
+    _git("add", "--", "hello.txt", cwd=up)
+    _git("commit", "-q", "-m", "root", "--", "hello.txt", cwd=up)
+    _git("tag", "cursus-phase1-start", cwd=up)
+    dst = tmp_path / "mirror"
+    _git("clone", "-q", str(up), str(dst))
+    assert _git("tag", "-l", cwd=dst).stdout.split() == ["cursus-phase1-start"]
+    return dst
+
+
+def _release_only(mirror):
+    _git("tag", "-d", "cursus-phase1-start", cwd=mirror)
+    _git("tag", "v0.1", cwd=mirror)
+    return mirror
+
+
+def test_push_tags_from_a_clone_with_an_inherited_tag_denied(world, mirror):
+    res = bash(world, f"git -C {mirror} push origin main --tags")
+    assert decision(res) == "deny"
+    assert "cursus-phase1-start" in json.dumps(res)
+
+
+def test_push_tags_is_denied_whatever_the_argument_order_and_from_the_cwd(world, mirror):
+    assert decision(bash(world, f"git -C {mirror} push --tags origin main")) == "deny"
+    assert decision(bash(world, f"git -C {mirror} push --follow-tags origin main")) == "deny"
+    # from INSIDE the unmarked clone, a session launched in the marked repo keeps the door: the
+    # launch directory Claude Code passes every hook is in scope (PLUGDIR-1)
+    launched = dict(world, env=dict(world["env"], CLAUDE_PROJECT_DIR=str(world["repo"])))
+    assert decision(bash(launched, "git push --tags", cwd=str(mirror))) == "deny"
+    assert decision(bash(world, f"cd {mirror} && git push origin main --follow-tags")) == "deny"
+
+
+def test_push_tags_from_a_clone_whose_tags_are_all_releases_is_allowed(world, mirror):
+    """NEGATIVE CONTROL: the door is about the inherited tag, not about the flag."""
+    m = _release_only(mirror)
+    assert bash(world, f"git -C {m} push origin main --tags") is None
+    assert bash(world, f"git -C {m} push --follow-tags origin main") is None
+
+
+def test_pushing_one_tag_by_name_is_always_allowed(world, mirror):
+    """The prescribed form, even from the clone that still carries the inherited tag."""
+    assert bash(world, f"git -C {mirror} push origin v0.2") is None
+    assert bash(world, "git push origin v0.2", cwd=str(mirror)) is None
+
+
+def test_the_deny_names_the_by_name_push_and_the_no_tags_refresh(world, mirror):
+    msg = json.dumps(bash(world, f"git -C {mirror} push origin main --tags"))
+    assert "push origin <tag>" in msg and "--no-tags" in msg
+
+
+# ---------------------------------------- GATEPROSE-1: prose about a command is not the command ----
+# ROW-E1 §5: a path-limited vault commit whose MESSAGE described the cached-removal form was refused,
+# because that one lookup read the whole command string. Every case below has its real-command twin.
+
+def test_PROSE_about_cached_removal_in_a_heredoc_message_does_not_refuse(world):
+    v = world["vault"]
+    prose = f"git -C {v} commit -F /dev/stdin -- a.md <<'MSG'\nSee the git rm --cached entry below it.\nMSG"
+    assert bash(world, prose) is None
+
+
+def test_PROSE_about_cached_removal_in_a_quoted_message_does_not_refuse(world):
+    v = world["vault"]
+    assert bash(world, f"git -C {v} commit -m 'why git rm --cached lies' -- a.md") is None
+    assert bash(world, f'git -C {v} commit -m "why git rm --cached lies" -- a.md') is None
+
+
+def test_the_REAL_cached_removal_before_a_pathspec_commit_still_refuses(world):
+    v = world["vault"]
+    out = bash(world, f"git -C {v} rm --cached -- a.md && git -C {v} commit -m 'x' -- a.md")
+    assert decision(out) == "deny" and "DISCARDS the staged deletion" in json.dumps(out), out
+
+
+def test_a_bare_commit_whose_MESSAGE_names_the_assert_form_is_still_refused(world):
+    """The same defect's other face: prose naming `diff --cached --name-only` granted a bare
+    commit the assert-form pass."""
+    v = world["vault"]
+    out = bash(world, f"git -C {v} commit -F /dev/stdin <<'MSG'\nuse diff --cached --name-only first\nMSG")
+    assert decision(out) == "deny", out
+    out = bash(world, f"git -C {v} commit -m 'use diff --cached --name-only first'")
+    assert decision(out) == "deny", out
+
+
+def test_the_assert_form_inside_a_DOUBLE_QUOTED_test_still_counts(world):
+    """`$( )` inside double quotes runs, so the carve-out written as `[ "$(git … diff --cached
+    --name-only)" = x ]` must still be seen after quoted text is blanked."""
+    v = world["vault"]
+    cmd = (f"git -C {v} rm --cached -- x.md; [ \"$(git -C {v} diff --cached --name-only)\" = x.md ] "
+           f"|| exit 9; git -C {v} commit -F /tmp/m")
+    assert bash(world, cmd) is None
+
+
+def test_a_MESSAGE_FILE_written_with_cat_may_describe_a_vault_deletion(world):
+    """The `-F` body idiom: `cat > msg <<EOF` only writes the text; the delete rule must not ask."""
+    v = world["vault"]
+    cmd = (f"cat > /tmp/gp-msg <<'MSG'\nWe no longer rm {v}/Global/old.md by hand.\nMSG\n"
+           f"git -C {v} commit -F /tmp/gp-msg -- Global/Map.md")
+    assert bash(world, cmd) is None
+
+
+def test_a_REAL_vault_deletion_next_to_a_cat_heredoc_still_asks(world):
+    v = world["vault"]
+    cmd = f"cat > /tmp/gp-msg <<'MSG'\nnotes\nMSG\nrm {v}/Global/old.md"
+    assert decision(bash(world, cmd)) == "ask"
+
+
+def test_an_INTERPRETER_heredoc_body_is_still_read_by_the_delete_rule(world):
+    """A heredoc fed to a shell runs; blanking it would miss a real deletion (DELETEDOOR-2 reads a
+    shell body as its own command line, below)."""
+    v = world["vault"]
+    assert decision(bash(world, f"bash <<'EOF'\nrm {v}/Global/old.md\nEOF")) == "ask"
+
+
+# ---- GATEPROSE-1 reviewer round: what the first cut let through or still refused ----
+
+def test_a_cached_removal_wrapped_in_bash_dash_c_still_refuses(world):
+    v = world["vault"]
+    out = bash(world, f"bash -c 'git -C {v} rm --cached -- a.md' && git -C {v} commit -m x -- a.md")
+    assert decision(out) == "deny" and "DISCARDS the staged deletion" in json.dumps(out), out
+
+
+def test_a_cached_removal_inside_EVAL_still_refuses_with_its_own_reason(world):
+    v = world["vault"]
+    out = bash(world, f"eval \"git -C {v} rm --cached -- a.md\" && git -C {v} commit -m x -- a.md")
+    assert decision(out) == "deny" and "DISCARDS the staged deletion" in json.dumps(out), out
+
+
+def test_a_real_deletion_inside_a_cat_heredoc_piped_to_bash_still_asks(world):
+    v = world["vault"]
+    assert decision(bash(world, f"cat <<'EOF' | bash\nrm {v}/Global/old.md\nEOF")) == "ask"
+
+
+def test_a_backslash_escaped_inner_quote_message_is_still_prose(world):
+    v = world["vault"]
+    assert bash(world, f'git -C {v} commit -m "why \\"git rm --cached\\" lies" -- a.md') is None
+
+
+def test_an_escaped_quote_message_that_NAMES_amend_is_prose_too(world):
+    """The same one-backslash fix in the older flags pattern the new one was copied from."""
+    v = world["vault"]
+    assert bash(world, f'git -C {v} commit -m "never \\"--amend\\" here" -- a.md') is None
+    assert decision(bash(world, f"git -C {v} commit --amend -m x -- a.md")) == "deny"
+
+
+def test_env_prefixed_cat_heredoc_message_body_is_still_a_writer(world):
+    v = world["vault"]
+    cmd = (f"FOO=bar cat > /tmp/gp-msg <<'MSG'\nWe no longer rm {v}/Global/old.md by hand.\nMSG\n"
+           f"git -C {v} commit -F /tmp/gp-msg -- Global/Map.md")
+    assert bash(world, cmd) is None
+
+
+def test_a_bash_dash_c_that_is_NOT_the_first_command_still_refuses(world):
+    """Blanking is per segment: an executor later in the line keeps its own quoted body."""
+    v = world["vault"]
+    out = bash(world, f"true && bash -c 'git -C {v} rm --cached -- a.md' && git -C {v} commit -m x -- a.md")
+    assert decision(out) == "deny" and "DISCARDS the staged deletion" in json.dumps(out), out
+
+
+# ---------------------------- DELETEDOOR-2: an interpreter's heredoc is code; `bash -c 'rm …'` is seen ----
+# Specimen 1 (builder 26, 2026-09-23 16:30): a `python3 - <<'EOF'` edit whose Python STRING named
+# `git rm --cached` beside a vault path drew a confirmation prompt that held the builder 90 minutes.
+# Specimen 2: `bash -c 'rm <vault>/x'` passed, because the verb needed whitespace before it.
+
+def test_SPECIMEN_a_python_heredoc_whose_string_names_git_rm_cached_does_not_ask(world):
+    v = world["vault"]
+    cmd = (f"python3 - <<'EOF'\nfrom pathlib import Path\np = Path('{v}/Global/x.md')\n"
+           f"msg = \"stage with git rm --cached, then commit\"\nprint(p, msg)\nEOF")
+    assert bash(world, cmd) is None
+
+
+def test_SPECIMEN_bash_dash_c_single_quoted_rm_on_the_vault_asks(world):
+    v = world["vault"]
+    assert decision(bash(world, f"bash -c 'rm {v}/Global/old.md'")) == "ask"
+
+
+def test_rm_right_after_a_semicolon_asks(world):
+    v = world["vault"]
+    assert decision(bash(world, f"true;rm {v}/Global/old.md")) == "ask"
+
+
+@pytest.mark.parametrize("line", [
+    "import os\nos.remove('{v}/Global/old.md')",
+    "import shutil\nshutil.rmtree('{v}/Global')",
+    "from pathlib import Path\nPath('{v}/Global/old.md').unlink()",
+    "import subprocess\nsubprocess.run(['rm', '{v}/Global/old.md'])",
+])
+def test_a_real_removal_in_a_python_heredoc_asks(world, line):
+    v = world["vault"]
+    body = line.replace("{v}", str(v))
+    assert decision(bash(world, f"python3 - <<'EOF'\n{body}\nEOF")) == "ask"
+
+
+def test_a_python_STRING_naming_rm_and_a_vault_path_does_not_ask(world):
+    """Prose in a string literal is blanked before the removal verbs are looked for."""
+    v = world["vault"]
+    assert bash(world, f"python3 - <<'EOF'\nprint(\"never rm {v}/Global/old.md by hand\")\nEOF") is None
+
+
+def test_a_python_COMMENT_naming_rm_does_not_ask(world):
+    v = world["vault"]
+    assert bash(world, f"python3 - <<'EOF'\n# rm {v}/Global/old.md is the wrong way\nprint(1)\nEOF") is None
+
+
+def test_a_python_body_that_does_not_tokenize_is_read_raw(world):
+    """No reading of the code is possible, so the body is read as text — it may ask, never miss."""
+    v = world["vault"]
+    assert decision(bash(world, f"python3 - <<'EOF'\nprint(\"rm {v}/Global/old.md\nEOF")) == "ask"
+
+
+def test_echo_of_git_rm_is_not_a_removal(world):
+    """`git rm` is the vault-git rule's; the delete rule's `git` exclusion must bite inside a line."""
+    v = world["vault"]
+    assert bash(world, f"echo git rm --cached {v}/Global/old.md") is None
+
+
+def test_a_shell_heredoc_is_read_line_by_line_even_after_a_git_line(world):
+    v = world["vault"]
+    assert decision(bash(world, f"bash <<'EOF'\ngit status\nrm {v}/Global/old.md\nEOF")) == "ask"
+
+
+def test_a_shell_heredoc_COMMENT_naming_rm_does_not_ask(world):
+    v = world["vault"]
+    assert bash(world, f"bash <<'EOF'\n# rm {v}/Global/old.md\necho hi\nEOF") is None
+
+
+def test_a_python_heredoc_piped_from_cat_is_read_as_python(world):
+    v = world["vault"]
+    assert decision(bash(world, f"cat <<'EOF' | python3 -\nimport os\nos.remove('{v}/Global/old.md')\nEOF")) == "ask"
+
+
+def test_a_python_F_STRING_naming_rm_does_not_ask(world):
+    """3.12+ tokenizes an f-string into pieces; its literal text is still prose."""
+    v = world["vault"]
+    assert bash(world, f"python3 - <<'EOF'\nn = 1\nprint(f'never rm {v}/Global/old.md, {{n}} times')\nEOF") is None
+
+
+
+@pytest.mark.parametrize("code", [
+    "import os; os.remove('{v}/Global/old.md')",
+    "import shutil; shutil.rmtree('{v}/Global')",
+    "from pathlib import Path; Path('{v}/Global').rmdir()",
+])
+def test_a_removal_call_in_python_dash_c_asks(world, code):
+    v = world["vault"]
+    assert decision(bash(world, f'python3 -c "{code.replace("{v}", str(v))}"')) == "ask"
+
+
+def test_a_removal_call_NAMED_by_grep_is_not_a_removal(world):
+    v = world["vault"]
+    assert bash(world, f'grep -n "os.remove(" {v}/Global/Map.md') is None
+
+# ------------------------------------ GITPREFIX-1: a command prefix does not hide git from the door ----
+# `rule_vault_git` read the segment's first word; `sudo`, `env X=1`, `time`, `VAR=1` … in front of
+# `git` made the segment not-a-git-segment, so add -A / commit -a / --amend / a bare commit passed.
+
+@pytest.mark.parametrize("prefix", [
+    "env X=1", "env -u HOME", "sudo", "sudo -u me", "nohup", "time", "time -p", "command", "exec",
+    "nice -n 5", "caffeinate -i", "builtin", "VAR=1", "A=1 B=2", "sudo env X=1 nohup",
+    "/usr/bin/env X=1", "/usr/bin/sudo",
+])
+def test_a_PREFIXED_vault_add_A_is_refused(world, prefix):
+    v = world["vault"]
+    assert decision(bash(world, f"{prefix} git -C {v} add -A")) == "deny"
+
+
+@pytest.mark.parametrize("cmd,why", [
+    ("sudo git -C {v} commit -a -m x", "commit -a"),
+    ("command git -C {v} commit --amend -m x -- a.md", "NO-AMEND"),
+    ("VAR=1 git -C {v} commit -m x", "bare `git commit`"),
+])
+def test_every_vault_git_law_reads_through_a_prefix(world, cmd, why):
+    out = bash(world, cmd.replace("{v}", str(world["vault"])))
+    assert decision(out) == "deny" and why in json.dumps(out), out
+
+
+def test_a_prefixed_bash_dash_c_is_still_unwrapped(world):
+    v = world["vault"]
+    assert decision(bash(world, f"sudo bash -c 'git -C {v} add -A'")) == "deny"
+
+
+@pytest.mark.parametrize("cmd", [
+    "echo git -C {v} add -A",
+    "grep 'git -C {v} commit --amend' notes.md",
+    'grep "git commit --amend" notes.md',
+    "env X=1 git -C {v} commit -m x -- a.md",
+    "sudo -u me git -C {v} add -- a.md",
+])
+def test_git_as_an_ARGUMENT_or_a_lawful_prefixed_command_passes(world, cmd):
+    assert bash(world, cmd.replace("{v}", str(world["vault"]))) is None
+
+
+
+def test_a_prefixed_EVAL_keeps_its_quoted_body_as_code(world):
+    """code_text reads the head word through the prefix too: `sudo eval "…"` runs its string."""
+    v = world["vault"]
+    out = bash(world, f"sudo eval \"git -C {v} rm --cached -- a.md\" && git -C {v} commit -m x -- a.md")
+    assert decision(out) == "deny" and "DISCARDS the staged deletion" in json.dumps(out), out
+
+
+def test_a_prefixed_python_heredoc_is_still_read_as_python(world):
+    v = world["vault"]
+    assert bash(world, f"sudo python3 - <<'EOF'\n# rm {v}/Global/old.md\nprint(1)\nEOF") is None

@@ -1,0 +1,1255 @@
+#!/usr/bin/env python3
+"""gate.py — the PreToolUse locked doors of Das Gedächtnis.
+
+    python3 gate.py bash    # vault git law · inherited-tag push · launch pins model · data integrity ·
+                            # artifact-not-file · no whole-file overwrite (D1's bash half +
+                            # shared-surface append-only)
+    python3 gate.py write   # partition (WARN or DENY per state file) · reserved-stem rule
+    python3 gate.py agent   # every Agent call pins a model unless its definition does
+
+A rule is DETERMINISTIC or it is not here: anything needing judgment stays prose (Kernel, Nomos)
+and is at most reported by a PostToolUse chore (see chore.py). Each deny cites the vault entry it
+enforces so the model learns the why, not just the wall. First deny wins; silence means "no
+opinion" and the normal permission flow continues.
+
+Partition mode: `<state>/partition.mode` holds `warn` (default when absent) or `deny`. The intended
+adoption path is warn for a week, read the log, then flip the word.
+"""
+from __future__ import annotations
+import re, sys, os
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from common import (read_input, deny, ask, context, log, expand, under, vault_rel, lane_for, path_in_partition, ROLE_STEMS, guarded, shared_surface, pure_append, note_pre_exists, clear_pre_exists, created_paths, take_filelock, release_filelock)
+import common
+# VAULT, HOME, STATE deliberately NOT imported by name: a `from` import binds the value
+# ONCE, which is the frozen-path defect this package was bitten by. Read through the
+# module object (common.VAULT) so PEP 562 re-resolves on every access.
+import fnmatch
+import shlex
+import subprocess
+import config as _cfg
+import names
+import context_economy
+import authority
+import fanout
+import deletedoor
+
+EV = "PreToolUse"
+
+def _trailing_pathspec(flags: str) -> bool:
+    """`git commit -m x Global/Kernel.md` IS path-limited: git reads a bare trailing token as a pathspec
+    with or without `--`. Council 2's dad test (Balthasar, 2026-09-09) found the door refusing that
+    form as "bare" for a stranger who never read the vault law. `flags` has quoted text blanked to
+    ` Q ` and heredocs to `HEREDOC`; options that take a value consume the next token."""
+    takes = {"-m", "-F", "--file", "--author", "--date", "-c", "-C", "--trailer", "--cleanup",
+             "--fixup", "--squash", "--reuse-message", "--reedit-message"}
+    toks = flags.split(); i = 0
+    while i < len(toks):
+        t = toks[i]
+        if t == "--":
+            rest = toks[i + 1:]
+            # ★ A BARE TRAILING `--` IS NOT A PATHSPEC. `git commit -m msg --` has an EMPTY pathspec
+            # list, which git treats as "no pathspec" — it commits the whole staged index, which is
+            # exactly the breadth this door exists to refuse, and it is irreversible under NO-AMEND.
+            # The old expression ended in `or True`, so the empty case returned True and the refusal
+            # was skipped. Found by the BLASTRADIUS-1 code review, 2026-09-15; reproduced live.
+            if not rest:
+                return False
+            return "--" not in rest and _breadth(rest) or True
+        if t in takes:
+            i += 2; continue
+        if t.startswith("-") or t == "HEREDOC":
+            i += 1; continue
+        return _breadth(toks[i:])          # a bare token — or a QUOTED path (`Q`) — is a pathspec
+    return False
+
+
+BREADTH = "BREADTH"
+
+
+def _breadth(pathspecs):
+    """`commit -m x .` (or `*`, `:/`) is path-limited only in name: `.` is every tracked modification,
+    the exact breadth `add .` is refused for (council 2, Balthasar iteration 2). Returns BREADTH for
+    that, True for a real pathspec."""
+    for t in pathspecs:
+        if t in (".", "*", ":/", "./"):
+            return BREADTH
+    return True
+
+
+# ---------------------------------------------------------------- bash: segment the command ----
+
+_SPLIT = re.compile(r"\s*(?:&&|\|\||;|\n|\|)\s*")
+# `git -C <repo>` — only among git's OWN options, before the subcommand: `git switch -C main x` and
+# `git commit -C HEAD` carry a `-C` of their own that names no repository (MERGEWINDOW-2 reviewer).
+_GIT_C = re.compile(r"^git(?:\s+(?!-C\s)(?:-c\s+\S+|--?[\w-]+(?:=\S+)?))*\s+-C\s+(\S+)")
+
+
+# The command-line reading lives in shellread.py (DELETEDOOR-3): ONE reading, shared with the delete
+# door, never a copy of it here.
+from shellread import (_split_shell, _PREFIXES, _ASSIGN, strip_prefix, segments, _HEREDOC_BODY,  # noqa: E402,F401
+                       _WRITERS, _SHELLS, _PYTHON, _PY_DESTROY, _RM_STRING, _head_word, _heredoc_reader,
+                       _writer_heredoc, _python_code, _heredoc_body)
+
+
+def git_segments(cmd: str, cwd: str | None, raw: bool = False):
+    """Yield (segment, repo_path) for every `git` segment, tracking `cd` across segments. The
+    segment is yielded from `git` on — prefixes and assignments stripped (`strip_prefix`) — unless
+    `raw`: the suite gate reads its `SUITE_GATE_ALLOW=1` escape from the leading assignment."""
+    cur = Path(cwd) if cwd else common.HOME
+    for whole in segments(cmd):
+        seg = strip_prefix(whole)
+        words = seg.split()
+        if not words:
+            continue
+        if words[0] == "cd" and len(words) > 1:
+            cur = expand(words[1], str(cur))
+            continue
+        if words[0] != "git":
+            continue
+        m = _GIT_C.search(seg)
+        repo = expand(m.group(1), str(cur)) if m else cur
+        g = re.search(r"--git-dir[= ](\S+)", seg)
+        if g:
+            repo = expand(g.group(1), str(cur)).parent if expand(g.group(1), str(cur)).name == ".git" else expand(g.group(1), str(cur))
+        yield (whole if raw else seg), repo
+
+
+_QUOTED = re.compile(r"'[^']*'|\"(?:[^\"\\\\]|\\.)*\"")   # one backslash escapes one character
+_SUBST = re.compile(r"\$\([^()]*(?:\([^()]*\)[^()]*)*\)|`[^`]*`")
+
+
+_EXECUTORS = ("bash", "sh", "zsh", "dash", "ksh", "eval", "source", "exec")
+
+
+def code_text(cmd: str) -> str:
+    """`cmd` with the text the shell does not run blanked (GATEPROSE-1): a heredoc body becomes
+    `HEREDOC`, a single-quoted string ` Q `, and a double-quoted string keeps only the `$( )` and
+    backtick substitutions inside it — those run. A commit message that DESCRIBES a command, in a
+    heredoc, a `-m` string or a `-F` body written in the same line, is then prose again, and a
+    `$(git diff --cached --name-only)` inside a test expression is still seen.
+
+    Per SEGMENT, after `segments()` has unwrapped `bash -c '…'`: a segment whose command runs its
+    argument or its stdin as code (`bash`, `sh`, `zsh`, `eval`, `source`) is kept whole, quotes and
+    heredoc included — its quoted text is not prose. (Reviewer, GATEPROSE-1: blanking the whole
+    raw command hid a real removal inside `bash -c '…'`.)"""
+    def quoted(m):
+        q = m.group(0)
+        if q.startswith("'"):
+            return " Q "
+        return " " + " ".join(x.group(0) for x in _SUBST.finditer(q)) + " Q "
+    out = []
+    for seg in segments(cmd):
+        w = strip_prefix(seg).split()
+        if w and (w[0].rsplit("/", 1)[-1] in _EXECUTORS or w[0] == "."):
+            out.append(seg)
+            continue
+        out.append(_QUOTED.sub(quoted, _HEREDOC_BODY.sub("HEREDOC", seg)))
+    return " ; ".join(out)
+
+
+def rule_vault_git(cmd: str, cwd: str | None) -> str | None:
+    V = common.vault_home_rel()        # the CONFIGURED vault, as a person would type it
+    code = code_text(cmd)
+    for seg, repo in git_segments(cmd, cwd):
+        if not (repo == common.VAULT or under(repo, common.VAULT)):
+            continue
+        w = seg.split()
+        sub = next((x for x in w[1:] if not x.startswith("-") and x not in ("-C",) ), None)
+        # the token after -C is the path, not the subcommand
+        toks = w[1:]
+        i = 0; sub = None
+        while i < len(toks):
+            if toks[i] in ("-C", "-c"):
+                i += 2; continue
+            if toks[i].startswith("-"):
+                i += 1; continue
+            sub = toks[i]; break
+        # The subcommand is located as a WHOLE WORD after the git options — `seg.index("commit")`
+        # matched inside a PATH containing "commit" (a pytest tmp dir), so the body started mid-path
+        # and a path fragment read as a pathspec (found 2026-09-09 by the trailing-pathspec test).
+        sub_m = re.search(r"(?:^|\s)" + re.escape(sub or "\x00") + r"(?=\s|$)", seg[len(w[0]):]) if sub else None
+        after_sub = seg[len(w[0]) + sub_m.end():] if sub_m else ""
+        if sub == "add" and re.search(r"(?:\s|^)(?:-A|--all|-a|-u|--update|\.)(?:\s|$)", after_sub):
+            return (f"Vault law: never `git add -A`/`-a`/`-u`/`.` in {V} — a broad add sweeps another lane's "
+                    f"in-flight work into your commit. Add the exact paths: `git -C {V} add -- <file>`. "
+                     "(A file written before a concurrent automated committer runs is swept into ITS commit, "
+                     "under its message, before you ever stage it.)")
+        if sub == "commit":
+            body = after_sub
+            body = re.sub(r"<<-?\s*(['\"]?)(\w+)\1.*?\n\2\s*$", "HEREDOC", body, flags=re.S | re.M)   # a heredoc body is text, whatever it contains
+            flags = _QUOTED.sub(" Q ", body)   # quoted text cannot carry a flag
+            if re.search(r"(?:\s|^)(?:-[a-zA-Z]*a[a-zA-Z]*|--all)(?:\s|$)", flags):
+                return f"Vault law: never `git commit -a` in {V}. Commit path-limited: `git -C {V} commit -m '<msg>' -- <file>`."
+            if "--amend" in flags:
+                return ("Vault law: NO-AMEND — never `git commit --amend` on a vault commit; forward-fix with a new commit. "
+                        "A rewritten commit is invisible to every other session that already read the old one.")
+            m = re.search(r'-m\s+"([^"]*)"', body)
+            if m and ("`" in m.group(1) or "$(" in m.group(1)) and not re.match(r"^\$\(cat\s*(?:<<|HEREDOC)", m.group(1).strip()):
+                # `-m "$(cat <<'EOF' … EOF)"` is the DELIBERATE quoted-heredoc idiom, not an accident
+                return ("A backtick or `$(` inside a DOUBLE-quoted `git commit -m` is command-substituted: the word vanishes "
+                        "and the commit still succeeds, permanently (NO-AMEND). Use single quotes, or `git commit -F <msgfile>`.")
+            has_pathspec = _trailing_pathspec(flags)
+            if has_pathspec == BREADTH:
+                return ("Vault law: `git commit … .` is every tracked change, the breadth `add .` is refused for. "
+                        f"Name the files: `git -C {V} commit -m '<msg>' -- <file>`.")
+            # Both lookups read `code`, not `cmd`: a message body that names these forms used to
+            # refuse a path-limited commit (ROW-E1 §5) and could grant a bare one the assert-form pass.
+            assert_form = "diff --cached --name-only" in code
+            if has_pathspec and re.search(r"\brm\s+(?:-r\s+)?--cached\b", code):
+                return ("`git rm --cached` followed by a pathspec commit (`commit … -- <paths>`) commits the WORKING TREE and silently "
+                        "DISCARDS the staged deletion — the commit lies about its contents. Use the stage → ASSERT "
+                        "(`diff --cached --name-only`) → commit-with-NO-pathspec form in one invocation.")
+            if not has_pathspec and not assert_form and "-F" not in flags and "--file" not in flags:
+                return (f"Vault law: never a bare `git commit` in {V} — the pathspec is the guarantee. Use "
+                        f"`git -C {V} commit -m '<msg>' -- <file>`; or, ONLY for a `git rm --cached`, the stage→ASSERT "
+                         "(`diff --cached --name-only`)→commit form in one invocation.")
+            if not has_pathspec and not assert_form and ("-F" in flags or "--file" in flags):
+                return (f"Vault law: `git commit -F <msg>` in {V} still needs the pathspec: append `-- <file>` "
+                         "(everything after `--` is a pathspec), or use the stage→ASSERT→commit form.")
+        if sub == "rm" and "--cached" not in seg:
+            return ("Defaults never delete: `git rm` removes tracked vault files from the working tree without the Trash. "
+                    "Use `git rm --cached` to untrack (the file stays), or move the file to the Trash by hand and commit the "
+                    "deletion path-limited. (Defaults never delete.)")
+        if sub == "push":
+            if not re.search(r"\bpush\s+(?:\S*\s+)*backup\b", seg):
+                return ("Vault law: never push the vault to a cross-machine SYNC remote; only the bare `backup` remote "
+                        f"is allowed: `git -C {V} push backup`. Backup is not sync.")
+        if sub == "reset" and "--hard" in seg:
+            return (f"`git reset --hard` in {V} destroys another live session's uncommitted work outright. Refused. "
+                     "Inspect with `git status`/`git diff`, and forward-fix — and never `checkout --`, `stash` or "
+                     "`reset --hard` past a modified-on-disk warning on a file you do not own.")
+        if sub == "clean" and re.search(r"\s-[a-zA-Z]*f", seg):
+            return f"`git clean -f` in {V} deletes untracked files another session may be writing. Refused; move to Trash by hand if needed."
+    return None
+
+
+# ------------------------------------------------ the inherited-tag door (MIRRORTAGS-1, 2026-09-10) ----
+# A public mirror clone made from a private monorepo INHERITS that monorepo's tags: a tag is a ref
+# like any other, and `git push --tags` publishes every one of them together with the private commit
+# each points at and its whole ancestry. That is not a hypothesis — it happened on 2026-09-10, five
+# tags deep, and the remote objects survive until the host garbage-collects them.
+#
+# The tree scanner (`tools/publish_check.py`) cannot see this class at all: it reads FILES, and a tag
+# is a ref. So the door is keyed on the two flags that send every ref — `--tags`, `--follow-tags` —
+# and asks one question of the clone they would push from: does it carry a tag that is not one of
+# this project's own releases? If it does, the push is refused by name. A clone whose tags are all
+# releases pushes as before (the negative control), and a push of ONE tag by name is never touched.
+#
+# Cost: a single `git tag -l`, and only when one of those two flags is present.
+
+RELEASE_TAG = "v*"          # the shape a release tag has; `tools/publish_check.py` agrees, by design
+
+
+def git_subcommand(seg: str) -> str | None:
+    """The subcommand of a `git` segment, skipping the options and their values (`-C <dir>`, `-c k=v`)."""
+    toks = seg.split()[1:]
+    i = 0
+    while i < len(toks):
+        if toks[i] in ("-C", "-c"):
+            i += 2; continue
+        if toks[i].startswith("-"):
+            i += 1; continue
+        return toks[i]
+    return None
+
+
+def non_release_tags(repo: Path) -> list[str]:
+    """Tags on `repo` that are not `v*`. One local `git tag -l`, no network.
+
+    Empty on ANY failure: a door that cannot read the refs has no opinion. The alternative — refusing
+    what it could not read — would block a legitimate push in every directory that is not a git repo,
+    which is how an over-conservative guard destroys a run as thoroughly as an overrun.
+    """
+    try:
+        p = subprocess.run(["git", "-C", str(repo), "tag", "-l"],
+                           capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if p.returncode != 0:
+        return []
+    tags = [t.strip() for t in p.stdout.splitlines() if t.strip()]
+    return [t for t in tags if not fnmatch.fnmatch(t, RELEASE_TAG)]
+
+
+def rule_inherited_tag_push(cmd: str, cwd: str | None, notes: list | None = None) -> str | None:
+    """MARKER-SCOPED (PLUGDIR-1): refuses only when the session's cwd or the pushing clone is inside
+    the vault or a marked repo — which covers every push our own sessions make, since they run in
+    marked repos. Elsewhere the same text is appended to `notes` and the push runs."""
+    for seg, repo in git_segments(cmd, cwd):
+        if git_subcommand(seg) != "push":
+            continue
+        flags = set(seg.split())
+        if not (flags & {"--tags", "--follow-tags"}):
+            continue
+        bad = non_release_tags(repo)
+        if not bad:
+            continue                              # every tag here is a release of this project
+        which = "--tags" if "--tags" in flags else "--follow-tags"
+        reason = (f"`git push {which}` sends EVERY tag this clone has, and `{repo}` carries "
+                f"{len(bad)} tag(s) this project never released ({', '.join(bad[:5])}) — a clone made from a "
+                "private repo inherits its tags, and pushing one publishes the private commit it points at with its "
+                "whole ancestry (it happened on 2026-09-10, and the objects outlive the tag deletion). Publish the "
+                "release BY NAME instead: `git push origin <tag>`. Then delete the inherited tag locally and refresh "
+                "this clone with `git pull --no-rebase --no-tags`. (A public mirror clone fed from a "
+                "private monorepo CARRIES THE MONOREPO'S TAGS')")
+        if common.in_scope(cwd, repo):
+            return reason
+        if notes is not None:
+            notes.append(common.out_of_scope_note(reason))
+    return None
+
+
+_CLAUDE_SUBCMDS = {"plugin","mcp","config","doctor","update","login","logout","setup-token","agents",
+                   "install","migrate-installer","--version","-v","--help","-h","auth","upgrade"}
+
+
+def rule_launch_model(cmd: str) -> str | None:
+    for seg in segments(cmd):
+        w = seg.split()
+        while w and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", w[0]):
+            w = w[1:]
+        if not w or w[0] not in ("claude", "claude.exe"):
+            continue
+        if len(w) > 1 and w[1] in _CLAUDE_SUBCMDS:
+            continue
+        if _cfg.flag("require_launch_model") and "--model" not in w and not any(x.startswith("--model=") for x in w):
+            return ("Every `claude` launch pins `--model` (and `--effort`) explicitly; the settings-file default is "
+                    "silent routing authority: a bare launch runs on whatever model the settings file happens to name, "
+                    "at whatever price. Add `--model <id> --effort <level>`.")
+        if _cfg.flag("require_launch_effort") and "--effort" not in w and not any(x.startswith("--effort=") for x in w):
+            return ("This `claude` launch pins `--model` but not `--effort`; the platform default is `high`, and the "
+                    "ruled defaults hold ONLY if the launch pins them. Add `--effort <low|medium|high>`.")
+    return None
+
+
+def _protected():
+    """The owner-class protections, built NOW — the vault's name and path are in these patterns.
+
+    ★ This was a module-level list, compiled once at import. Two separate defects lived in that:
+    council 2 found a literal vault name in it, which left a stranger whose vault is named otherwise
+    unprotected by the one rule that must hold everywhere; and the constant it was rebuilt on was
+    itself resolved at import, so a process whose vault moved kept guarding the old directory —
+    protecting a path nobody was writing while the one being written was unguarded. A guard that
+    freezes its own subject is worse than no guard: it reports green."""
+    v = common.VAULT
+    return [
+        (re.compile(r"_cache\.json"), "mining caches (whisper_cache.json, gemini_cache.json, …) are USER DATA — real money and time"),
+        (re.compile(r"anki_mining\.db"), "anki_mining.db is the mining database — user data"),
+        (re.compile(r"(?:^|[\s/'\"])media/"), "a `media/` directory holds mined clips — user data"),
+        (re.compile(r"(?:~|/Users/[^/\s]+)/Pictures"), "~/Pictures holds his photographs"),
+        (re.compile(r"\.Trash"), "the Trash is NEVER emptied — it is his permanent restore net"),
+        (re.compile(r"(?:~|/Users/[^/\s]+|\$HOME|\$\{HOME\})/" + re.escape(v.name) + r"(?:/|\s|$)"
+                    + r"|" + re.escape(str(v)) + r"(?:/|\s|$)"), "the vault and its history"),
+    ]
+
+
+def _vault_rx():
+    """Scope for the owner-class protections when protect_everywhere is off. Built per call for the
+    same reason as `_protected()`."""
+    return re.escape(str(common.VAULT)) + r"(?:/|\s|$)"
+
+
+# The removal verb is anchored on what can END the previous shell word: whitespace, `;`, `&`, `|`,
+# `(`, or a quote — so `bash -c 'rm …'` and `true;rm …` are seen (DELETEDOOR-2; both passed before,
+# because the anchor was whitespace only). `(?<!git\s)` sits AFTER the anchor so it can bite: written
+# before it, as it was, it tested the text before the space and never excluded `git rm`.
+_DESTROY = re.compile(r"(?:^|[\s;&|(\'\"`])(?<!git\s)(?:rm|unlink|shred|rmdir)\s|\bfind\b.*\s-delete\b|\bgit\s+clean\b|>\s*\S*_cache\.json")
+
+
+def rule_data_integrity(cmd: str) -> str | None:
+    if re.search(r"osascript.*(?:empty\s+(?:the\s+)?trash)", cmd, re.I):
+        return "The Trash is never emptied — it is the undo of every deletion this vault has ever made. Refused."
+    if re.search(r"(?:DROP\s+TABLE|DELETE\s+FROM|TRUNCATE)\b.*anki_mining\.db|anki_mining\.db.*(?:DROP\s+TABLE|DELETE\s+FROM|TRUNCATE)\b", cmd, re.I | re.S):
+        return "Destructive SQL against anki_mining.db is refused: it is user data. Back up first (scripts/anki_backup.py) and ask."
+    if not (_DESTROY.search(cmd) or _PY_DESTROY.search(cmd) or "<<" in cmd):
+        return None                                   # a heredoc body is read per segment below
+    for seg in segments(cmd):
+        reader = _heredoc_reader(seg)
+        if reader == "writer":
+            seg = _HEREDOC_BODY.sub("HEREDOC", seg)   # a message body being written, never run
+        elif reader == "python":
+            # DELETEDOOR-2: a Python body is read as CODE — a removal call, or a string that is a
+            # removal command — never as the prose in its other strings and comments. The protected
+            # path may sit in a string (it usually does), so the path check below reads the raw body.
+            code = _python_code(_heredoc_body(seg))
+            if code is not None:
+                if not (_DESTROY.search(code) or _PY_DESTROY.search(code)):
+                    continue
+                # a removal runs: fall through with the raw segment for the path check
+            elif not (_DESTROY.search(seg) or _PY_DESTROY.search(seg)):
+                continue
+        elif reader == "shell":
+            # a shell body is a script: its lines are commands; a `#` comment line is not
+            # — so the body is read as its own command line, segment by segment.
+            body = "\n".join(x for x in _heredoc_body(seg).split("\n") if not x.lstrip().startswith("#"))
+            r = rule_data_integrity(body)
+            if r:
+                return r
+            continue
+        elif _PYTHON.match(_head_word(seg)):
+            # `python3 -c "…"` (reviewer, DELETEDOOR-2): the removal CALLS count here too. Only on a
+            # Python segment — `grep "remove(" <vault>/x` must not ask.
+            if not (_DESTROY.search(seg) or _PY_DESTROY.search(seg)):
+                continue
+        elif not _DESTROY.search(seg):
+            continue
+        w0 = seg.split()
+        if w0 and w0[0] == "git" and not re.search(r"\bgit\s+(?:-C\s+\S+\s+)?clean\b", seg):
+            continue                                  # `git rm --cached` etc. are index operations; the vault-git rule owns them
+        everywhere = _cfg.flag("protect_everywhere")
+        for rx, why in _protected():
+            if not everywhere and "vault" not in why and "Trash" not in why and not re.search(_vault_rx(), seg):
+                continue                              # a stranger's own `media/` or `*_cache.json` outside the vault is his to delete
+            if rx.search(seg):
+                # allow rm inside the vault's gitignored scratch (.atlas-locks, .pre-* backups) explicitly
+                # the CONFIGURED vault's name, never a literal — the same correction council 2 made to
+                # _protected() above: a stranger whose vault is `~/Gedaechtnis` gets its own scratch
+                # carve-out, instead of being asked about every lock file it cleans up
+                if "vault" in why and re.search(re.escape(common.VAULT.name) + r"/(?:\.atlas-locks|\.atlas-writer\.lock|[^\s]*\.pre-)", seg):
+                    continue
+                return (f"Defaults never delete: {why}. Deletions go to the Trash with `/usr/bin/trash <path>` (never "
+                        "Finder, which follows a symbolic link to its target), in one `Cleanup YYYY-MM-DD/` bundle "
+                        "with a README, never `rm`; and this class asks its owner first.")
+    return None
+
+
+def rule_artifact_not_file(cmd: str, cwd: str | None, notes: list | None = None) -> str | None:
+    """MARKER-SCOPED (PLUGDIR-1 review): refuses only in the vault or a marked repo; elsewhere the
+    text goes to `notes` and `open` runs — a stranger's own page may carry the same store call."""
+    for seg in segments(cmd):
+        w = seg.split()
+        if not w or w[0] != "open":
+            continue
+        for tok in w[1:]:
+            if tok.startswith("-"):
+                continue
+            t = tok
+            if t.startswith("file://"):
+                t = t[len("file://"):]
+            if not t.lower().endswith(".html"):
+                continue
+            p = expand(t, cwd)
+            try:
+                head = p.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            if re.search(r"""claude\.use\(\s*["'](?:db|artifact|self)["']""", head) or "data-answer-store" in head:
+                reason = ("This page keeps its answers in the ARTIFACT's own store; a `file://` copy has no store, and an "
+                        "answer given there strands the work in the reviewer's browser (it happened twice on 2026-09-07). Open the "
+                        "artifact URL instead — look it up in this vault's artifact index, or publish/republish via "
+                        "the Artifact tool and `open` that URL.")
+                if common.in_scope(cwd, p.parent):
+                    return reason
+                if notes is not None:
+                    notes.append(common.out_of_scope_note(reason))
+    return None
+
+
+# --------------------------------------------------- the `# GENERATED` door (council 2 §1) ----
+# A view under `.gedaechtnis/views/` is rebuilt from the log every time it is generated, so an edit
+# made IN the view is gone at the next generation with no error anywhere — the exact silent-loss
+# shape the log-and-views design exists to remove. The door turns that edit into a row instead.
+#
+# It is keyed on the FILE'S OWN FIRST LINE, never on a directory: a generated file says so about
+# itself, so the rule needs no allowlist and cannot go stale when the views move (their final home
+# is a later ruling). During the shadow nothing outside `.gedaechtnis/views/` carries the line, so
+# nothing outside it can be bitten — which is what makes an additive shadow additive.
+#
+# Balthasar's sign-off names this door the most likely thing to be reverted; the signal he asked for
+# is more than 3 refusals in the shadow's first week. Every refusal is logged as `generated-view`.
+
+GENERATED_PREFIX = "# GENERATED"
+
+
+def is_generated(p: Path) -> bool:
+    """True when the file exists and its FIRST LINE marks it as machine-written."""
+    try:
+        with open(p, "r", encoding="utf-8", errors="replace") as fh:
+            return fh.readline().startswith(GENERATED_PREFIX)
+    except OSError:
+        return False
+
+
+def generated_refusal(rel: str, how: str) -> str:
+    return (f"`{rel}` is a GENERATED view: its first line is `{GENERATED_PREFIX} sha256:…`, and it is rebuilt from the "
+            f"memory log every time `gedaechtnis/views.py` runs — this {how} would be gone at the next generation, with "
+            "no error anywhere. Append a row instead:\n"
+            "    python3 gedaechtnis/logstore.py append --region <Region> --kind <decision|lesson|state|question|note> "
+            "--stem <Canon|Errata|Patterns|Position|Aporia> --heading '## …' --body '…'\n"
+            "then re-run `python3 gedaechtnis/views.py`. To change an entry the log already carries, append the corrected "
+            "row — the log is append-only and the newer row wins. (Council 2 closure §1: a hand edit becomes a row, never "
+            "a lost edit.)")
+
+
+_WRITE_VERBS = {"tee", "cp", "mv", "rm", "touch", "truncate", "install"}
+_CLOBBER = {"redirect": "shell redirect", "redirect-append": "shell append", "sed-i": "`sed -i`",
+            "tee": "`tee`", "cp": "`cp` over it", "mv": "`mv` over it", "install": "`install` over it",
+            "truncate": "`truncate`"}
+
+
+def rule_generated_view_bash(cmd: str, cwd: str | None) -> str | None:
+    for p, how in bash_write_targets(cmd, cwd):
+        if how in _CLOBBER and is_generated(p):
+            return generated_refusal(vault_rel(p) or str(p), _CLOBBER[how])
+    return None
+
+
+def bash_write_targets(cmd: str, cwd: str | None) -> list[tuple[Path, str]]:
+    """Heuristic: vault paths a Bash command writes. (path, how) — how in redirect-append · redirect ·
+    sed-i · tee · tee-append · cp · mv · mv-out · rm · touch · truncate · install · dd.
+
+    `tee` is split into `tee`/`tee-append` here (rather than left as one "verb" bucket) because the
+    two need OPPOSITE treatment downstream: `tee -a` is a pure append like `>>`, plain `tee` truncates
+    like `>` — a caller that cannot tell them apart cannot refuse the second without also refusing
+    the first. `dd of=` is handled on its own because its target is a `key=value` argument, not a
+    trailing bare token or a `>`-spelled redirect."""
+    out = []
+    # ★ `cd` IS TRACKED HERE TOO. `git_segments` has tracked it across segments since the door was
+    # written; this function expanded every target against the HOOK's cwd, so
+    # `cd <region> && echo x > Canon.md` resolved to a path outside the vault and both
+    # mode-independent doors — the GENERATED-view refusal and the whole-file-write refusal — waved
+    # it through. That is an ordinary shape a person types, not an attacker-only trick, and the two
+    # doors it defeats are the two the design says hold in every mode. The heuristic limits that
+    # remain (`f=<path>; echo x > $f`, `python3 -c "open(...)"`) are acknowledged in this
+    # function's own docstring; a `cd` was not one of them, and the tracking already existed eight
+    # lines away.
+    cur, prev, stack = cwd, None, []
+    for seg in segments(cmd):
+        try:
+            w = shlex.split(seg)
+        except ValueError:
+            w = seg.split()
+        # A subshell's parens are their own tokens once the segment is split; drop them so
+        # `( cd X && …` is the `cd X` it is. This is NOT scope-correct — a `cd` inside `( )` does
+        # not outlive the subshell — but the error it replaces was far worse than a missed reset:
+        # untracked, `( cd ../Other && echo x > Canon.md )` resolved to the CURRENT region's
+        # `Canon.md`, a path inside every lane's partition, so the gate cheerfully permitted a
+        # write to ANOTHER lane's file. A guard that answers about the wrong file is worse than one
+        # that says it does not know.
+        w = [t for t in w if t not in ("(", ")", "{", "}")]
+        _w = list(w)
+        while _w and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", _w[0]):
+            _w = _w[1:]
+        if _w and _w[0] in ("cd", "pushd", "popd"):
+            if _w[0] == "popd":
+                cur, prev = (stack.pop() if stack else None), cur
+                continue
+            args = [a for a in _w[1:] if a != "--"]     # `cd -- dir`: `--` is not a directory
+            if _w[0] == "pushd":
+                stack.append(cur)
+            if not args:                                 # bare `cd` / `pushd` → HOME
+                cur, prev = str(common.HOME), cur
+                continue
+            if args[0] == "-":                           # `cd -` → the previous directory
+                cur, prev = prev, cur
+                continue
+            cur, prev = (str(expand(args[0], cur)) if cur is not None else None), cur
+            continue
+        if cur is None:
+            # ★ THE CWD IS UNKNOWN, SO A RELATIVE TARGET IS UNRESOLVABLE — and an unresolvable
+            # target is skipped rather than guessed. Guessing is what produced the defect above.
+            # Absolute targets are still checked below, because they do not depend on the cwd.
+            w = [t for t in w if t.startswith("/") or t.startswith("~") or ">" in t or "=" in t]
+        for i, tok in enumerate(w):
+            # every output-redirect spelling: > >> 1> 2> &> >| >>| 1>> &>> — with the target attached or as the next token
+            m = re.match(r"^(?:\d+|&)?(>>|>)\|?(.*)$", tok)
+            if not m or tok.startswith(">&") or re.match(r"^\d+>&", tok):
+                continue
+            how = "redirect-append" if m.group(1) == ">>" else "redirect"
+            target = m.group(2)
+            if not target and i + 1 < len(w):
+                target = w[i + 1]
+            if target and target != "|" and not target.startswith("&"):
+                out.append((expand(target, cur), how))
+        if not w:
+            continue
+        j = 0
+        while j < len(w) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", w[j]):
+            j += 1
+        if j >= len(w):
+            continue
+        verb = w[j]
+        if verb == "sed" and any(x.startswith("-i") for x in w[j + 1:]):
+            for x in w[j + 1:]:
+                if not x.startswith("-") and not x.startswith("s") and "/" in x:
+                    out.append((expand(x, cur), "sed-i"))
+        elif verb == "dd":
+            for x in w[j + 1:]:
+                if x.startswith("of="):
+                    out.append((expand(x[len("of="):], cur), "dd"))
+        elif verb in _WRITE_VERBS:
+            args = [x for x in w[j + 1:] if not x.startswith("-")]
+            if verb in ("cp", "mv", "install") and args:
+                out.append((expand(args[-1], cur), verb))
+                if verb == "mv":
+                    for src in args[:-1]:
+                        out.append((expand(src, cur), "mv-out"))      # the SOURCE leaves its place: a deletion in disguise
+            elif verb == "tee":
+                how = "tee-append" if any(x in ("-a", "--append") for x in w[j + 1:]) else "tee"
+                for x in args:
+                    out.append((expand(x, cur), how))
+            elif verb in ("rm", "touch", "truncate"):
+                for x in args:
+                    out.append((expand(x, cur), verb))
+    return [(p, how) for p, how in out if under(p, common.VAULT)]
+
+
+# ------------------------------------------ D1's bash half: no whole-file overwrite (WP9 gap 1) ----
+# `Write` has an anchor-free sibling in Bash: a truncating redirect (`>`, not `>>`), `tee` without
+# `-a`, `cp`/`mv`/`install` ONTO an existing target, `truncate`, and `dd of=` all replace a file's
+# entire content with NO compare-and-swap at all — worse than `Write`, which at least carries the
+# session's own belief about what it is replacing (Write still gets D1's own check; this is the
+# same guard for the shapes Write cannot reach). So this binds every vault `.md` file — own lane or
+# not — and is MODE-INDEPENDENT exactly like D1 itself (Design §5.2 D1): it is a data-loss guard,
+# not a partition rule, and `partition.mode` governs who may write WHERE, never whether a write may
+# erase what is already there. Same exemptions as D1: a file that does not exist, an empty file, a
+# non-.md file, anything under `Cleanup */`, and a file THIS session created (the identical
+# created-set D1 reads — no second bookkeeping channel).
+#
+# A shared-surface `.md` file (a region's queue, the fleet roster, an Inbox, `artifacts-index.md`,
+# the umbrella-shared Canon/Position pair) gets a DIFFERENT wording naming the append-only rule,
+# because that is what a model needs to hear even when it is the file's OWN declaring lane (WP9 gap
+# 2): `path_in_partition` says "yours", but a single-FILE partition entry among a directory-prefix
+# entry means "yours to APPEND to", not "yours to replace" — Edit/Write already draw this line via
+# `pure_append`; this is the same line for Bash, which `pure_append` never sees.
+#
+# `sed -i` is deliberately NOT in the truncating set below: unlike `>`, it does not replace the
+# whole file by construction — an ordinary `s/a/b/` or line-targeted edit leaves the rest of the
+# file untouched, and a syntactic guess at "does this script empty the file" would either miss real
+# wipes or refuse ordinary edits that happen to match the guess. `sed -i` stays covered by D2's
+# mutex only, exactly as before this rule existed — a narrower, deliberate scope call, not an
+# oversight (see the report for this change).
+
+_BASH_TRUNCATING_HOWS = {"redirect", "tee", "cp", "mv", "install", "truncate", "dd"}
+
+
+# --------------------------------------------- where a git worktree may be created (WTSWEEP-1) ----
+# A worktree beside the repo is invisible to everything that reasons about the repo: it does not
+# appear in a listing of the project, it is not swept, and it outlives the work by months. The arc
+# that produced this rule left 45 of them loose in the projects directory. So placement is decided here
+# rather than remembered: under `<repo>/.claude/worktrees/`, which is inside the repo, ignored by
+# git, and where the Stop-time sweep looks.
+#
+# ★ `git worktree`, NOT the APFS clones `worktree.py` makes under `~/.claude/worktrees`. This rule
+# never sees those: they are not created by a `git` command line.
+
+_WT_VALUE_FLAGS = {"-b", "-B", "--reason", "--track", "--orphan"}
+
+
+def worktree_add_path(seg: str) -> str | None:
+    """The PATH argument of a `git worktree add`, or None when this segment is not one.
+
+    The path is the first positional after `add`, which means the flags have to be understood
+    rather than skipped: `git worktree add -b wt-ROW .claude/worktrees/ROW main` puts a BRANCH NAME
+    where a naive "first non-flag token" reading would find its path. Value-taking flags consume
+    their argument; `--flag=value` carries its own and consumes nothing.
+
+    KNOWN LIMIT, and it fails in the safe direction: the split is on whitespace, so a QUOTED path
+    containing a space arrives as fragments and the first fragment resolves somewhere outside the
+    allowed directory — the command is REFUSED. For this door a false refusal is recoverable in one
+    message and a false allow puts a worktree where nothing will ever sweep it, so over-refusing is
+    the correct way to be wrong. Stated because it is not evident from the code."""
+    toks = seg.split()
+    while toks and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", toks[0]):
+        toks = toks[1:]
+    if not toks or toks[0] != "git":
+        return None
+    i = 1
+    while i < len(toks) and (toks[i].startswith("-") or toks[i - 1] in ("-C", "-c")):
+        i += 1
+    if i + 1 >= len(toks) or toks[i] != "worktree" or toks[i + 1] != "add":
+        return None
+    i += 2
+    while i < len(toks):
+        tok = toks[i]
+        if tok in _WT_VALUE_FLAGS:
+            i += 2
+            continue
+        if tok.startswith("-"):
+            i += 1
+            continue
+        return tok
+    return None
+
+
+def rule_worktree_placement(cmd: str, cwd: str | None, notes: list | None = None) -> str | None:
+    """MARKER-SCOPED (PLUGDIR-1): refuses only in the vault or a marked repo (session cwd or the
+    repo the worktree is added to); elsewhere the text goes to `notes` and the command runs."""
+    for seg, repo in git_segments(cmd, cwd):
+        target = worktree_add_path(seg)
+        if not target:
+            continue
+        try:
+            root = common.repo_root_of(repo) or repo
+            dest = expand(target, str(Path(cwd) if cwd else common.HOME))
+            allowed = (root / ".claude" / "worktrees").resolve()
+            # `dest` need not exist yet — that is the point of `add` — so resolve() is called on a
+            # path whose tail is absent. `strict=False` is the default and is what makes that work;
+            # the symlinked-ancestor case still resolves, which is why this is not a string prefix.
+            here = dest.resolve()
+        except OSError:
+            continue
+        if here == allowed or allowed in here.parents:
+            continue
+        reason = (f"A git worktree goes under {root}/.claude/worktrees/<ROW>, not {target}. "
+                f"Inside the repo it is listed with the project, ignored by git, and removed "
+                f"automatically once its branch is merged and nobody is working in it; beside the "
+                f"repo it is invisible to all three. The arc that made this a rule left 45 "
+                f"abandoned worktree folders loose in the projects directory. "
+                f"Re-run as: git worktree add {root}/.claude/worktrees/<ROW> -b wt-<ROW> main")
+        if common.in_scope(cwd, repo, root):
+            return reason
+        if notes is not None:
+            notes.append(common.out_of_scope_note(reason))
+    return None
+
+
+def rule_bash_no_whole_file_write(cmd: str, cwd: str | None, sid: str) -> str | None:
+    for p, how in bash_write_targets(cmd, cwd):
+        if how not in _BASH_TRUNCATING_HOWS or p.suffix != ".md":
+            continue
+        try:
+            if not p.is_file() or p.stat().st_size == 0:
+                continue
+        except OSError:
+            continue
+        rel = vault_rel(p) or ""
+        if not rel or _under_cleanup(rel) or rel in created_paths(sid):
+            continue
+        kind = shared_surface(rel)
+        if kind:
+            return (f"`{rel}` is a SHARED surface ({kind}): rows are atomic single-Edit appends, never a "
+                     "read-modify-write — custody of a shared surface is shared, and a rewrite takes the other lane's row with it. "
+                    f"Bash may only APPEND to it (`>>`) — `{how}` truncates the whole file with no anchor. Use "
+                     "Edit/Write for a checked keyed-row append instead.")
+        return (f"Bash write ({how}) truncates `{rel}`, an existing non-empty vault file, with no anchor: another "
+                "session's content since your last read is gone with no record. Use Edit — its anchor is checked "
+                "against the file as it is now. Whole-file overwrite is never allowed unless this session created "
+                "the file. (Design §5.2 D1; new, empty, non-.md and Cleanup files are exempt; `>>` is unaffected.)")
+    return None
+
+
+def rule_bash_partition(cmd: str, inp: dict) -> str | None:
+    cwd = inp.get("cwd")
+    targets = bash_write_targets(cmd, cwd)
+    if not targets:
+        return None
+    lane, prefixes, marker = lane_for(cwd)
+    mode = partition_mode()
+    sid = inp.get("session_id", "-")
+    for p, how in targets:
+        if how == "mv-out":
+            rel = vault_rel(p) or ""
+            return (f"Defaults never delete: `mv` moves `{rel}` OUT of its place in the vault — for every reader that is a deletion "
+                    "(a wikilink, an @-import or a lane's partition now points at nothing). Move within the vault with `git mv` and a "
+                    "path-limited commit, or ask.")
+        if how not in ("mv-out", "rm"):
+            r = rule_display_name_filename(p)      # deterministic, like the stem rule: every mode, every lane
+            if r:
+                return r + f" (Bash write via {how}.)"
+    if lane is None and cwd and under(expand(cwd), common.VAULT):
+        log("partition", f"ok\tVAULT-CWD\tbash\tsession={sid}")
+        return None                                    # a session opened in the vault itself is the owner's own hand
+    for p, how in targets:
+        rel = vault_rel(p) or ""
+        if how == "mv-out":
+            return (f"Defaults never delete: `mv` moves `{rel}` OUT of its place in the vault — for every reader that is a deletion "
+                    "(a wikilink, an @-import or a lane's partition now points at nothing). Move within the vault with `git mv` and a "
+                    "path-limited commit, or ask. (Defaults never delete.)")
+        stem_dir = _cfg.stem_rule_dir()
+        if stem_dir and rel.startswith(stem_dir + "/") and p.stem in ROLE_STEMS:
+            return f"RESERVED-STEM RULE: `{rel}` carries a memory role stem inside `{stem_dir}/`; refused (Bash write via {how})."
+        kind = shared_surface(rel)
+        if lane and path_in_partition(rel, prefixes) and kind not in ("umbrella-shared", "roster"):
+            log("partition", f"ok\t{lane}\t{rel}\tbash={how}\tsession={sid}")     # the WARN week's denominator, Bash half
+            continue
+        if kind and how == "redirect-append":
+            # a Bash `>>` cannot be checked for the row grammar and no chore runs on Bash, so it would land unchecked
+            # and uncommitted (Caspar, closure round): shared-surface appends go through Edit/Write or ledger.py
+            log("partition", f"{mode}\t{lane}\t{rel}\tshared={kind}\tbash-append-refused\tsession={sid}")
+            if mode == "deny":
+                return (f"`{rel}` is a SHARED surface ({kind}); a Bash `>>` append is not checked against its row grammar and "
+                        "is never committed. Append with the Edit/Write tool (the door checks the row and the chore commits it), "
+                        "or `gedaechtnis/ledger.py append` for the ledger.")
+            continue
+        log("partition", f"{mode}\t{lane or 'UNKNOWN-LANE'}\t{rel}\tbash={how}\tsession={sid}")
+        if mode == "deny":
+            return (f"Bash write ({how}) to `{rel}`, outside lane {lane or 'UNKNOWN'}'s partition. The partition door binds Bash "
+                    "writes too: append a keyed row to a shared surface with the Edit/Write tool or `ledger.py`, or relay.")
+    # D2's Bash half. A shell redirect is a whole-file overwrite with no anchor, so it belongs
+    # inside the same per-file mutex as Edit/Write; `chore.py bash` drops these when the command
+    # returns, and a lock older than LOCK_TTL is taken over exactly as it is on the Edit path.
+    for p, how in targets:
+        if how not in ("redirect", "redirect-append", "sed-i", "tee", "tee-append") or p.suffix != ".md":
+            continue
+        ok, age, holder = take_filelock(p, sid)
+        if not ok:
+            log("deny", f"bash\tfilelock\t{vault_rel(p)}\theld-by={holder}\tage={age:.1f}s\tsession={sid}")
+            return (f"Another session is editing `{vault_rel(p)}` right now (lock {int(age)}s old); retry the same edit in a "
+                    "moment — it will re-read the file. (Design §5.2 D2)")
+    return None
+
+
+def rule_suite_gate(cmd: str, cwd: str | None) -> str | None:
+    """SUITEGATE-1: `git merge` / `git push` wait for a green full-suite record on the tree being
+    shipped. Off unless `suite_gate: true`; the whole rule is in `suitegate.py`."""
+    import suitegate                                        # noqa: PLC0415 — merge-time cost
+    return suitegate.refusal(cmd, cwd, lambda c, d: git_segments(c, d, raw=True))
+
+
+def rule_merge_window(cmd: str, cwd: str | None, sid: str) -> str | None:
+    """MERGEWINDOW-1: in a repository that carries `.merge-window`, only the session holding the
+    window moves `main`. The whole rule is in `mergewindow.py`."""
+    if not re.search(r"\b(?:merge|rebase|pull|push|fetch|branch|update-ref|checkout|switch)\b", cmd):
+        return None                                         # the common case costs one search
+    import mergewindow                                      # noqa: PLC0415
+    return mergewindow.refusal(cmd, cwd, sid, git_segments)
+
+
+def do_bash(inp: dict) -> None:
+    cmd = (inp.get("tool_input") or {}).get("command") or ""
+    cwd = inp.get("cwd")
+    if not cmd:
+        return
+    sid = inp.get("session_id", "-")
+    notes: list[str] = []                     # what an out-of-scope door would have said
+    for fn in (lambda: rule_vault_git(cmd, cwd), lambda: rule_inherited_tag_push(cmd, cwd, notes),
+               lambda: rule_launch_model(cmd),
+               lambda: rule_data_integrity(cmd), lambda: rule_artifact_not_file(cmd, cwd, notes),
+               lambda: rule_generated_view_bash(cmd, cwd),
+               lambda: rule_bash_no_whole_file_write(cmd, cwd, sid),
+               lambda: rule_worktree_placement(cmd, cwd, notes),
+               lambda: rule_bash_partition(cmd, inp),
+               lambda: rule_merge_window(cmd, cwd, sid),
+               lambda: rule_suite_gate(cmd, cwd)):
+        r = fn()
+        if r:
+            log("deny", f"bash\t{r.split('.')[0][:80]}\t{cmd[:200].replace(chr(10),' ')}")
+            if r.startswith(("Defaults never delete", "The Trash is never emptied", "Destructive SQL")):
+                ask(EV, r)                            # data-destroying acts REFUSE AND ASK: the owner may still say yes
+            else:
+                deny(EV, r)
+            return
+    # The delete door (DELETEPOLICY-1): after the doors above, so a protected class still ASKS.
+    if deletedoor.enabled():
+        r = deletedoor.check(cmd, cwd, sid, segments)
+        if r:
+            m = deletedoor.mode()
+            log("delete", f"{m}\t{cmd[:200].replace(chr(10), ' ')}")
+            if m == "deny":
+                log("deny", f"bash\tdelete door\t{cmd[:200].replace(chr(10), ' ')}")
+                deny(EV, r)
+            else:
+                common.context(EV, "WARN — the delete door is in its one-day WARN window, so this "
+                                   "command runs; from DENY on it is refused. " + r)
+            return
+    # No door fired: a non-blocking context-economy notice, if this command reads a single file
+    # via cat/head/tail/sed -n (context_economy.py), plus whatever an out-of-scope door noted.
+    # A note is `additionalContext` alone — never `permissionDecision: allow`, which would skip
+    # the person's own permission prompt (PLUGDIR-1).
+    note = context_economy.bash_notice(inp)
+    if note:
+        notes.append(note)
+    if notes:
+        for n in notes:
+            if n.startswith(common.OUT_OF_SCOPE_PREFIX):
+                # the REASON, past the fixed prefix — so the row says which door would have refused
+                why = n[len(common.OUT_OF_SCOPE_PREFIX):][:90].replace("\t", " ").replace("\n", " ")
+                log("scope", f"bash\tnote-only\t{why}\t{cmd[:160].replace(chr(10), ' ').replace(chr(9), ' ')}")
+        context(EV, "\n\n".join(notes))
+
+
+# ------------------------------------------------- the display-name-as-filename door (§6.3) ----
+# The display layer shows `Canon.md` as "Decisions". A model that reads "write it to Decisions"
+# may create `Decisions.md`, and then the region has two files for one role, neither of which any
+# consumer of ROLE_STEMS can see. The door is deterministic, so it refuses in every partition mode
+# — like the reserved-stem rule — and only for a file that does not exist yet: an existing
+# `Decisions.md` is somebody's data, and this door never touches data.
+
+
+def _fold(s: str) -> str:
+    """`open-questions` · `Open_Questions` · `OPEN QUESTIONS` all fold to `open questions`."""
+    return re.sub(r"\s+", " ", s.replace("_", " ").replace("-", " ")).strip().casefold()
+
+
+_DISPLAY_TO_STEM: dict | None = None
+
+
+def display_to_stem() -> dict:
+    """{folded display name (every language column) → the stem it names}."""
+    global _DISPLAY_TO_STEM
+    if _DISPLAY_TO_STEM is None:
+        m = {}
+        for stem in names.stems():
+            for lang in ("en", "de"):
+                d = names.display(stem, lang)
+                if d:
+                    m.setdefault(_fold(d), stem)
+        _DISPLAY_TO_STEM = m
+    return _DISPLAY_TO_STEM
+
+
+def rule_display_name_filename(p: Path) -> str | None:
+    """Deny reason for creating a vault `.md` file named after a display name, else None."""
+    if p.suffix != ".md" or p.exists():
+        return None
+    # A reserved-stem directory is EXEMPT from this door: its files are named by that folder's
+    # own table, and a name in it may legitimately collide with a display name (`Index` is one
+    # such table's native name and also Map's display name). Refusing it here would deny the
+    # correct file name in the one place the vault requires it. The reserved-stem rule still
+    # refuses a role STEM in the same folder, so the two doors do not overlap.
+    stem_dir = _cfg.stem_rule_dir()
+    if stem_dir and (vault_rel(p) or "").startswith(stem_dir + "/"):
+        return None
+    stem = p.stem
+    # a real role stem is never denied, whatever the display table says: `Patterns` is both a stem
+    # and its own display name, and `Inbox` is a stem the chores create.
+    if stem.casefold() in {s.casefold() for s in (set(ROLE_STEMS) | set(names.stems()))}:
+        return None
+    folded = _fold(stem)
+    if folded not in {_fold(d) for d in names.all_display_names()}:
+        return None
+    target = display_to_stem().get(folded)
+    if not target:
+        return None                              # a display name we cannot resolve names no file to point at
+    rel_dir = vault_rel(p.parent)
+    where = f"{rel_dir}/{target}.md" if rel_dir and rel_dir != "." else f"{target}.md"
+    return (f'The file is `{target}.md` (shown as "{names.display(target)}"); display names are never file names — '
+            f"every consumer of the vault's role stems looks for `{target}.md` and would never see `{p.name}`. "
+            f"Write to `{where}`.")
+
+
+# --------------------------------------------------------------------------- write hooks ----
+
+def partition_mode() -> str:
+    try:
+        v = (common.STATE / "partition.mode").read_text(encoding="utf-8").strip().lower()
+        return v if v in ("warn", "deny") else "warn"
+    except OSError:
+        return "warn"
+
+
+# ------------------------------------------------------ D1: no whole-file Write (DESIGN §5.2) ----
+# `Edit` is a compare-and-swap: its anchor is matched against the file as it is at the moment of
+# the edit, so an edit against a paragraph another session changed FAILS instead of clobbering.
+# A whole-file `Write` has no anchor at all — it replaces the file from the session's stale
+# reading, and every line a sibling added since that read is gone with no error anywhere. So the
+# door refuses that one shape, and the refusal names the tool that does the same job safely.
+#
+# It binds prose memory files and NOTHING else. Exempt, each for its own reason:
+#   · a file that does not exist     — nothing to lose
+#   · an empty file                  — same
+#   · a file that is not `.md`       — a generator writing an HTML page or a verdict JSON into the
+#                                      vault is not editing memory and is never refused ([R3])
+#   · anything under `Cleanup */`    — a cleanup bundle is written whole, by construction ([R3])
+#   · a file THIS session created    — there is no other session's content in it to lose
+#   · a verified pure append to a SHARED surface — the append rule re-reads the file HERE and
+#     refuses unless the write extends what is on disk NOW, which is the same guarantee D1 asks
+#     of Edit. Without this the door would silently retract the keyed-row affordance §5.2 keeps.
+
+
+def _under_cleanup(rel: str) -> bool:
+    """Any ancestor directory named `Cleanup *` — the bundle convention, at any depth."""
+    return any(fnmatch.fnmatch(part, "Cleanup *") for part in Path(rel).parts[:-1])
+
+
+def rule_no_whole_file_write(tool: str, ti: dict, p: Path, rel: str, sid: str, lane: str | None) -> str | None:
+    if tool != "Write":
+        return None                                  # Edit / MultiEdit / NotebookEdit are anchored
+    if p.suffix != ".md" or not p.is_file():
+        return None
+    try:
+        if p.stat().st_size == 0:
+            return None
+    except OSError:
+        return None
+    if _under_cleanup(rel) or rel in created_paths(sid):
+        return None
+    kind = shared_surface(rel)
+    if kind:
+        ok, _why = pure_append(kind, p, "Write", ti, lane)
+        if ok:
+            return None
+    return (f"Whole-file Write to `{rel}` refused: another session may have changed this file since you read it. "
+            "Use Edit — its anchor is checked against the file as it is now. "
+            "(Design §5.2 D1; new, empty, non-.md and Cleanup files are exempt.)")
+
+
+def rule_authority_ledger(p: Path, tool: str, ti: dict) -> str | None:
+    """STALEAUTH-1: an authority record its own reader cannot resolve, refused at the write.
+
+    Inert unless the installation names an `authority_log` in its config — the ledger is a
+    convention of the vault, not of this package (see `config.authority_log`).
+
+    Judged on the records this write ADDS, never on the ones already there: an append-only file
+    accumulates history under rules that changed, and re-judging the whole file would refuse an
+    unrelated append because of somebody's record from a year ago. Reasoning and the two rules:
+    `authority.py`.
+    """
+    log_path = _cfg.authority_log()
+    if log_path is None:
+        return None
+    try:
+        if p.resolve() != log_path.resolve():
+            return None
+    except OSError:
+        return None
+    try:
+        current = p.read_text(encoding="utf-8") if p.is_file() else ""
+    except OSError:
+        return None
+    after = authority.post_write_text(current, tool, ti)
+    if after is None:
+        return None                                  # the resulting text is not knowable; say nothing
+    found = authority.problems(current, after)
+    if not found:
+        return None
+    body = "\n".join(f"  - {f}" for f in found)
+    return ("This write adds an authority record its own reader could not resolve:\n" + body +
+            "\n\nAn append-only ledger is only worth having if what it holds can still be resolved "
+            "later; both of these fail in the reassuring direction, where the ledger looks fuller "
+            "or more current than it is.")
+
+
+def do_write(inp: dict) -> None:
+    ti = inp.get("tool_input") or {}
+    fp = ti.get("file_path") or ti.get("notebook_path") or ""
+    if not fp:
+        return
+    cwd = inp.get("cwd")
+    p = expand(fp, cwd)
+
+    # Checked BEFORE the vault-only return below: an authority ledger commonly lives in a REPO
+    # rather than inside the memory vault, so a door that only ever looked inside the vault would
+    # never see the file it is about to judge. WARN now, DENY with the partition flip — one flip
+    # act, two doors, so a second refusing door does not land before the first is proven.
+    a = rule_authority_ledger(p, inp.get("tool_name") or "", ti)
+    if a:
+        mode = partition_mode()
+        log("deny" if mode == "deny" else "partition",
+            f"write\tauthority-ledger\t{fp}\tmode={mode}\tsession={inp.get('session_id', '-')}")
+        if mode == "deny":
+            deny(EV, a)
+            return
+        context(EV, a)
+        return
+
+    if not under(p, common.VAULT):
+        return
+    rel = vault_rel(p) or ""
+    note_pre_exists(p)      # the only moment anything can still tell a CREATION from an edit (chore.py reads this back)
+    # reserved-stem rule — a real refusal regardless of mode, where this vault declares such a
+    # directory (`topology.stem_rule_dir`); where it declares none, there is no such rule
+    stem_dir = _cfg.stem_rule_dir()
+    if stem_dir and rel.startswith(stem_dir + "/") and p.stem in ROLE_STEMS:
+        clear_pre_exists(p)                      # a refused write leaves no record of itself
+        deny(EV, (f"RESERVED-STEM RULE: no file under `{stem_dir}/` may carry a memory role stem (`{p.stem}`) — it would "
+                  "be picked up by freshness checks, the cleanup pass and region discovery as though it were memory. "
+                  "Use that folder's own naming table."))
+        return
+    # the `# GENERATED` door — deterministic, so it refuses in every partition mode, like the stem rule
+    if is_generated(p):
+        log("deny", f"write\tgenerated-view\t{rel}\tsession={inp.get('session_id', '-')}")
+        clear_pre_exists(p)                      # a refused write leaves no record of itself
+        deny(EV, generated_refusal(rel, f"`{inp.get('tool_name') or 'Edit'}`"))
+        return
+    r = rule_display_name_filename(p)
+    if r:
+        log("deny", f"write\tdisplay-name-filename\t{rel}")
+        clear_pre_exists(p)                      # a refused write leaves no record of itself
+        deny(EV, r)
+        return
+    lane, prefixes, marker = lane_for(cwd)
+    mode = partition_mode()
+    sid = inp.get("session_id", "-")
+
+    # D2 — take the per-file mutex, then D1. Every refusal from here on RELEASES the lock first:
+    # the tool call is not going to happen, so holding the file for the next ten seconds would
+    # block a sibling for a write that never occurred. `NotebookEdit` is the one tool whose lock
+    # the chore cannot release (hooks.json has no PostToolUse for it, and it carries
+    # `notebook_path` rather than `file_path`), so a notebook's lock ages out at LOCK_TTL instead —
+    # the same fail-safe that covers a hook that dies, and the reason there has to be one.
+    ok, age, holder = take_filelock(p, sid)
+    if not ok:
+        log("deny", f"write\tfilelock\t{rel}\theld-by={holder}\tage={age:.1f}s\tsession={sid}")
+        clear_pre_exists(p)                      # a refused write leaves no record of itself
+        deny(EV, (f"Another session is editing `{rel}` right now (lock {int(age)}s old); retry the same edit in a moment — "
+                  "it will re-read the file. (Design §5.2 D2)"))
+        return
+
+    def refuse(reason: str) -> None:
+        # A refused write leaves nothing behind: not the mutex (a sibling would wait ten seconds
+        # for a write that never happened) and not the pre-exists marker (a later chore would read
+        # it as a creation by this session and let D1 wave the overwrite through).
+        release_filelock(p, sid)
+        clear_pre_exists(p)
+        deny(EV, reason)
+
+    d1 = rule_no_whole_file_write(inp.get("tool_name") or "", ti, p, rel, sid, lane)
+    if d1:
+        log("deny", f"write\twhole-file-write\t{rel}\tsession={sid}")
+        refuse(d1)
+        return
+
+    if lane is None and cwd and under(expand(cwd), common.VAULT):
+        log("partition", f"ok\tVAULT-CWD\t{rel}\tsession={sid}")
+        return                                   # a session opened in the vault itself is the owner's own hand
+    if lane is None:
+        log("partition", f"{mode}\tUNKNOWN-LANE\t{rel}\tcwd={cwd}\tsession={sid}")
+        if mode == "deny":
+            refuse((f"No `.atlas-lane` marker resolves from this cwd, so this session has NO declared write partition in "
+                     f"{common.vault_home_rel()}. Lane identity is DECLARED, never inferred: open the session in the repo "
+                      "that owns this region, or relay through your outbox."))
+        return
+    kind = shared_surface(rel)
+    if path_in_partition(rel, prefixes) and kind not in ("umbrella-shared", "roster"):
+        log("partition", f"ok\t{lane}\t{rel}\tsession={sid}")
+        return
+    if kind:
+        ok, why = pure_append(kind, p, inp.get("tool_name") or "Edit", ti, lane)
+        log("partition", f"{mode}\t{lane}\t{rel}\tshared={kind}\tappend={'ok' if ok else 'NO'}\t{why}\tsession={sid}")
+        if ok:
+            return                                   # the narrow audited exception: a keyed row, appended
+        if mode == "deny":
+            refuse((f"`{rel}` is a SHARED surface ({kind}): any lane may APPEND a keyed row to it, nothing else — and this "
+                      f"write is not a pure append ({why}). Append a row instead (queue: `- [ ] `q:…``; ledger: `gedaechtnis/ledger.py append`; "
+                      "inbox: `- YYYY-MM-DD LANE …`)."))
+        return
+    log("partition", f"{mode}\t{lane}\t{rel}\tmarker={marker}\tsession={sid}")
+    if mode == "deny":
+        outbox = _cfg.channels_rel()
+        where = f"write a notice in `{outbox}/{lane}/`" if outbox else "relay it through your own outbox"
+        refuse((f"`{rel}` is outside lane {lane}'s declared partition ({marker}). A defect in another lane's paths is a "
+                 "briefing, not our edit: append a keyed row to a SHARED surface (its queue file, the cross-lane ledger, "
+                f"the region's Inbox) or {where}. A writer's PERMISSIONS must never decide a record's PLACEMENT."))
+
+
+# --------------------------------------------------------------------------- agent hook ----
+
+def agent_definition_has_model(kind: str, cwd: str | None) -> bool:
+    if not kind:
+        return False
+    cands = []
+    if cwd:
+        d = Path(cwd)
+        for _ in range(8):
+            cands.append(d / ".claude" / "agents" / f"{kind}.md")
+            if d == d.parent or d == common.HOME:
+                break
+            d = d.parent
+    cands.append(common.HOME / ".claude" / "agents" / f"{kind}.md")
+    for c in cands:
+        try:
+            txt = c.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        fm = txt.split("---", 2)
+        if len(fm) >= 3 and re.search(r"^model:\s*\S+", fm[1], re.M):
+            return True
+        return False
+    return False
+
+
+def _agent_model_refusal(inp: dict, kind: str) -> str | None:
+    """The model-pinning rule. A `fork` is exempt: it inherits the parent model BY DESIGN, so there
+    is no silent tier change to refuse. The fan-out rules below have no such exemption — a fork
+    started from inside a sub-agent is another parallel session spending the same window."""
+    ti = inp.get("tool_input") or {}
+    if kind == "fork" or ti.get("model"):
+        return None
+    if agent_definition_has_model(kind, inp.get("cwd")):
+        return None
+    if not _cfg.flag("require_agent_model"):
+        return None                              # a stranger's default: never deny a built-in agent on first use
+    return (f"This Agent call names no `model` and `{kind or 'general-purpose'}` has no `model:` in its definition, so it "
+            "would inherit the session model — under Fable that is 2× Opus, silently. Pin `model: \"sonnet\"|\"opus\"|"
+            "\"haiku\"` per the task→model table (judge-class = sonnet medium; build = opus medium).")
+
+
+def do_agent(inp: dict) -> None:
+    ti = inp.get("tool_input") or {}
+    kind = ti.get("subagent_type") or ""
+    sid = inp.get("session_id", "-")
+    def refuse_agent(tag: str, reason: str) -> None:
+        log("deny", f"agent\t{tag}\tkind={kind or 'general-purpose'}\tsession={sid}\t"
+                    f"row=q:CU-2026-09-20-AGENTFANOUT-1")
+        deny(EV, reason)
+
+    # The two fan-out rules are MARKER-SCOPED (PLUGDIR-1): they refuse only when the session runs
+    # in the vault or a marked repo. Elsewhere the refusal becomes a note and the call proceeds.
+    scoped = common.in_scope(inp.get("cwd"))
+    notes: list[str] = []
+    ref = fanout.permit_refusal(inp)
+    if ref and scoped:
+        refuse_agent(*ref)
+        return
+    if ref:
+        log("scope", f"agent\tnote-only\t{ref[0]}\tsession={sid}")
+        notes.append(common.out_of_scope_note(ref[1]))
+    model_reason = _agent_model_refusal(inp, kind)
+    if model_reason:
+        log("deny", f"agent\tmodel-pin\tkind={kind or 'general-purpose'}\tsession={sid}")
+        deny(EV, model_reason)
+        return
+    # LAST, and in one locked act: the cap is checked and the slot is taken together, so two
+    # `Agent` calls issued in the same message cannot both read "one below the cap" and both go.
+    # `subagent_stop.py` releases the slot; a start the harness never finishes is dropped by the
+    # staleness window. Nothing above this line has taken a slot, so a refusal costs nothing.
+    ref, note = fanout.reserve_or_refuse(inp)
+    if ref and scoped:
+        refuse_agent(*ref)
+        return
+    if ref:
+        log("scope", f"agent\tnote-only\t{ref[0]}\tsession={sid}")
+        notes.append(common.out_of_scope_note(ref[1]))
+    if note:
+        notes.append(note)
+    if notes:
+        context(EV, "\n\n".join(notes))
+
+
+def do_read(inp: dict) -> None:
+    """PreToolUse Read: a non-blocking context-economy notice, or nothing (context_economy.py)."""
+    ti = inp.get("tool_input") or {}
+    fp = ti.get("file_path") or ""
+    if not fp:
+        return
+    p = expand(fp, inp.get("cwd"))
+    partial = ti.get("offset") is not None or ti.get("limit") is not None
+    note = context_economy.check_read(inp.get("session_id", "-"), p, partial=partial)
+    if note:
+        context(EV, note)
+
+
+def do_message(inp: dict) -> None:
+    """PreToolUse SendMessage: refuse a message that would wake a large or cold idle session
+    (RESUMEGATE-1; resume_gate.py). Rides the `agent` entry so hooks.json keeps one entry per tool
+    group."""
+    import resume_gate                       # only here: the other doors never pay for it
+    got = resume_gate.decide(inp)
+    if not got:
+        return
+    kind, text = got
+    # MARKER-SCOPED (PLUGDIR-1): the wake refusal applies only to a session running in the vault or
+    # a marked repo; elsewhere the same measurement arrives as a note and the message is sent.
+    if kind == "deny" and common.in_scope(inp.get("cwd")):
+        deny(EV, text)
+    elif kind == "deny":
+        log("scope", f"message\tnote-only\tresume\tsession={inp.get('session_id', '-')}")
+        context(EV, common.out_of_scope_note(text))
+    else:
+        context(EV, text)
+
+
+def main() -> None:
+    which = sys.argv[1] if len(sys.argv) > 1 else ""
+    inp = read_input()
+    if which == "agent" and inp.get("tool_name") == "SendMessage":
+        which = "message"
+    {"bash": do_bash, "write": do_write, "agent": do_agent, "message": do_message,
+     "read": do_read}.get(which, lambda _i: None)(inp)
+
+
+if __name__ == "__main__":
+    guarded(main)

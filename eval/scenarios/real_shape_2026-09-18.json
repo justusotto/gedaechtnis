@@ -1,0 +1,277 @@
+{
+ "measured": "2026-09-18",
+ "rule": "shipped (3b7c5c0c): child>=8, parent>=4",
+ "note": "counts only; region labels are sha1[:8] of the region path; no vault text",
+ "regions": [
+  {
+   "label": "r-6bc92431",
+   "n": 30,
+   "cluster": {
+    "Patterns": 2,
+    "Canon": 11,
+    "Position": 3
+   },
+   "rest": {
+    "Patterns": 10,
+    "Canon": 4
+   },
+   "density": 0.192,
+   "coverage": 0.312
+  },
+  {
+   "label": "r-8bbf0138",
+   "n": 35,
+   "cluster": {
+    "Errata": 5,
+    "Patterns": 2,
+    "Canon": 4,
+    "Position": 4,
+    "Course": 3,
+    "Aporia": 3
+   },
+   "rest": {
+    "Errata": 2,
+    "Patterns": 5,
+    "Canon": 3,
+    "Position": 1,
+    "Course": 1,
+    "Aporia": 2
+   },
+   "density": 0.119,
+   "coverage": 0.143
+  },
+  {
+   "label": "r-079e946f",
+   "n": 39,
+   "cluster": {
+    "Errata": 4,
+    "Patterns": 3,
+    "Canon": 4,
+    "Position": 2,
+    "Course": 1,
+    "Aporia": 3
+   },
+   "rest": {
+    "Errata": 2,
+    "Patterns": 6,
+    "Canon": 6,
+    "Position": 2,
+    "Course": 3,
+    "Aporia": 3
+   },
+   "density": 0.184,
+   "coverage": 0.353
+  },
+  {
+   "label": "r-3fe6d9e2",
+   "n": 41,
+   "cluster": {
+    "Errata": 4,
+    "Patterns": 4,
+    "Position": 1
+   },
+   "rest": {
+    "Errata": 8,
+    "Patterns": 12,
+    "Canon": 4,
+    "Position": 4,
+    "Course": 4
+   },
+   "density": 0.222,
+   "coverage": 0.333
+  },
+  {
+   "label": "r-f7e43132",
+   "n": 46,
+   "cluster": {
+    "Errata": 1,
+    "Canon": 2,
+    "Position": 1,
+    "Course": 1,
+    "Aporia": 3
+   },
+   "rest": {
+    "Errata": 3,
+    "Patterns": 11,
+    "Canon": 14,
+    "Position": 4,
+    "Course": 3,
+    "Aporia": 3
+   },
+   "density": 0.357,
+   "coverage": 0.5
+  },
+  {
+   "label": "r-6d1d1da1",
+   "n": 53,
+   "cluster": {
+    "Errata": 3,
+    "Patterns": 1,
+    "Canon": 11,
+    "Position": 2,
+    "Course": 1
+   },
+   "rest": {
+    "Errata": 8,
+    "Patterns": 10,
+    "Canon": 6,
+    "Position": 3,
+    "Course": 4,
+    "Aporia": 4
+   },
+   "density": 0.268,
+   "coverage": 0.5
+  },
+  {
+   "label": "r-6e56e449",
+   "n": 60,
+   "cluster": {
+    "Errata": 6,
+    "Patterns": 1,
+    "Canon": 3,
+    "Position": 3,
+    "Course": 1,
+    "Aporia": 5
+   },
+   "rest": {
+    "Errata": 9,
+    "Patterns": 13,
+    "Canon": 10,
+    "Position": 2,
+    "Course": 7
+   },
+   "density": 0.14,
+   "coverage": 0.316
+  },
+  {
+   "label": "r-490fa4e9",
+   "n": 66,
+   "cluster": {
+    "Errata": 14,
+    "Patterns": 1,
+    "Canon": 7,
+    "Position": 5,
+    "Course": 1,
+    "Aporia": 10
+   },
+   "rest": {
+    "Errata": 3,
+    "Patterns": 7,
+    "Canon": 7,
+    "Position": 3,
+    "Course": 3,
+    "Aporia": 5
+   },
+   "density": 0.127,
+   "coverage": 0.132
+  },
+  {
+   "label": "r-659696a6",
+   "n": 77,
+   "cluster": {
+    "Errata": 9,
+    "Patterns": 24,
+    "Canon": 8,
+    "Position": 2,
+    "Course": 3,
+    "Aporia": 5
+   },
+   "rest": {
+    "Errata": 5,
+    "Patterns": 5,
+    "Canon": 7,
+    "Position": 4,
+    "Course": 1,
+    "Aporia": 4
+   },
+   "density": 0.117,
+   "coverage": 0.255
+  },
+  {
+   "label": "r-14981007",
+   "n": 101,
+   "cluster": {
+    "Errata": 18,
+    "Patterns": 3,
+    "Canon": 7,
+    "Position": 7,
+    "Course": 3,
+    "Aporia": 9
+   },
+   "rest": {
+    "Errata": 21,
+    "Patterns": 15,
+    "Canon": 10,
+    "Position": 3,
+    "Course": 2,
+    "Aporia": 3
+   },
+   "density": 0.087,
+   "coverage": 0.106
+  },
+  {
+   "label": "r-515d7436",
+   "n": 115,
+   "cluster": {
+    "Errata": 15,
+    "Patterns": 23,
+    "Canon": 13,
+    "Position": 13,
+    "Course": 4,
+    "Aporia": 9
+   },
+   "rest": {
+    "Errata": 9,
+    "Patterns": 17,
+    "Canon": 9,
+    "Course": 2,
+    "Aporia": 1
+   },
+   "density": 0.111,
+   "coverage": 0.117
+  },
+  {
+   "label": "r-5cf9aaac",
+   "n": 165,
+   "cluster": {
+    "Errata": 34,
+    "Patterns": 37,
+    "Canon": 29,
+    "Position": 13,
+    "Course": 2,
+    "Aporia": 7
+   },
+   "rest": {
+    "Patterns": 19,
+    "Canon": 12,
+    "Position": 6,
+    "Course": 1,
+    "Aporia": 5
+   },
+   "density": 0.171,
+   "coverage": 0.246
+  },
+  {
+   "label": "r-12d8e26c",
+   "n": 266,
+   "cluster": {
+    "Errata": 34,
+    "Patterns": 66,
+    "Canon": 40,
+    "Position": 49,
+    "Course": 7,
+    "Aporia": 16
+   },
+   "rest": {
+    "Errata": 9,
+    "Patterns": 32,
+    "Canon": 5,
+    "Position": 4,
+    "Course": 3,
+    "Aporia": 1
+   },
+   "density": 0.166,
+   "coverage": 0.212
+  }
+ ]
+}
