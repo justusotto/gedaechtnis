@@ -1,0 +1,396 @@
+"""Tests for the SessionStart/Stop region claim.
+
+The real claim helper is NEVER run: every test points `claim_tool` at a fake shell script in
+tmp_path that records its own argv and exits with a code the test chooses. That keeps the suite
+away from the real vault's lock directory entirely — a suite that writes the application's real
+state makes its own verdict depend on the machine (Global/Errata), and here the state in question
+is a coordination lock other live sessions obey.
+
+The Claude Code process is faked the same way: a script named `claude` records its pid and then
+runs the hook, so the hook's parent-chain walk has something real to find. That is also the
+control for the rule that matters most — the pid handed to the lock is never the hook's own.
+"""
+from __future__ import annotations
+import json, os, subprocess, sys
+from pathlib import Path
+import pytest
+
+HOOKS = Path(__file__).resolve().parents[1] / "hooks"
+
+
+@pytest.fixture
+def world(tmp_path):
+    vault = tmp_path / "Atlas"
+    (vault / "Global").mkdir(parents=True)
+    (vault / "Studio" / "Cards").mkdir(parents=True)
+    (vault / "Toolkit").mkdir()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".git").mkdir()                            # repo_root_of stops at a .git
+    (repo / ".atlas-lane").write_text(
+        "lane: CARD\npath: Studio/Cards/\npath: Global/\n"
+        "path: Queues/regions/cards.md\n")
+    state = tmp_path / "state"
+
+    argv_log = tmp_path / "tool-argv.txt"
+    rc_file = tmp_path / "tool-rc.txt"
+    tool = tmp_path / "fake_region_claim.sh"
+    tool.write_text(
+        "#!/bin/sh\n"
+        f'printf "%s\\n" "$*" >> "{argv_log}"\n'
+        f'printf "ATLAS=%s\\n" "$ATLAS" >> "{argv_log}"\n'
+        f'[ "$1" = status ] && [ -f "{rc_file}.status" ] && {{ cat "{rc_file}.status"; exit 0; }}\n'
+        f'[ -f "{rc_file}" ] && exit "$(cat "{rc_file}")"\n'
+        "exit 0\n")
+    tool.chmod(0o755)
+
+    pidfile = tmp_path / "claude.pid"
+    fake_claude = tmp_path / "bin" / "claude"          # basename `claude` — what _is_claude matches
+    fake_claude.parent.mkdir()
+    fake_claude.write_text(f'#!/bin/sh\nprintf "%s" "$$" > "{pidfile}"\n"$@"\n')  # no exec: it stays the parent
+    fake_claude.chmod(0o755)
+
+    # A PATH whose `ps` reports every process as a child of init: the parent-chain walk then
+    # finds nothing, which is the only way to test the no-claude-ancestor branch from inside a
+    # suite that is itself running under a real Claude Code process.
+    blind = tmp_path / "blind"
+    blind.mkdir()
+    (blind / "ps").write_text('#!/bin/sh\necho "1 /usr/sbin/nothing"\n')
+    (blind / "ps").chmod(0o755)
+
+    # A PATH whose `ps` reports a FIXED claude ancestor (pid 4242), so two runs of the hook see
+    # the one process a resume really does share. The wrapper above cannot: it is a new shell,
+    # with a new pid, every time it runs.
+    pinned = tmp_path / "pinned"
+    pinned.mkdir()
+    (pinned / "ps").write_text(
+        '#!/bin/sh\nfor a in "$@"; do p="$a"; done\n'
+        'if [ "$p" = "4242" ]; then echo "1 /opt/bin/claude --model m"; else echo "4242 /bin/sh"; fi\n')
+    (pinned / "ps").chmod(0o755)
+
+    cfg = tmp_path / "config.json"
+    cfg.write_text(json.dumps({"claim_tool": str(tool),
+                           "topology": {"non_region_tops": ["Global", "Queues", "Channels"],
+                                        "queues_dir": "Queues/regions"}}))
+
+    env = dict(os.environ, GEDAECHTNIS_VAULT=str(vault), GEDAECHTNIS_STATE_DIR=str(state),
+               GEDAECHTNIS_CONFIG=str(cfg))
+    env.pop("GEDAECHTNIS_AUTO_CLAIM", None)
+    env.pop("GEDAECHTNIS_CLAIM_TOOL", None)
+    return dict(vault=vault, repo=repo, state=state, env=env, tmp=tmp_path, cfg=cfg,
+                argv_log=argv_log, rc_file=rc_file, tool=tool, fake_claude=fake_claude,
+                pidfile=pidfile, blind=blind, pinned=pinned)
+
+
+def hook(w, which, *, cwd=None, sid="S1", source="startup", under_claude=True, blind_ps=False,
+         pinned_ps=False):
+    """Run claim.py, optionally beneath a process whose basename is `claude`."""
+    argv = [sys.executable, str(HOOKS / "claim.py"), which]
+    if under_claude:
+        argv = [str(w["fake_claude"])] + argv
+    env = dict(w["env"])
+    if blind_ps or pinned_ps:
+        env["PATH"] = str(w["blind" if blind_ps else "pinned"]) + os.pathsep + env.get("PATH", "")
+    payload = {"cwd": cwd or str(w["repo"]), "session_id": sid, "source": source}
+    p = subprocess.run(argv, input=json.dumps(payload), capture_output=True, text=True,
+                       env=env, timeout=60)
+    assert p.returncode == 0, p.stderr
+    return p
+
+
+def claude_pid(w):
+    """The pid the fake `claude` wrapper reported for the MOST RECENT hook run."""
+    return w["pidfile"].read_text().strip()
+
+
+def calls(w):
+    """The subcommand lines the fake tool recorded (ATLAS echo lines dropped)."""
+    if not w["argv_log"].exists():
+        return []
+    return [l for l in w["argv_log"].read_text().splitlines() if l and not l.startswith("ATLAS=")]
+
+
+def claims(w, sid="S1"):
+    f = w["state"] / f"session-start-{sid}.json"
+    return json.loads(f.read_text())["claims"] if f.exists() else None
+
+
+def logtext(w, name):
+    f = w["state"] / f"{name}.log"
+    return f.read_text() if f.exists() else ""
+
+
+# ---------------------------------------------------------------- the pair works ----
+def test_start_claims_the_region_and_stop_releases_exactly_it(world):
+    w = world
+    hook(w, "start")
+    pid = w["pidfile"].read_text().strip()
+    assert calls(w) == [f"claim-interactive Studio/Cards {pid}"]
+    assert claims(w) == [{"region": "Studio/Cards", "pid": int(pid)}]
+
+    hook(w, "stop")
+    assert calls(w)[1] == f"release-interactive Studio/Cards {pid}"
+    assert claims(w) == []                         # nothing left to release twice
+
+
+def test_the_tool_is_told_which_vault_to_use(world):
+    """The helper reads ATLAS; a hook must not act on a different vault than the plugin's."""
+    hook(world, "start")
+    assert f"ATLAS={world['vault']}" in world["argv_log"].read_text()
+
+
+# ------------------------------------------------------------- the pid handed over ----
+def test_pid_is_the_claude_process_never_the_hook_s_own(world):
+    w = world
+    hook(w, "start")
+    claude_pid = int(w["pidfile"].read_text().strip())
+    assert claims(w)[0]["pid"] == claude_pid
+    line = [l for l in logtext(w, "claim").splitlines() if "start" in l][0]
+    self_pid = int(line.split("self=")[1].split("\t")[0])
+    assert self_pid != claude_pid                  # the walk moved off the hook process
+    assert f"claude={claude_pid}" in line
+
+
+def test_no_claude_ancestor_claims_nothing_and_says_why(world):
+    w = world
+    hook(w, "start", under_claude=False, blind_ps=True)     # a parent chain with no claude in it
+    assert calls(w) == []
+    assert claims(w) is None
+    assert "no claude process found" in logtext(w, "hook-errors")
+
+
+# ------------------------------------------------------------------- the no-ops ----
+def test_unknown_lane_no_call(world):
+    w = world
+    elsewhere = w["tmp"] / "unmarked"
+    elsewhere.mkdir()
+    hook(w, "start", cwd=str(elsewhere))
+    assert calls(w) == []
+
+
+def test_zero_regions_no_call(world):
+    """A marker that declares only shared and non-tier prefixes names no region to claim."""
+    w = world
+    (w["repo"] / ".atlas-lane").write_text("lane: CURSUS\npath: Global/\npath: Queues/\n")
+    hook(w, "start")
+    assert calls(w) == []
+
+
+def test_tool_absent_no_call_no_crash(world):
+    w = world
+    w["cfg"].write_text(json.dumps({"claim_tool": str(w["tmp"] / "nope.sh")}))
+    p = hook(w, "start")
+    assert calls(w) == []
+    # …and the session is TOLD it is unclaimed rather than left to read silence as a claim
+    assert "Region claim" in p.stdout and "OFF" in p.stdout
+    hook(w, "stop")                                 # and the stop half survives it too
+    assert calls(w) == []
+
+
+def test_auto_claim_false_no_call(world):
+    w = world
+    w["cfg"].write_text(json.dumps({"claim_tool": str(w["tool"]), "auto_claim": False}))
+    p = hook(w, "start")
+    assert calls(w) == []
+    assert "auto_claim" in p.stdout, "a disabled feature still says so"
+
+
+# ------------------------------------------------- the facts line for an OFF claim ----
+# The package ships no claim helper, so OFF is the ordinary state of a published copy. What must
+# never happen is OFF looking like ON. Each case below pairs with its negative control: the
+# claiming run, which prints "claim held" and no OFF line.
+def test_no_helper_configured_says_so_and_names_the_setting(world):
+    w = world
+    # `tool_root` is pointed at an empty directory, which is what a published copy of the plugin
+    # looks like: no `claim_tool` key, and no helper where the default would derive one.
+    w["cfg"].write_text(json.dumps({"tool_root": str(w["tmp"] / "empty-root")}))
+    p = hook(w, "start")
+    assert calls(w) == []
+    assert "Region claim" in p.stdout and "OFF" in p.stdout
+    assert "claim_tool" in p.stdout, "the line says how to turn it on"
+    assert "Studio/Cards" in p.stdout, "and which region went unclaimed"
+
+
+def test_the_off_line_is_absent_when_the_claim_is_actually_held(world):
+    """Negative control: with a working helper there is no OFF line — so the line above is proof of
+    a state, not a string this hook always prints."""
+    w = world
+    p = hook(w, "start")
+    assert len(calls(w)) == 1
+    assert "Region claim held" in p.stdout
+    assert "OFF" not in p.stdout
+
+
+def test_no_region_means_no_line_at_all(world):
+    """Outside a region there is nothing to claim, so the facts line would be noise. Silence here
+    is the correct answer and is not the silence the line exists to prevent."""
+    w = world
+    w["cfg"].write_text(json.dumps({"tool_root": str(w["tmp"] / "empty-root")}))
+    (w["repo"] / ".atlas-lane").write_text("lane: CURSUS\npath: Global/\npath: Queues/\n")
+    p = hook(w, "start")
+    assert calls(w) == [] and p.stdout.strip() == ""
+
+
+def test_auto_claim_defaults_true_with_no_config_key(world):
+    w = world
+    w["cfg"].write_text(json.dumps({"claim_tool": str(w["tool"])}))   # no auto_claim key at all
+    hook(w, "start")
+    assert len(calls(w)) == 1
+
+
+# --------------------------------------------------------- the helper's exit codes ----
+def test_held_by_another_writer_is_not_recorded(world):
+    w = world
+    w["rc_file"].write_text("1")                    # 1 = held-by-other
+    p = hook(w, "start")
+    assert claims(w) == []
+    assert "NOT held" in p.stdout
+    hook(w, "stop")
+    subs = [str(c).split()[0] for c in calls(w) if not str(c).startswith("status")]
+    assert subs == ["claim-interactive", "reap"], subs   # rc 1 → one reap attempt (refused here, rc 1); stop released nothing it does not own
+
+
+def test_raced_lost_is_not_recorded(world):
+    w = world
+    w["rc_file"].write_text("4")                    # 4 = won the mkdir, holding NOTHING
+    hook(w, "start")
+    assert claims(w) == []
+
+
+def test_release_exit_5_keeps_the_claim_and_logs_it(world):
+    """5 means the lock SURVIVED. It is not a release, and must not be recorded as one."""
+    w = world
+    hook(w, "start")
+    pid = int(claude_pid(w))
+    w["rc_file"].write_text("5")
+    hook(w, "stop")
+    assert claims(w) == [{"region": "Studio/Cards", "pid": pid}]
+    assert "SURVIVES" in logtext(w, "hook-errors")
+
+
+# ------------------------------------------------------------------ re-issue ----
+def test_resume_reissues_the_claim_without_duplicating_the_record(world):
+    """A resume/compact re-runs SessionStart against the same live Claude process. The helper
+    treats a re-claim by the holder as idempotent, and the record must not grow a second row —
+    or Stop would release the same lock twice and the second refusal would look like a defect."""
+    w = world
+    hook(w, "start", under_claude=False, pinned_ps=True)
+    hook(w, "start", source="resume", under_claude=False, pinned_ps=True)
+    assert calls(w) == ["claim-interactive Studio/Cards 4242"] * 2
+    assert claims(w) == [{"region": "Studio/Cards", "pid": 4242}]
+    hook(w, "stop", under_claude=False, pinned_ps=True)
+    assert calls(w).count("release-interactive Studio/Cards 4242") == 1
+
+
+def test_stop_without_a_start_does_nothing(world):
+    hook(world, "stop", sid="never-started")
+    assert calls(world) == []
+
+
+# --------------------------------------------------- region resolution sources ----
+def test_region_comes_from_the_repo_s_own_claude_md_when_the_marker_names_none(world):
+    """A single-segment partition (`Toolkit/`) is not a region path, but the repo's @-imports
+    name the region it is for."""
+    w = world
+    (w["repo"] / ".atlas-lane").write_text("lane: CURSUS\npath: Toolkit/\npath: Global/\n")
+    (w["repo"] / "CLAUDE.md").write_text(f"@{w['vault']}/Toolkit/Kernel.md\n")
+    # A one-segment directory PROVES it is a region by carrying a role file. It used to be
+    # reachable through a hard-coded region name instead, so every other flat vault's region
+    # failed this path silently.
+    (w["vault"] / "Toolkit" / "Kernel.md").write_text("# Toolkit\n")
+    hook(w, "start")
+    pid = w["pidfile"].read_text().strip()
+    assert calls(w) == [f"claim-interactive Toolkit {pid}"]
+
+
+def test_a_region_missing_from_the_vault_is_not_claimed(world):
+    w = world
+    (w["repo"] / ".atlas-lane").write_text("lane: X\npath: Studio/NoSuchRegion/\n")
+    hook(w, "start")
+    assert calls(w) == []
+
+
+def test_user_prompt_submit_reclaims_with_a_promptless_payload(world):
+    """Stop fires at the end of EVERY turn, so hooks.json re-runs `start` on UserPromptSubmit,
+    whose payload carries no `source`. It must claim exactly like a startup does."""
+    hj = json.loads((HOOKS / "hooks.json").read_text())
+    assert "UserPromptSubmit" in hj["hooks"], "the per-turn re-claim must be wired"
+    assert "claim.py start" in hj["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"].replace('"', "")
+    hook(world, "start", source=None)
+    assert any(str(c).startswith("claim-interactive") for c in calls(world)), calls(world)
+
+
+def _counting_tool(world, first_claim_rc, reap_rc):
+    """A fake helper: the first claim-interactive returns `first_claim_rc`, reap returns `reap_rc`,
+    every later call returns 0. Records argv like the fixture's tool."""
+    count = world["tool"].parent / "count.txt"
+    world["tool"].write_text(
+        "#!/bin/sh\n"
+        f'echo "$*" >> "{world["argv_log"]}"\n'
+        f'n=$(cat "{count}" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "{count}"\n'
+        f'case "$1" in claim-interactive) [ "$n" -eq 1 ] && exit {first_claim_rc}; exit 0;; '
+        f'reap) exit {reap_rc};; esac\nexit 0\n')
+
+
+def test_held_by_a_dead_writer_is_reaped_once_and_reclaimed(world):
+    """First live run (2026-09-09): a 12-day-dead interactive lock returned rc 1 and nothing
+    reaped it. On rc 1 the hook asks the helper's reaper once and retries once."""
+    _counting_tool(world, first_claim_rc=1, reap_rc=0)
+    hook(world, "start")
+    subs = [str(c).split()[0] for c in calls(world)]
+    assert subs == ["claim-interactive", "reap", "claim-interactive"], subs
+    assert claims(world), "the retried claim is recorded"
+
+
+def test_reap_refused_means_no_retry(world):
+    _counting_tool(world, first_claim_rc=1, reap_rc=1)
+    hook(world, "start")
+    subs = [str(c).split()[0] for c in calls(world) if not str(c).startswith("status")]
+    assert subs == ["claim-interactive", "reap"], subs
+    assert not claims(world)
+
+
+# --------------------------------------------- GUARDSILENT-1: never wait on your own claim ----
+def _status_table(w, region, holder, mode="interactive"):
+    """The helper's real layout: `printf '%-34s %-25s %-8s %-16s %-6s %-8s %-12s %s\\n'`."""
+    row = "%-34s %-25s %-8s %-16s %-6s %-8s %-12s %s\n"
+    (w["rc_file"].parent / (w["rc_file"].name + ".status")).write_text(
+        row % ("REGION", "MODE", "PID", "HOST", "HELD", "STARTED", "LIVENESS", "REAPABLE-NOW")
+        + row % (region, mode, holder, "h", "1m", "1m", "alive", "no"))
+
+
+def test_a_holder_that_is_THIS_session_is_named_as_yours(world):
+    """CARDKERNEL-2 waited on a holder that was itself. The pinned `ps` makes our pid 4242."""
+    w = world
+    w["rc_file"].write_text("1")
+    _status_table(w, "Studio/Cards", 4242)
+    p = hook(w, "start", under_claude=False, pinned_ps=True)
+    out = json.loads(p.stdout)["hookSpecificOutput"]["additionalContext"]
+    assert "held by THIS session's own Claude process (pid 4242)" in out, out
+    assert "another writer holds it" not in out
+
+
+@pytest.mark.parametrize("region,mode", [
+    ("Studio/Cards", "unknown(treated managed)"),     # the helper's only mode with a space in it
+    ("Studio/Cards", "managed"),
+    ("Studio/" + "a" * 40, "interactive"),           # longer than the 34-wide column
+])
+def test_own_holder_is_recognised_in_every_mode_the_helper_prints(world, region, mode):
+    w = world
+    (w["vault"] / region).mkdir(parents=True, exist_ok=True)
+    w["repo"].joinpath(".atlas-lane").write_text(f"lane: CARD\npath: {region}/\n")
+    w["rc_file"].write_text("1")
+    _status_table(w, region, 4242, mode)
+    p = hook(w, "start", under_claude=False, pinned_ps=True)
+    out = json.loads(p.stdout)["hookSpecificOutput"]["additionalContext"]
+    assert "held by THIS session's own Claude process (pid 4242)" in out, out
+
+
+def test_a_holder_that_is_ANOTHER_process_is_named_by_pid(world):
+    w = world
+    w["rc_file"].write_text("1")
+    _status_table(w, "Studio/Cards", 777)
+    p = hook(w, "start", under_claude=False, pinned_ps=True)
+    out = json.loads(p.stdout)["hookSpecificOutput"]["additionalContext"]
+    assert "another writer holds it" in out and "holder pid 777" in out, out
+    assert "not this session's own (4242)" in out
