@@ -60,7 +60,7 @@ def test_a_planted_hit_is_refused(copy, kind, line):
 
 
 def test_a_hit_in_a_nested_or_non_python_file_is_found(copy):
-    (copy / "docs").mkdir()
+    (copy / "docs").mkdir(exist_ok=True)  # the published tree has its own docs/ since 0.6.0
     (copy / "docs" / "notes.md").write_text("clone it into " + "~/" + "Pycharm" + "Projects" + "/x\n",
                                             encoding="utf-8")
     rc, out = run(copy)
