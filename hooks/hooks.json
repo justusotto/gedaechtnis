@@ -120,6 +120,16 @@
         ]
       },
       {
+        "matcher": "startup|resume|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -B \"${CLAUDE_PLUGIN_ROOT}/hooks/deliver.py\"",
+            "timeout": 10
+          }
+        ]
+      },
+      {
         "matcher": "compact",
         "hooks": [
           {
@@ -219,6 +229,11 @@
           },
           {
             "type": "command",
+            "command": "python3 -B \"${CLAUDE_PLUGIN_ROOT}/hooks/deliver.py\"",
+            "timeout": 10
+          },
+          {
+            "type": "command",
             "command": "python3 -B \"${CLAUDE_PLUGIN_ROOT}/hooks/chore.py\" mergesha",
             "timeout": 15
           },
@@ -238,6 +253,12 @@
             "type": "command",
             "command": "python3 -B \"${CLAUDE_PLUGIN_ROOT}/hooks/compact_door.py\" door",
             "timeout": 20
+          },
+          {
+            "type": "command",
+            "command": "python3 -B \"${CLAUDE_PLUGIN_ROOT}/hooks/compact_door.py\" rewake",
+            "timeout": 20,
+            "asyncRewake": true
           }
         ]
       }

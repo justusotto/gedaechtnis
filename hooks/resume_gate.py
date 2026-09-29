@@ -294,8 +294,10 @@ def decide(inp: dict, now: float | None = None) -> tuple[str, str] | None:
             log("resume_gate", f"pass\tbusy\tfrom={sid}\tto={to}\ttarget={tsid}")
             return None
         transcript = context_cap.locate_transcript(tsid, None)
-    total = context_cap.current_context(transcript, sub) if transcript else None
+    total, compacted = context_cap.reading(transcript, sub) if transcript else (None, False)
     age = last_record_age(transcript, now) if transcript else None
+    if total is not None and age is not None and compacted:
+        return _compacted(inp, to, sid, tsid, target, transcript, age, now)
     if total is None or age is None:
         log("resume_gate", f"unmeasured\tfrom={sid}\tto={to}\ttarget={tsid}")
         return ("note", f"Resume check: could NOT measure `{to}` (no readable transcript for "
@@ -316,7 +318,8 @@ def decide(inp: dict, now: float | None = None) -> tuple[str, str] | None:
     why = []                                   # in the docstring's order
     if not warm and total >= cap:
         why.append(f"it is cold and its context is at or above resume_cold_cap {cap:,}")
-    if total >= window - min_head:
+    short = _short_pass(ti.get("message"), warm, total)
+    if total >= window - min_head and not short:
         why.append(f"it has {window - total:,} tokens of headroom, under resume_min_headroom "
                    f"{min_head:,}")
     igniter = False
@@ -333,6 +336,8 @@ def decide(inp: dict, now: float | None = None) -> tuple[str, str] | None:
         return ("note", f"Resume check for `{to}`: {state}; {cost}."
                         + (" It ignited this session, so this is the reply it is waiting for."
                            if igniter else "")
+                        + (f" Passed as a SHORT message ({short}) although the headroom is under "
+                           f"resume_min_headroom." if short and total >= window - min_head else "")
                         + " Continue if the next task fits in the headroom.")
     reason = _override_reason(ti.get("message"))
     if reason:
@@ -342,26 +347,88 @@ def decide(inp: dict, now: float | None = None) -> tuple[str, str] | None:
     handoffs = [] if sub else common.handoff_paths(tsid)
     log("deny", f"resume{'-subagent' if sub else ''}\tfrom={sid}\tto={to}\ttarget={tsid}\t"
                 f"total={total}\tage={int(age)}\tttl={ttl}\tmodel={model}\tcap={cap}\twindow={window}\theadroom={min_head}\t{cost}")
-    parked = None if sub else _park(str(target.get("name") or to), "; ".join(why), ti.get("message"))
+    parked = None if sub else _park(str(target.get("name") or to), "; ".join(why), ti.get("message"),
+                                    sid)
     text = (f"Not sent: `{to}` is idle, and waking it is refused — " + "; ".join(why) + f". "
             f"({state}; {cost}.) "
             + ("Start a fresh agent from the brief instead. " if sub else
                "Start the work FRESH from its handoff instead"
                + (f" ({handoffs[-1]})" if handoffs else "") + ". ")
-            + (f"The message is parked in {parked}, where its successor and the status page will "
-               f"show it. " if parked else "")
+            + (f"The message is parked in {parked}, and is shown to it at its next prompt or "
+               f"session start. " if parked else "")
             + f"If waking it is still right, send again with the first line "
             f"`{OVERRIDE} <reason>`; the override is logged.")
     return ("deny", text)
 
 
-def _park(target_name: str, reason: str, message) -> str | None:
-    """Keep the refused message where the recipient's successor will be shown it (TERMOVERLOAD-1).
-    A refused wake used to leave no trace the recipient's side could ever read; the sender alone
-    knew. Never raises: a parking failure must not turn a refusal into a crash."""
+def _message_chars(message) -> int:
+    return len(message if isinstance(message, str) else json.dumps(message))
+
+
+def _short_pass(message, warm: bool, total: int) -> str | None:
+    """Why a SHORT message to a WARM target passes the headroom rule, or None (CONTEXTMSG-1).
+
+    Off unless both `resume_short_chars` and `resume_short_window` are set (shipped 0 and 0). A
+    report of a few lines re-reads a warm cache for cents and costs the target a few hundred tokens
+    of room; the headroom rule exists for the next ROW, which such a message does not bring. The
+    cold rules never look at this: a cold wake writes the whole context again whatever its length."""
+    chars = int(limits.get("resume_short_chars", 0) or 0)
+    upto = int(limits.get("resume_short_window", 0) or 0)
+    if chars <= 0 or upto <= 0 or not warm or total >= upto:
+        return None
+    n = _message_chars(message)
+    if n > chars:
+        return None
+    return f"{n:,} characters, at most resume_short_chars {chars:,}, below resume_short_window {upto:,}"
+
+
+def _compacted(inp: dict, to: str, sid: str, tsid: str, target: dict, transcript: Path,
+               age: float, now: float) -> tuple[str, str] | None:
+    """The target compacted after its last measured call: its figure is the OLD window's, and
+    nothing on disk gives the new one until its next call (CONTEXTMSG-1). The size rules are not
+    applied to a figure known to be stale; the Fable-cold rule, which does not depend on size, is."""
+    facts = tail_facts(transcript)
+    model = facts.get("model")
+    ttl = facts.get("ttl_s") or int(limits.get("resume_cold_s", 300))
+    warm = age <= ttl
+    if model == FABLE and not warm:
+        sender = context_cap.locate_transcript(sid, inp.get("transcript_path"))
+        if not names_igniter(opener_text(sender), str(target.get("name") or "")):
+            reason = _override_reason((inp.get("tool_input") or {}).get("message"))
+            if reason:
+                log("deny", f"resume-override\tfrom={sid}\tto={to}\ttarget={tsid}\tcompacted\t"
+                            f"age={int(age)}\tmodel={model}\treason={reason}")
+                return ("note", f"Resume check overridden for `{to}` (compacted, not yet "
+                                f"measured): {reason}")
+            log("deny", f"resume\tfrom={sid}\tto={to}\ttarget={tsid}\tcompacted\tage={int(age)}\t"
+                        f"ttl={ttl}\tmodel={model}")
+            why = (f"it runs {FABLE} and is cold, and a cold Fable session is started again only "
+                   f"on the owner's word")
+            parked = _park(str(target.get("name") or to), why,
+                           (inp.get("tool_input") or {}).get("message"), sid)
+            return ("deny", f"Not sent: `{to}` is idle, and waking it is refused — {why}. (It "
+                            f"compacted after its last measured call, so its size is not yet "
+                            f"measured.) "
+                            + (f"The message is parked in {parked}, and is shown to it at its "
+                               f"next prompt. " if parked else "")
+                            + f"If waking it is still right, send again with the first line "
+                            f"`{OVERRIDE} <reason>`; the override is logged.")
+    log("resume_gate", f"pass\tcompacted\tfrom={sid}\tto={to}\ttarget={tsid}\tage={int(age)}\t"
+                       f"model={model}")
+    return ("note", f"Resume check for `{to}`: compacted, not yet measured — it compacted after its "
+                    f"last measured call, so the last figure is from before the compaction and the "
+                    f"size bounds are not applied to it. Continue if the next task fits.")
+
+
+def _park(target_name: str, reason: str, message, sender_sid: str | None = None) -> str | None:
+    """Keep the refused message where the recipient will be shown it (TERMOVERLOAD-1; delivered by
+    `deliver.py`, CONTEXTMSG-1). A refused wake used to leave no trace the recipient's side could
+    ever read; the sender alone knew. The sender is named by its session id through the registry,
+    as the target is, so a resumed sender is not "?". Never raises: a parking failure must not turn
+    a refusal into a crash."""
     try:
         import fleet                                          # noqa: PLC0415 — deny path only
-        sender = procs.session_name(procs.claude_pid())
+        sender = fleet.session_name_of(sender_sid)
         path = fleet.park(target_name, sender, reason,
                           message if isinstance(message, str) else json.dumps(message))
         return str(path) if path else None

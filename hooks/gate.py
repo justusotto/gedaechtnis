@@ -36,6 +36,7 @@ import deletedoor
 import kernelentry
 import apostrophe_door
 import ruledoors
+import killdoor
 
 EV = "PreToolUse"
 
@@ -303,19 +304,20 @@ def rule_inherited_tag_push(cmd: str, cwd: str | None, notes: list | None = None
     return None
 
 
-_CLAUDE_SUBCMDS = {"plugin","mcp","config","doctor","update","login","logout","setup-token","agents",
-                   "install","migrate-installer","--version","-v","--help","-h","auth","upgrade"}
-
-
 def rule_launch_model(cmd: str) -> str | None:
-    for seg in segments(cmd):
-        w = seg.split()
-        while w and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", w[0]):
-            w = w[1:]
-        if not w or w[0] not in ("claude", "claude.exe"):
-            continue
-        if len(w) > 1 and w[1] in _CLAUDE_SUBCMDS:
-            continue
+    """The opt-in flags `require_launch_model` / `require_launch_effort`: refuse at once, anywhere.
+    What counts as a launch is `ruledoors.launch_words` — ONE reading for both launch doors
+    (LAUNCHPINFIX-1: this rule kept its own copy of the subcommand list, and a copy drifts).
+    Both flags off, nothing is read; a reading that raises is logged and costs the command nothing,
+    as every door's error does — it must never escape and skip the doors after it."""
+    if not (_cfg.flag("require_launch_model") or _cfg.flag("require_launch_effort")):
+        return None
+    try:
+        launches = list(ruledoors.launch_words(cmd, segments))
+    except Exception as e:                            # noqa: BLE001 — never cost the command or a later door
+        log("ruledoors", f"error\tbash\tlaunch_model\t{e.__class__.__name__}: {e}"[:300])
+        return None
+    for w in launches:
         if _cfg.flag("require_launch_model") and "--model" not in w and not any(x.startswith("--model=") for x in w):
             return ("Every `claude` launch pins `--model` (and `--effort`) explicitly; the settings-file default is "
                     "silent routing authority: a bare launch runs on whatever model the settings file happens to name, "
@@ -877,6 +879,27 @@ def do_bash(inp: dict) -> None:
         else:
             log("ruledoors", f"warn\tlaunch_pin\t{cmd[:160].replace(chr(10), ' ')}")
             notes.append(ruledoors.warn_prefix("launch_pin") + lp)
+    # The kill door (KILLDOOR-1): a kill whose target the shell computes, `pkill -P`/`-f`, `pgrep -f`,
+    # pid 0/1/negative. Same mode, scope and log as the DOORS-2 doors above.
+    try:
+        kd = killdoor.check(cmd, segments) if ruledoors.enabled("kill") else None
+        if kd:                                    # the words and the mode too: an error here costs no door
+            kw, m, scoped = ruledoors.words("kill", killdoor.refusal(kd)), ruledoors.mode("kill"), common.in_scope(cwd)
+    except Exception as e:                            # noqa: BLE001 — never cost the command
+        log("ruledoors", f"error\tbash\tkill\t{e.__class__.__name__}: {e}"[:300])
+        kd = None
+    if kd:
+        if m == "deny" and scoped:
+            log("ruledoors", f"deny\tkill\t{cmd[:160].replace(chr(10), ' ')}")
+            log("deny", f"bash\tkill\t{cmd[:200].replace(chr(10), ' ')}")
+            deny(EV, kw)
+            return
+        if m == "deny":
+            log("ruledoors", f"note-only\tkill\t{cmd[:160].replace(chr(10), ' ')}")
+            notes.append(common.out_of_scope_note(kw))
+        else:
+            log("ruledoors", f"warn\tkill\t{cmd[:160].replace(chr(10), ' ')}")
+            notes.append(ruledoors.warn_prefix("kill") + kw)
     # The delete door (DELETEPOLICY-1): after the doors above, so a protected class still ASKS.
     if deletedoor.enabled():
         r = deletedoor.check(cmd, cwd, sid, segments)

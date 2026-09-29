@@ -4,6 +4,7 @@
     python3 tools/sessions.py launch --name NAME --cwd DIR [--row Q-ID] [--worktree DIR]
                                      [--handoff GLOB] LAUNCHER.sh
     python3 tools/sessions.py ls
+    python3 tools/sessions.py projects [--ids FILE | --ids-text 'cse_… cse_…']
     python3 tools/sessions.py close [--apply]
     python3 tools/sessions.py close --replay DAYS [--out FILE.md]
 
@@ -22,7 +23,18 @@ pressure when the machine has no swap); each refusal prints its reason and exits
 
 `ls` is the read-only page: per session its state (PROMPT / WORKING / IDLE / BLIND), context,
 handoff, parked messages, and the line to type to answer it — `screen -r NAME` (detach again with
-Ctrl-a d). Nothing here types into a session.
+Ctrl-a d). Nothing here types into a session. Beside the launch ledger it reads the CLI's own
+registry (`~/.claude/sessions/*.json`) and the process table (SESSLSBLIND-1): a Remote Control host
+is shown as HOST, a session it spawned as THREAD of that host, a daemon background job (`kind: bg`)
+as FORK with the session it was copied from, and a session resumed by hand by its record. Every
+such line leads with the SESSION ID — a host restarts an idle thread under a new name.
+
+`projects` answers which live THREADs are real Project threads (PROJECTDESK-1): a thread whose
+remote id (`bridgeSessionId` `session_01X…`, or `--session-id` / `--sdk-url` `cse_01X…` on its
+command line — same suffix) is in the Project's thread list is PROJECT; one that started within
+`fleet.HOST_OWN_SECONDS` of its host is the host's own session (HOST-OWN); anything else is
+UNCONFIRMED. The thread list is what a Project session's `list_thread_sessions` returns, saved or
+pasted as text; every `cse_…` in it counts. Read-only; the name is never used to decide.
 
 `close` runs the close sweep once — over the launch ledger AND every other live interactive
 session the CLI has a record of. Without `--apply`, or while `session_close_apply` is off for this
@@ -46,7 +58,6 @@ import config                      # noqa: E402
 import context_cap                 # noqa: E402
 import fleet                       # noqa: E402
 import limits                      # noqa: E402
-import resume_gate                 # noqa: E402
 
 EXEC_CLAUDE = re.compile(r"^\s*exec\s+(?:\S*/)?claude\b", re.M)
 PID_WAIT_S = 10.0
@@ -160,11 +171,16 @@ def cmd_ls(_a) -> int:
           f"load {fleet.load_average()} · "
           f"{source} {'' if sw is None else f'{sw:.0%} used'} · "
           f"session_cap {fleet.cap() or 'unset'} · multiplexer {mux or 'none'}")
+    view = fleet.live_view(fleet.registry_records(), fleet.process_table())
+    kinds = [e["kind"] for e in view]
+    print(f"registry and process table: {kinds.count('HOST')} host(s), {kinds.count('THREAD')} "
+          f"thread(s), {kinds.count('SESSION')} other session(s), {kinds.count('FORK')} fork(s), "
+          f"{kinds.count('BLIND')} blind")
     for r in rows:
         f = fleet.gather(r, mux, None)
         if not f["alive"]:
             continue
-        seen.add(r["name"])
+        seen.add(r.get("pid"))
         tp = fleet.transcript_for(r.get("pid"), r["name"], r.get("launched_at"))
         ctx = context_cap.current_context(tp) if tp else None
         bits = [r["name"], f"pid {r.get('pid')}", _state_word(f),
@@ -177,23 +193,91 @@ def cmd_ls(_a) -> int:
             bits.append(f"{n} parked message(s)")
         print("- " + " · ".join(bits))
         print(f"    answer it: {fleet.attach_line(r.get('mux') or mux, r.get('mux_session') or r['name'])}")
-    for p in procs_now:
-        if p.get("name") and p["name"] not in seen:
-            sty = fleet.screen_of(p["pid"])
-            # BLIND by the missing record, never by the env marker: the seat carries the marker
-            # and still has its record (measured 2026-09-26).
-            blind = not (resume_gate.sessions_dir() / f"{p['pid']}.json").exists()
-            screen = fleet.read_screen("screen", sty) if sty else None
-            word = ("PROMPT" if screen and fleet.PROMPT_TEXT.search(screen)
-                    else "no prompt on screen" if screen else "screen not readable")
-            print(f"- {p['name']} · pid {p['pid']} · {word}"
-                  + (" · BLIND (no session record: no transcript, not resumable)" if blind else "")
-                  + " · (not in the launch ledger)")
+    # SESSLSBLIND-1: the CLI's registry is the second source. Hosts, Project threads, forks and
+    # sessions resumed by hand are seen there (or, for a host, in the process table) — keyed by
+    # pid and session id, never by name.
+    for e in view:
+        if e["pid"] in seen:
+            continue
+        print(_view_line(e))
+        if e["kind"] in ("SESSION", "BLIND", "HOST"):
+            sty = fleet.screen_of(e["pid"])
+            screen = fleet.read_screen("screen", sty) if sty and e["kind"] != "HOST" else None
+            if screen and fleet.PROMPT_TEXT.search(screen):
+                print("    PROMPT on its screen")
             print(f"    answer it: {fleet.attach_line('screen', sty)}" if sty else
-                  "    not in a screen session — its Terminal window, if any, is the only way in")
+                  "    not in a screen session — its Terminal window or app, if any, is the only way in")
+    launched = {r["name"] for r in rows if r.get("pid") in seen}
     for name, n in fleet.all_parked().items():
-        if name not in seen:
-            print(f"- parked for {name} (no live session): {n} message(s) in {fleet.parked_path(name)}")
+        where = f"{n} message(s) in {fleet.parked_path(name)}"
+        h = fleet.holders(view, name)
+        if len(h) == 1:
+            print(f"- parked for {name} (live, session {h[0].get('session_id') or 'unknown'}: "
+                  f"deliver them): {where}")
+        elif len(h) > 1:
+            ids = ", ".join(e.get("session_id") or f"pid {e['pid']}" for e in h)
+            print(f"- parked for {name} ({len(h)} live sessions carry this name: {ids}; deliver by "
+                  f"session id, never by the name): {where}")
+        elif name in launched or name in {common.safe_sid(x) for x in launched}:
+            print(f"- parked for {name} (live, launched by this tool): {where}")
+        else:
+            print(f"- parked for {name} (no live session): {where}")
+    return 0
+
+
+_STATUS_WORD = {"busy": "WORKING", "idle": "IDLE"}
+
+
+def _view_line(e: dict) -> str:
+    """One line per live entry of `fleet.live_view`. The session id leads: a name is not stable."""
+    k = e["kind"]
+    if k == "HOST":
+        return (f"- HOST {e.get('name') or '(unnamed)'} · pid {e['pid']} · "
+                f"{e['threads']} thread session(s) running · a Remote Control host, not a session")
+    if k == "BLIND":
+        return (f"- {e['name']} · pid {e['pid']} · BLIND (no session record: no transcript, "
+                f"not resumable) · (not in the launch ledger)")
+    status = _STATUS_WORD.get(e.get("status"), e.get("status") or "status unknown")
+    bits = [f"session {e.get('session_id') or 'unknown'}", f"pid {e['pid']}", status,
+            f"name {e.get('name') or '(none)'}"]
+    if k == "THREAD":
+        head = f"- THREAD of host {e.get('host') or e['host_pid']}"
+        if e.get("remote"):
+            bits.append(f"remote {e['remote']}")
+        bits.append("the name is not stable: address it by session id")
+    elif k == "FORK":
+        head = "- FORK"
+        bits.append(f"copied from {e['source']}" if e.get("source")
+                    else "copied from: not recorded")
+    else:
+        head = "-"
+        bits.append("(not in the launch ledger)")
+    return f"{head} " + " · ".join(bits)
+
+
+def cmd_projects(a) -> int:
+    text = a.ids_text or ""
+    if a.ids:
+        try:
+            text += "\n" + Path(a.ids).read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            print(f"cannot read {a.ids}: {exc}", file=sys.stderr)
+            return 2
+    ids = fleet.thread_ids(text)
+    table = fleet.process_table()
+    if table is None:
+        print("process table unreadable: no thread can be tied to its host", file=sys.stderr)
+        return 2
+    rows = fleet.project_threads(fleet.live_view(fleet.registry_records(), table), table, ids)
+    print(f"{len(rows)} live thread(s) under a Remote Control host · "
+          f"{len(ids)} Project thread id(s) given")
+    for e in rows:
+        print(f"- {e['verdict']} session {e.get('session_id') or 'unknown'} · pid {e['pid']} · "
+              f"host {e.get('host') or e.get('host_pid')} · remote {', '.join(e['ids']) or 'none'} · "
+              f"name {e.get('name') or '(none)'}")
+    if not ids:
+        print("no Project thread list given: PROJECT cannot be told; pass --ids with the output of "
+              "list_thread_sessions from a Project session")
     return 0
 
 
@@ -284,13 +368,18 @@ def main(argv=None) -> int:
                                    "(default: the launching session's name)")
     la.add_argument("launcher")
     sub.add_parser("ls")
+    pj = sub.add_parser("projects")
+    pj.add_argument("--ids", help="a file holding the Project's thread list (any text; every "
+                                  "cse_… in it counts)")
+    pj.add_argument("--ids-text", help="the same, given inline")
     cl = sub.add_parser("close")
     cl.add_argument("--apply", action="store_true")
     cl.add_argument("--replay", type=float, metavar="DAYS",
                     help="replay the close rules over the last DAYS of transcripts (the pilot)")
     cl.add_argument("--out", help="with --replay: also write the table to this file")
     a = ap.parse_args(argv)
-    return {"launch": cmd_launch, "ls": cmd_ls, "close": cmd_close}[a.cmd](a)
+    return {"launch": cmd_launch, "ls": cmd_ls, "projects": cmd_projects,
+            "close": cmd_close}[a.cmd](a)
 
 
 if __name__ == "__main__":

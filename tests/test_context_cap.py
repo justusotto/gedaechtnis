@@ -301,7 +301,7 @@ def test_reach_fires_at_the_gates_bound_minus_the_margin_and_names_the_gate(worl
     _reach_world(world)                                        # reach = 1000 - 200 - 100 = 700
     t = transcript(world["tmp"] / "r.jsonl", [rec("m1", read=100), rec("m2", read=700)])
     text = text_of(run(world, payload("s-reach", t)))
-    assert "REACH" in text and "At 800 the resume gate refuses" in text, text
+    assert "REACH" in text and "From 800 the resume gate refuses" in text, text
 
 
 def test_reach_is_silent_one_token_below_its_bound(world):
@@ -346,3 +346,121 @@ def test_a_zero_margin_fires_at_the_resume_gates_own_refusal_bound(world):
     assert run(world, payload("s-z1", t)) is None
     t2 = transcript(world["tmp"] / "r2.jsonl", [rec("m1", read=100), rec("m2", read=798)])  # 800
     assert "REACH" in text_of(run(world, payload("s-z2", t2)))
+
+
+# ------------------------------------------------------ CONTEXTMSG-1: one window at a time ----
+
+BOUNDARY = {"type": "system", "subtype": "compact_boundary", "isSidechain": False,
+            "timestamp": "2026-09-19T20:05:00Z", "content": "Conversation compacted"}
+
+
+def _compacted(world, sid, t):
+    """What SessionStart `compact` does: open a new window for this session."""
+    env = dict(world["env"])
+    code = ("import sys; sys.path.insert(0, %r); import context_cap; "
+            "context_cap.new_window(%r, %r)" % (str(HOOKS), sid, str(t)))
+    p = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True,
+                       timeout=30)
+    assert p.returncode == 0, p.stderr
+
+
+def test_reach_fires_again_after_a_compaction(world):
+    _reach_world(world)
+    t = transcript(world["tmp"] / "c.jsonl", [rec("m1", read=100), rec("m2", read=700)])
+    assert "REACH" in text_of(run(world, payload("s-win", t)))
+    assert run(world, payload("s-win", t)) is None                     # once per window
+    with t.open("a") as fh:
+        fh.write(json.dumps(BOUNDARY) + "\n")
+    _compacted(world, "s-win", t)
+    assert run(world, payload("s-win", t)) is None                     # compacted, not yet measured
+    with t.open("a") as fh:
+        fh.write(json.dumps(rec("m3", read=300)) + "\n" + json.dumps(rec("m4", read=710)) + "\n")
+    assert "REACH" in text_of(run(world, payload("s-win", t)))        # the new window reaches it
+
+
+def test_without_a_compaction_reach_stays_quiet_the_second_time(world):
+    _reach_world(world)
+    t = transcript(world["tmp"] / "c.jsonl", [rec("m1", read=100), rec("m2", read=700)])
+    run(world, payload("s-nowin", t))
+    with t.open("a") as fh:
+        fh.write(json.dumps(rec("m3", read=720)) + "\n")
+    assert run(world, payload("s-nowin", t)) is None
+
+
+def test_the_floor_is_measured_from_the_first_call_after_the_compaction(world):
+    t = transcript(world["tmp"] / "f.jsonl", [rec("m1", read=100), rec("m2", read=200)])
+    run(world, payload("s-floor", t))                                  # caches floor 102
+    assert json.loads((world["state"] / "context-cap-s-floor.json").read_text())["floor"] == 102
+    with t.open("a") as fh:
+        fh.write(json.dumps(BOUNDARY) + "\n")
+    _compacted(world, "s-floor", t)
+    doc = json.loads((world["state"] / "context-cap-s-floor.json").read_text())
+    assert "floor" not in doc and "fired" not in doc and doc["window_offset"] > 0
+    with t.open("a") as fh:
+        fh.write(json.dumps(rec("m3", read=150)) + "\n" + json.dumps(rec("m4", read=460)) + "\n")
+    # warn = floor + 300. From the OLD floor (102) 462 is +360 and would fire; from the new window's
+    # floor (152) it is +310 and fires too — so check the number it names.
+    body = text_of(run(world, payload("s-floor", t)))
+    assert "boot floor of 152" in body, body
+
+
+def test_the_notice_is_silent_on_a_figure_from_before_the_compaction(world):
+    t = transcript(world["tmp"] / "s.jsonl", [rec("m1", read=100), rec("m2", read=600)])
+    with t.open("a") as fh:
+        fh.write(json.dumps(BOUNDARY) + "\n")
+    assert run(world, payload("s-stale", t)) is None
+    t2 = transcript(world["tmp"] / "s2.jsonl", [rec("m1", read=100), rec("m2", read=600)])
+    assert "HARD CAP" in text_of(run(world, payload("s-fresh", t2)))   # negative control
+
+
+def test_reach_names_the_compact_point_command_when_the_ritual_is_on_and_writes_nothing(world):
+    _reach_world(world)
+    world["env"]["GEDAECHTNIS_COMPACT_POINT"] = "on"
+    t = transcript(world["tmp"] / "p.jsonl", [rec("m1", read=100), rec("m2", read=700)])
+    text = text_of(run(world, payload("s-point", t)))
+    assert "compactpoint.py" in text and " write " in text and "--session-id s-point" in text
+    assert not list(world["tmp"].rglob("*.md"))                        # printed, never run
+
+
+def test_reach_has_no_compact_point_command_when_the_ritual_is_off(world):
+    _reach_world(world)
+    world["env"]["GEDAECHTNIS_COMPACT_POINT"] = "off"
+    t = transcript(world["tmp"] / "p.jsonl", [rec("m1", read=100), rec("m2", read=700)])
+    assert "compactpoint.py" not in text_of(run(world, payload("s-nopoint", t)))
+
+
+def test_reach_text_names_the_short_pass_only_when_it_is_on(world):
+    _reach_world(world)
+    t = transcript(world["tmp"] / "q.jsonl", [rec("m1", read=100), rec("m2", read=700)])
+    assert "characters still passes" not in text_of(run(world, payload("s-off", t)))
+    d = json.loads(world["limits"].read_text())
+    d.update(resume_short_chars=1500, resume_short_window=900)
+    world["limits"].write_text(json.dumps(d))
+    assert "1,500 characters still passes" in text_of(run(world, payload("s-on", t)))
+
+
+@pytest.mark.parametrize("source,cleared", [("compact", True), ("resume", False)])
+def test_session_start_compact_opens_a_new_window_and_resume_does_not(world, source, cleared):
+    _reach_world(world)
+    t = transcript(world["tmp"] / "ss.jsonl", [rec("m1", read=100), rec("m2", read=700)])
+    assert "REACH" in text_of(run(world, payload("s-ss", t)))
+    env = dict(world["env"], HOME=str(world["tmp"]))
+    p = subprocess.run([sys.executable, "-B", str(HOOKS / "session_start.py")],
+                       input=json.dumps({"session_id": "s-ss", "source": source,
+                                         "hook_event_name": "SessionStart", "transcript_path": str(t),
+                                         "cwd": str(world["tmp"])}),
+                       capture_output=True, text=True, env=env, timeout=60)
+    assert p.returncode == 0, p.stderr
+    doc = json.loads((world["state"] / "context-cap-s-ss.json").read_text())
+    assert ("fired" not in doc) is cleared, doc
+
+
+def test_a_window_read_keeps_a_first_line_that_starts_exactly_at_the_offset(tmp_path):
+    sys.path.insert(0, str(HOOKS))
+    import context_cap                                 # noqa: PLC0415
+    f = tmp_path / "t.jsonl"
+    f.write_text("aaa\nbbb\nccc\n")
+    assert context_cap._read_from(f, 4, 100)[0] == "bbb"      # at a line start: kept
+    assert context_cap._read_from(f, 5, 100)[0] == "ccc"      # mid-line: the partial line dropped
+    assert context_cap._read_from(f, 0, 100)[0] == "aaa"
+    assert context_cap._read_from(f, 99, 100) == []          # past the end: nothing

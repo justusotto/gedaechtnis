@@ -352,3 +352,32 @@ def test_DD3_an_unparsed_interpreter_one_liner_that_removes_nothing_passes(w):
     pin(w, "deny")
     assert bash(w, "perl -e \"print 'hi'\"") == {}
     assert bash(w, "python3 -c \"import subprocess; subprocess.run(['find', '.', '-name', 'x'])\"") == {}
+
+
+def test_POSITIVE_an_rm_after_a_here_string_is_seen(w):
+    pin(w, "deny")                               # shellread: `<<<` opens no heredoc, so the next command is read
+    assert denied(bash(w, "grep x <<<'abc'; rm -rf data"))
+
+
+def test_NEGATIVE_a_here_string_alone_removes_nothing(w):
+    pin(w, "deny")
+    assert bash(w, "grep x <<<'rm -rf data'") == {}
+
+
+def test_POSITIVE_an_rm_after_an_escaped_quote_is_seen(w):
+    pin(w, "deny")                               # shellread: `\'` outside quotes opens no quote
+    assert denied(bash(w, "echo it\\'s; rm -rf data"))
+
+
+@pytest.mark.parametrize("cmd", ["make build && \\\n  rm -rf data", "cd . && \\\nrm -rf data", "ls | \\\n  xargs rm -rf",
+                                 "echo ok && \\\n  sudo rm -rf data"])
+def test_R6_POSITIVE_an_rm_after_a_line_continuation_is_seen(w, cmd):
+    pin(w, "deny")                               # shellread: `\` + newline is dropped, as bash drops it
+    assert denied(bash(w, cmd))
+
+
+@pytest.mark.parametrize("cmd", ["bash <<\\EOF\nrm -rf data\nEOF", "cat > f <<\\EOF && rm -rf data\nbody\nEOF",
+                                 "cat <<\\EOF | xargs rm -rf\nfoo\nEOF", "cat <<\\'EOF' x'; rm -rf data"])
+def test_R7_POSITIVE_an_rm_around_a_backslash_heredoc_is_seen_as_on_main(w, cmd):
+    pin(w, "deny")                               # shellread does not read `<<\EOF` as a heredoc (round 7)
+    assert denied(bash(w, cmd))

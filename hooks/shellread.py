@@ -44,6 +44,10 @@ def _split_shell(cmd: str) -> list[str]:
             if c == q:
                 q = None
             i += 1; continue
+        if c == "\\" and i + 1 < n:                 # `it\'s`: an escaped quote opens nothing
+            if cmd[i + 1] == "\n":                   # `&& \⏎  rm -rf dist`: a line continuation,
+                i += 2; continue                      # which bash drops, so the next word heads it
+            cur.append(cmd[i:i + 2]); i += 2; continue
         if c in ("'", '"'):
             q = c; cur.append(c); i += 1; continue
         if cmd.startswith("$(", i):
@@ -53,6 +57,8 @@ def _split_shell(cmd: str) -> list[str]:
         if depth:
             cur.append(c); i += 1; continue
         m = re.match(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1", cmd[i:])
+        if m and (i > 0 and cmd[i - 1] == "<"):
+            m = None                                  # `<<<'abc'` is a here-string, not a heredoc
         if m:
             heredoc = m.group(2); cur.append(m.group(0)); i += len(m.group(0)); continue
         if cmd.startswith("&&", i) or cmd.startswith("||", i):
@@ -69,7 +75,9 @@ def _split_shell(cmd: str) -> list[str]:
 # The words that run the command after them (GITPREFIX-1): `sudo git …`, `env X=1 git …`,
 # `time git …` reach git as surely as `git …` does. A closed set, each with the options that take a
 # value, so `sudo -u me git` and `nice -n 5 git` are read too. `VAR=val` assignments go the same way.
-_PREFIXES = {"env": {"-u", "-C", "-S", "-P"}, "sudo": {"-u", "-g", "-C", "-D", "-h", "-p", "-r", "-t", "-U", "-T"},
+_PREFIXES = {"env": {"-u", "-C", "-S", "-P", "--unset", "--chdir", "--split-string"}, "sudo": {"-u", "-g", "-C", "-D", "-h", "-p", "-r", "-t", "-U", "-T", "--user", "--group",
+                      "--close-from", "--chdir", "--host", "--prompt", "--role", "--type", "--other-user",
+                      "--command-timeout"},
              "nohup": set(), "time": set(), "command": set(), "exec": {"-a"}, "nice": {"-n"},
              "caffeinate": {"-t", "-w"}, "builtin": set()}
 _ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
@@ -79,16 +87,27 @@ def strip_prefix(seg: str) -> str:
     """`seg` from its head word on: leading `VAR=val` assignments and the `_PREFIXES` words, with
     their options, are skipped. The rest of the segment is returned as written — quotes, heredoc
     and spacing untouched — because the rules after this read offsets into it."""
-    pos, prefix = 0, None
+    pos, prefix, sq = 0, None, ""
     while True:
         m = re.compile(r"\s*(\S+)").match(seg, pos)
         if not m:
             return ""
         w = m.group(1)
+        if sq and w.endswith(sq):                     # `env -S 'nohup' kill …`: the -S quote closes here
+            w, sq = w[:-1], ""
         base = w.rsplit("/", 1)[-1]                  # `/usr/bin/env git` is `env git`
         if _ASSIGN.match(w) or base in _PREFIXES:
             prefix = base if base in _PREFIXES else prefix
             pos = m.end(); continue
+        if prefix == "env" and w == "-":               # `env - claude …`: an empty environment
+            pos = m.end(); continue
+        if prefix == "env" and w in ("-S", "--split-string"):
+            pos = m.end()                              # the value IS the command: read on from it
+            v = re.compile(r"\s*(['\"]?)").match(seg, pos)
+            pos, sq = v.end(), v.group(1)              # `env -S 'kill -9 -1'`: from inside the quote
+            if sq and seg.startswith(sq, pos):         # `env -S '' git …`: an empty value
+                pos, sq = pos + 1, ""
+            continue
         if prefix and w.startswith("-") and len(w) > 1:
             pos = m.end()
             if w in _PREFIXES[prefix]:                 # an option that takes a value: skip the value too
@@ -110,7 +129,7 @@ def segments(cmd: str) -> list[str]:
 
 
 
-_HEREDOC_BODY = re.compile(r"<<-?\s*(['\"]?)(\w+)\1.*?\n\2\s*$", re.S | re.M)
+_HEREDOC_BODY = re.compile(r"(?<!<)<<(-)?\s*(['\"]?)(\w+)\2.*?\n(?(1)\t*)\3\s*$", re.S | re.M)  # `<<-`: tabs before the end word
 
 _WRITERS = ("cat", "tee")
 _SHELLS = ("bash", "sh", "zsh", "dash", "ksh")

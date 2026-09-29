@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ruledoors.py — six rules that were prose in a Boot file and a script can decide (DOORS-2).
+"""ruledoors.py — rules that were prose in a Boot file and a script can decide (DOORS-2).
 
 The kernel-budget census (2026-09-24) sorted every bullet of two Boot files into ENFORCED (a door
 already decides it), DECIDABLE (a script could, nothing does), JUDGMENT and pointer. Eleven were
@@ -16,6 +16,8 @@ share one mode rule, one log and one scope rule.
     judge_md        Write of a `.md` that asks for a verdict a page someone judges is HTML + verdict JSON
     row_identity    Edit/Write: queue-row lines it ADDS      the backticked id after the checkbox and the
                                                              `| q:` field name the same row
+    kill            Bash: `kill` / `pkill` / `killall` /     a kill's target is a pid someone typed —
+                    `pgrep` (hooks/killdoor.py, KILLDOOR-1)  never computed, never `-P`/`-f`, never 0/1/-n
     marker_roster   Edit/Write of `.atlas-lane` or the       a lane's marker `path:` lines equal its
                     roster                                   roster row (the two-places rule)
 
@@ -59,6 +61,10 @@ RULES = {
     "row_identity": ("ROW-IDENTITY", "a queue row is read two ways — the backticked `q:` id right after the "
                      "checkbox and the `| q:` field — and the two must name the same row, once",
                      "q:CU-2026-09-24-DOORS-2b"),
+    "kill": ("KILL", "a process is ended by the pid captured when it was launched, typed as literal digits — "
+             "never by a target the shell computes (a substitution, backticks, a variable, `xargs`), never "
+             "`pkill -P`, `pkill -f` or `pgrep -f`, never pid 0, pid 1 or a negative pid",
+             "q:CU-2026-09-28-KILLDOOR-1"),
     "marker_roster": ("MARKER-ROSTER", "a lane's `.atlas-lane` `path:` lines equal that lane's row in the fleet "
                       "roster (the two-places rule)", "q:CU-2026-09-24-DOORS-2b"),
 }
@@ -456,8 +462,315 @@ def check_write(p: Path, tool: str, ti: dict) -> list[tuple[str, str]]:
     return out
 
 
-_CLAUDE_SUBCMDS = {"plugin", "mcp", "config", "doctor", "update", "login", "logout", "setup-token", "agents",
-                   "install", "migrate-installer", "--version", "-v", "--help", "-h", "auth", "upgrade"}
+# Subcommands and flags that start no session (LAUNCHPINFIX-1). `remote-control` hosts sessions whose
+# model the Project sets; it has no `--model` flag, so a pin cannot be asked of it.
+_CLAUDE_SUBCMDS = {"plugin", "plugins", "mcp", "config", "doctor", "update", "login", "logout", "setup-token",
+                   "agents", "install", "migrate-installer", "auth", "upgrade", "remote-control"}
+_INFO_FLAGS = {"--version", "-v", "--help", "-h"}
+_TIMEOUTS = ("timeout", "gtimeout")
+
+
+_OPS = {"&", "&&", ";", ";;", ";&", ";;&", "|", "||", "|&", "(", ")"}
+_REDIRECT = re.compile(r"^(?:\d*|&)?(?:>>?|<<?<?-?|>&|<&|&>>?|>\||<>)$")
+# shlex hands a run of punctuation over as ONE token (`)&`, `()`, `;&`): it is cut into the shell's
+# own operators, longest first, so `(claude -p "task")& git --version` still cuts at the `&`
+_PUNCT = "();<>|&"
+_PUNCT_OPS = ("&>>", "<<<", ";;&", ">>", "<<", ">&", "<&", "&>", ">|", "<>", "&&", "||", ";;", ";&", "|&",
+              "&", ";", "|", "(", ")", "<", ">")
+_KEYWORDS = {"do", "then", "else", "elif", "if", "while", "until", "!", "{", "}", "coproc"}
+_CLAUDE_BARE_FLAGS = {"--verbose", "--debug"}      # take no value, so the word after them is the subcommand
+# take ONE value, so the word after that is the subcommand: `claude --settings s.json mcp list`
+_CLAUDE_VALUE_FLAGS = {"--settings", "--setting-sources", "--mcp-config", "--plugin-dir", "--model", "--effort"}
+_MAX_DEPTH = 8                                      # `$( )` inside `$( )`: deeper than this is not read
+
+
+def _drop_comments(line: str) -> str:
+    """`line` with its comments removed as bash removes them: a `#` starts one only at the START of a
+    word (after a blank or an operator), never inside one (`https://x.test/#a`, `$#`), never quoted."""
+    out, i, n, q = [], 0, len(line), None
+    while i < n:
+        c = line[i]
+        if q == "'":
+            out.append(c)
+            if c == "'":
+                q = None
+            i += 1; continue
+        if c == "\\" and i + 1 < n:
+            out.append(line[i:i + 2]); i += 2; continue
+        if q == '"':
+            out.append(c)
+            if c == '"':
+                q = None
+            i += 1; continue
+        if c in ("'", '"'):
+            q = c; out.append(c); i += 1; continue
+        if c == "#" and (i == 0 or line[i - 1] in " \t\n" + _PUNCT):
+            j = line.find("\n", i)
+            i = n if j == -1 else j; continue       # the newline itself stays
+        out.append(c); i += 1
+    return "".join(out)
+
+
+_SUBST_WORD = "__SUBST__"                           # what a `$( )`, `<( )`, `>( )` or backtick span reads as
+
+
+def _placehold(line: str) -> str:
+    """`line` with every `$( )`, `$(( ))`, `<( )`, `>( )` and backtick span replaced by ONE word,
+    `_SUBST_WORD`, so its parentheses cut no command: `claude --resume $(cat .sid) --model x` keeps
+    its `--model`. Nested and quote-aware; a single-quoted stretch is literal. Each span's contents
+    are read separately (`claude_argvs` reads `killdoor.substitutions`). An unclosed span runs to
+    the end. Iterative, so a 1000-deep nesting costs no recursion."""
+    out, i, n, q = [], 0, len(line), None
+    while i < n:
+        c = line[i]
+        if q == "'":
+            out.append(c)
+            if c == "'":
+                q = None
+            i += 1; continue
+        if c == "\\" and i + 1 < n:
+            out.append(line[i:i + 2]); i += 2; continue
+        if c == "'" and q is None:
+            q = "'"; out.append(c); i += 1; continue
+        if c == '"':
+            q = None if q == '"' else '"'
+            out.append(c); i += 1; continue
+        if line.startswith(("$(", "<(", ">("), i):
+            depth, j, qq = 1, i + 2, None
+            while j < n and depth:
+                d = line[j]
+                if qq == "'":
+                    if d == "'":
+                        qq = None
+                elif d == "\\":
+                    j += 1
+                elif qq == '"':
+                    if d == '"':
+                        qq = None
+                elif d in ("'", '"'):
+                    qq = d
+                elif d == "(":
+                    depth += 1
+                elif d == ")":
+                    depth -= 1
+                j += 1
+            out.append(_SUBST_WORD); i = j; continue
+        if c == "`":
+            j = i + 1
+            while j < n and line[j] != "`":
+                j += 2 if line[j] == "\\" else 1
+            out.append(_SUBST_WORD); i = j + 1; continue
+        out.append(c); i += 1
+    return "".join(out)
+
+
+_HEREDOC_END = re.compile(r"""(?<!<)<<-?\s*(?:'(\w+)'|"(\w+)"|\\?(\w+))""")
+
+
+def _drop_heredoc_bodies(seg: str) -> str:
+    """`seg` with every heredoc body cut out, quoted or not, the lines around it kept: `claude -p
+    "$(cat <<'EOF'` ⏎ body ⏎ `EOF` ⏎ `)" --model x --effort high` reads as `claude -p "$(cat <<'EOF'`
+    ⏎ `)" --model x --effort high`, so the pins after `)"` are read. A body is not claude's words;
+    a `$( )` in an unquoted body is read on its own (`killdoor.substitutions`). Only a `<<` the shell
+    reads counts: one inside quotes (`claude -p "std::cout << x` ⏎ `…"`) or `$(( ))` is text, while
+    `$(`, `<(`, `>(` and a backtick start a fresh unquoted context, even inside double quotes, as in
+    `_placehold`. A body starts after the next unquoted newline; with no end-word line after it, the
+    lines are kept. No `<<`, no change."""
+    if "<<" not in seg:
+        return seg
+    out, i, n = [], 0, len(seg)
+    stack = [[None, 0, ""]]                         # [quote, paren depth, kind: "" top, "(", "((", "`"]
+    pending: "list[str]" = []
+    while i < n:
+        f = stack[-1]
+        c, q = seg[i], f[0]
+        if q == "'":
+            f[0] = None if c == "'" else q
+            out.append(c); i += 1; continue
+        if c == "\\" and i + 1 < n:
+            out.append(seg[i:i + 2]); i += 2; continue
+        if c == "\n" and q is None and pending:
+            out.append(c); i += 1
+            for word in pending:                    # bodies follow in the order their `<<` appear
+                j = i
+                while j < n:
+                    e = seg.find("\n", j)
+                    e = n if e < 0 else e
+                    if seg[j:e].strip() == word:
+                        i = e + 1                   # past the end-word line itself
+                        break
+                    j = e + 1
+            pending = []
+            if i >= n and out[-1] == "\n":
+                out.pop()
+            continue
+        if q is None and c == "'":
+            f[0] = "'"; out.append(c); i += 1; continue
+        if c == '"':
+            f[0] = None if q == '"' else '"'
+            out.append(c); i += 1; continue
+        if seg.startswith("$((", i):
+            stack.append([None, 2, "(("]); out.append("$(("); i += 3; continue
+        if seg.startswith("$(", i) or (q is None and seg.startswith(("<(", ">("), i)):
+            stack.append([None, 1, "("]); out.append(seg[i:i + 2]); i += 2; continue
+        if c == "`":
+            if f[2] == "`" and q is None:
+                stack.pop()
+            else:
+                stack.append([None, 0, "`"])
+            out.append(c); i += 1; continue
+        if q is None and f[2] in ("(", "((") and c in "()":
+            f[1] += 1 if c == "(" else -1
+            if f[1] == 0:
+                stack.pop()
+            out.append(c); i += 1; continue
+        if q is None and f[2] != "((" and c == "<":
+            m = _HEREDOC_END.match(seg, i)
+            if m:
+                pending.append(next(g for g in m.groups() if g))
+                out.append(m.group(0)); i = m.end(); continue
+        out.append(c); i += 1
+    return "".join(out)
+
+
+def _split_punct(t: str) -> list[str]:
+    out, i = [], 0
+    while i < len(t):
+        op = next((o for o in _PUNCT_OPS if t.startswith(o, i)), t[i])
+        out.append(op); i += len(op)
+    return out
+
+
+def _commands(line: str) -> "list[list[str]]":
+    """`line`'s simple commands as the shell hands over their words: quotes removed (a quoted prompt
+    is ONE word, so `claude -p "what does --help do"` is not read as `--help`), a comment dropped
+    (only a `#` at a word start begins one), every `$( )`/`<( )`/`>( )`/backtick span one word
+    (`_placehold`, so its parentheses cut nothing), cut at every `&`, `&&`, `;`, `|`, `||`, `(`, `)` — a
+    glued `)&` too — and every redirection dropped with its target (`> out.md`, `2>/dev/null`,
+    `<<'EOF'`). `claude -p "task" & git --version` is two commands, and the `--version` belongs to
+    git. A line shlex cannot parse (an unclosed quote) falls back to whitespace words, one command."""
+    import shlex
+    line = _placehold(_drop_comments(line))
+    try:
+        lex = shlex.shlex(line, posix=True, punctuation_chars=True)
+        lex.whitespace_split = True
+        lex.commenters = ""                         # bash's rule is applied above; shlex's is not bash's
+        toks = [p for t in lex for p in (_split_punct(t) if t and all(c in _PUNCT for c in t) else [t])]
+    except ValueError:
+        return [line.split()]
+    out, cur, skip = [], [], False
+    for t in toks:
+        if skip:
+            skip = False; continue
+        if t in _OPS:
+            if cur:
+                out.append(cur)
+            cur = []; continue
+        if _REDIRECT.match(t):
+            if cur and cur[-1].isdigit():
+                cur.pop()                           # `2>/dev/null` lexes as `2`, `>`, `/dev/null`
+            skip = True; continue                   # the target is the next token
+        cur.append(t)
+    if cur:
+        out.append(cur)
+    return out
+
+
+def _is_lookup(w: list[str]) -> bool:
+    """`command -v x`, `command -pv x`, `command -p -V x`: `command` looks the name up and runs nothing."""
+    for x in w[1:]:
+        if x == "--" or not x.startswith("-"):
+            return False
+        if "v" in x or "V" in x:
+            return True
+    return False
+
+
+def _strip_argv_prefix(w: list[str]) -> list[str]:
+    """`w` from its command on: shell keywords (`then`, `do`, `!`, `{`, `function f`), `VAR=val`
+    words, the `strip_prefix` words with their options (`sudo -u me`, `env --chdir /tmp`,
+    `time -p`, `nice -n 5`), `timeout [opts] <n>` and `env -S '<command>'`, in any order. A
+    `command -v` lookup is no command: []."""
+    import shlex
+    import shellread
+    prefix = None
+    while w:
+        head = Path(w[0]).name
+        if not prefix and w[0] in _KEYWORDS:
+            w = w[1:]; continue
+        if not prefix and w[0] == "function":
+            w = w[2:]; continue                     # `function f { claude …`
+        if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", w[0]):
+            w = w[1:]; continue
+        if head == "command" and _is_lookup(w):
+            return []
+        if head in _TIMEOUTS:
+            w = w[1:]
+            while w and w[0].startswith("-"):
+                w = w[2:] if w[0] in ("-s", "-k", "--signal", "--kill-after") else w[1:]
+            w = w[1:]; prefix = None; continue      # the duration
+        if head in shellread._PREFIXES:
+            prefix = head; w = w[1:]; continue
+        if prefix == "env" and len(w) > 1 and w[0] in ("-S", "--split-string"):
+            try:                                    # `env -S 'claude -p hi'`: the value IS the command
+                w = shlex.split(w[1]) + w[2:]
+            except ValueError:
+                w = w[1].split() + w[2:]
+            continue
+        if prefix and w[0].startswith("-"):
+            w = w[2:] if w[0] in shellread._PREFIXES[prefix] else w[1:]
+            continue
+        break
+    return w
+
+
+def claude_argvs(seg: str, _depth: int = 0) -> "list[list[str]]":
+    """Every `claude` command in this segment, each as its own words from `claude` on. A heredoc's
+    body is not a command (its lines are cut out, the lines around it read: `claude -p <<'EOF'` then
+    body text; `claude -p "$(cat <<'EOF'` … `)" --model x` keeps its `--model`) unless a shell reads it (`bash <<'EOF'`, `cat <<EOF | bash`); the `claude` inside `$( )` or
+    backticks is read too (`x=$(claude -p "hi")`), but not inside a QUOTED heredoc's body, which the
+    shell never expands (`killdoor._expanded`: a commit message quoting `claude -p` runs nothing)."""
+    import shellread
+    import killdoor
+    out: "list[list[str]]" = []
+    if _depth > _MAX_DEPTH:
+        return out
+    for body in killdoor.substitutions(killdoor._expanded(seg)):
+        for inner in shellread.segments(body):
+            out.extend(claude_argvs(inner, _depth + 1))
+    first = seg.split("\n", 1)[0]
+    heredoc = "\n" in seg and killdoor._HEREDOC_OP.search(first)
+    if heredoc and shellread._heredoc_reader(seg) == "shell":
+        for inner in shellread.segments(shellread._heredoc_body(seg)):
+            out.extend(claude_argvs(inner, _depth + 1))
+    for w in _commands(_drop_heredoc_bodies(seg)):
+        w = _strip_argv_prefix(w)
+        if w and Path(w[0]).name in ("claude", "claude.exe"):
+            out.append(w)
+    return out
+
+
+def launches_nothing(w: list[str]) -> bool:
+    """A `claude` call that prints something and starts no session: a subcommand of the set above as
+    its first word after the valueless `--verbose`/`--debug` and the one-value `--settings`-class
+    flags, or `--help` / `--version` anywhere in its OWN words (a heredoc body, the command after
+    `&` and a comment are not its words)."""
+    k = 1
+    while k < len(w) and (w[k] in _CLAUDE_BARE_FLAGS or w[k] in _CLAUDE_VALUE_FLAGS):
+        k += 2 if w[k] in _CLAUDE_VALUE_FLAGS else 1
+    if k < len(w) and w[k] in _CLAUDE_SUBCMDS:
+        return True
+    own = w[1:w.index("--")] if "--" in w else w[1:]   # after `--` a `--help` is the prompt
+    return any(x in _INFO_FLAGS for x in own)
+
+
+def launch_words(cmd: str, segments):
+    """Each `claude` call in `cmd` that STARTS a session, as its words. gate.py's older opt-in rule
+    reads through this too, so the two doors can never disagree on what a launch is."""
+    for seg in segments(cmd):
+        for w in claude_argvs(seg):
+            if not launches_nothing(w):
+                yield w
 
 
 def _has(w: list[str], flag: str) -> bool:
@@ -468,18 +781,7 @@ def check_launch(cmd: str, segments) -> str | None:
     """The launch-pin door's words for a Bash command, or None. `segments` is gate.py's splitter."""
     if not enabled("launch_pin"):
         return None
-    for seg in segments(cmd):
-        w = seg.split()
-        while w and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", w[0]):
-            w = w[1:]
-        if w and Path(w[0]).name == "env":             # `env [-i] [-u NAME] [VAR=val]… claude …`
-            w = w[1:]
-            while w and (w[0].startswith("-") or re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", w[0])):
-                w = w[2:] if w[0] in ("-u", "--unset", "-C", "--chdir", "-S", "--split-string") else w[1:]
-        if not w or Path(w[0]).name not in ("claude", "claude.exe"):
-            continue
-        if len(w) > 1 and w[1] in _CLAUDE_SUBCMDS:
-            continue
+    for w in launch_words(cmd, segments):
         miss = [f for f in ("--model", "--effort") if not _has(w, f)]
         if miss:
             return words("launch_pin", "this `claude` launch does not pin " + " or ".join(f"`{m}`" for m in miss) +

@@ -79,6 +79,12 @@
   "resume_min_headroom": 70000,
   "_resume_min_headroom": "A wake is refused, warm or not, when the target has less than this many tokens of headroom before resume_window (i.e. at 350,000 and above by default). Owner 2026-09-23: '50k left is maybe too small'; a row does not fit in less.",
 
+  "resume_short_chars": 0,
+  "_resume_short_chars": "CONTEXTMSG-1: a message of at most this many characters to a WARM target passes the resume_min_headroom rule while the target is below resume_short_window. A report of a few lines costs a warm target cents and a few hundred tokens; the headroom rule exists for the next row, which such a message does not bring. The cold rules are unchanged. 0 = off (shipped): set both keys to turn it on.",
+
+  "resume_short_window": 0,
+  "_resume_short_window": "CONTEXTMSG-1: the context size up to which a short message (resume_short_chars) passes the headroom rule; at or above it the headroom rule applies to every message again. 0 = off (shipped).",
+
   "split_min_entries": 8,
   "_split_min_entries": "How many entries in one region must cluster on one sub-topic before a split is PROPOSED. Eight is the owner's own acceptance line for the sub-region row ('8 headings under one sub-topic -> one split'), not a measurement — it is the number at which a topic stops being a few related notes and starts being a room of its own. Proposing is all it does: nothing moves without an explicit name and an explicit apply.",
 
@@ -147,7 +153,7 @@
   "_triggers": "OR semantics: any one arm firing is enough. Ported from the vault Stop hook's sections 3 and 5 by row R1, which reads them from here and holds no copy.",
 
   "kernel_entry_door": true,
-  "_kernel_entry_door": "The kernel-entry door (hooks/kernelentry.py, KERNELENTRY-1): an ADDED bullet in a region's Kernel.md that carries a tool signature (a command, `claude -p`, a .html path, a path glob, a script path, a tool name, shell syntax) is pointed at the facet whose trigger matches it. On by default because it only WARNS until a DENY date is set below: a note in the model's next turn, never a refusal.",
+  "_kernel_entry_door": "The kernel-entry door (hooks/kernelentry.py, KERNELENTRY-1): an ADDED bullet in a region's Kernel.md that carries a tool signature (a command, `claude -p`, a .html path, a path glob, a script path, a tool name, shell syntax) is pointed at the facet whose trigger matches it. Only a signature NEW to the file fires (KERNELENTRY-2): one no bullet of the file before the write already carries, so rewording a bullet, adding a facet name to a list or moving a command between bullets passes, while a command that stood only in prose or a fenced block and is now put into a bullet counts as new. On by default because it only WARNS until a DENY date is set below: a note in the model's next turn, never a refusal.",
   "kernel_entry_deny_from": "",
   "_kernel_entry_deny_from": "The day (YYYY-MM-DD) the kernel-entry door starts REFUSING. Empty = WARN forever. The flip is a date in the config so it does not depend on anyone remembering it (the partition door's hand flip stayed undone for eight days); the vault's owner sets it, 14 days after the door goes live, in the `limits` object of config.json.",
   "apostrophe_door": true,
@@ -167,6 +173,10 @@
   "row_identity_door": true,
   "row_identity_deny_from": "",
   "marker_roster_door": true,
+  "kill_door": true,
+  "_kill_door": "The kill door (hooks/killdoor.py, KILLDOOR-1): a Bash `kill`, `pkill` or `killall` whose target comes from a command substitution, backticks, a variable or `xargs`; `pkill -P`, `pkill -f` and `pgrep -f` always; pid 0, pid 1 and negative pids. `kill <digits>` typed out passes, and `kill -0` with any target (signal 0 sends nothing). Specimen 2026-09-28: `pkill -P $(pgrep -o -f x || echo 1)` became `pkill -P 1` and ended every app on the machine. WARNS until `kill_deny_from`, then REFUSES inside the vault or a marked repo (a note elsewhere), like the DOORS-2 doors.",
+  "kill_deny_from": "",
+  "_kill_deny_from": "The day (YYYY-MM-DD) the kill door starts REFUSING. Empty = WARN forever. The vault owner's to set.",
 
   "facts_max_bytes": 0,
   "_facts_max_bytes": "The SessionStart facts block's cap, in bytes, operating rules included (hooks/factsbudget.py, BOOTFACTS-1). Over it, whole tiers of long-tail lines move behind /gedaechtnis-status in a fixed order: memory-file lists, other regions' Boot-file alarms, the worktree list, state-file pointers. 0 = no cap, so a stranger's install is unchanged until it opts in. Measured 2026-09-26 over the 20 newest real sessions: 10,922-12,140 B, median 11,531 B, every one past facts_inline_limit_chars, so the model read a 2 KB preview. Proposal for a vault: 8000 (20% under the inline limit, room for the operating rules' ~4,800 B).",

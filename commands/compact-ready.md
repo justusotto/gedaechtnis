@@ -4,7 +4,7 @@ allowed-tools: Bash(python3:*), Edit, Read
 ---
 
 The owner is about to compact this session. Write the compact point that the session will read
-back afterwards, in three steps.
+back afterwards, in four steps.
 
 1. Pick the file: this session's own state-of-record file — the seat's state file, or your
    handoff if you are a builder (a handoff already carrying **ORDERS IN FORCE:**, **LIVE:** and
@@ -33,8 +33,30 @@ back afterwards, in three steps.
    Keep the whole block under 8,000 characters. It is put back word for word after compaction,
    and the door refuses a longer one.
 
-3. Say exactly: **READY — type /compact**
+   Write nothing below the point in that file: text after it is read as part of the point and
+   counts toward its 8,000 characters.
 
-If the owner's `/compact` is refused, the refusal names what is missing; fix that and say READY
-again. `/compact force …` skips the check. The door only runs where `compact_point` is `on` in the
+3. Run the door's own check, with the same session id:
+
+   ```sh
+   python3 "${CLAUDE_PLUGIN_ROOT}/tools/compactpoint.py" check <file> --session-id <id>
+   ```
+
+   It judges the point the door will judge — this session's newest point in any file it recorded,
+   or in a handoff it wrote — and says NOT READY, naming that file, when it is not `<file>`. It
+   measures the point exactly as the door will: its age (at most `compact_point_fresh_min` minutes
+   from the plugin config, 30 unless set), the three lines, and its size. **If you edited an
+   existing point instead of writing a new one, its stamp is still the old one** — re-check its
+   three lines against what is true now, and only then run `compactpoint.py renew <file>` (it
+   restamps that heading to now and changes nothing else), then `check` again. A handoff has no
+   heading to renew: its stamp is its modification time, so saving it renews it. Without a session
+   id (flag or `CLAUDE_CODE_SESSION_ID`), `check` answers NOT CONFIRMED, never READY, while the door
+   is on. Only when `check` prints READY go on; it prints `READY until HH:MM`, the minute
+   after which the point is too old and has to be renewed.
+
+4. Say exactly: **READY — type /compact**
+
+If the owner's `/compact` is refused anyway, the refusal is meant to come back to you as a task (a
+second PreCompact hook wakes this session with it; this has not been seen live yet): fix what it
+names, run `check`, and say READY again without waiting to be asked. `/compact force …` skips the check. The door only runs where `compact_point` is `on` in the
 plugin config; elsewhere this command still writes a useful point.

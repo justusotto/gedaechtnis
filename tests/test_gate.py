@@ -71,6 +71,23 @@ def test_add_A_in_vault_denied(world):
     v = world["vault"]
     assert decision(bash(world, f"git -C {v} add -A && git -C {v} commit -m 'x' -- Global/Map.md")) == "deny"
 
+def test_R6_add_A_after_a_line_continuation_denied(world):
+    v = world["vault"]                           # shellread drops `\` + newline, as bash does
+    assert decision(bash(world, f"echo ok && \\\n  git -C {v} add -A")) == "deny"
+    assert decision(bash(world, f"git -C {v} add -- Global/Map.md && \\\n  git -C {v} commit -m 'x'")) == "deny"   # a bare commit
+
+
+def test_R7_a_line_continuation_joins_and_a_backslash_heredoc_message_passes(world):
+    v = world["vault"]                           # `\` + newline joins, never splits: still path-limited
+    assert bash(world, f"git -C {v} commit -m x \\\n  -- Global/Map.md") is None
+    assert bash(world, f"git -C {v} commit -F - -- Global/Map.md <<\\EOF\nfix\n\n* one\n--amend ls -a\nEOF") is None
+
+
+def test_LAUNCHPINFIX_add_A_after_an_empty_split_string_denied(world):
+    v = world["vault"]                           # `env -S ''` must not hide the git head word
+    assert decision(bash(world, f"env -S '' git -C {v} add -A")) == "deny"
+
+
 def test_add_path_limited_allowed(world):
     v = world["vault"]
     assert bash(world, f"git -C {v} add -- Global/Map.md && git -C {v} commit -m 'x' -- Global/Map.md") is None

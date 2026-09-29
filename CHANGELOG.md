@@ -12,6 +12,143 @@ re-check.
 
 Sections used: **Added** · **Changed** · **Fixed** · **Removed** · **Known limits**.
 
+## Unreleased
+
+### Added
+
+- **Parked messages are delivered** (`hooks/deliver.py`). A message the resume gate refused was
+  parked in `parked-<name>.jsonl` and never shown to anyone: the only reader was a count at session
+  start, keyed by the process's `--name`, which a resumed session does not carry. Now, at session
+  start (startup, resume, compact) and at every prompt, the session is shown what was parked for it:
+  newest first, at most 6,000 characters per delivery (the rest waits for the next), each framed
+  as a peer's report, not the owner's word, possibly superseded. A message older than 48 hours is
+  listed with the file it moved to, not shown. The parked file is claimed by an atomic rename
+  before it is read, so a message parked meanwhile waits for the next delivery; shown lines move
+  to `parked-<name>.delivered.jsonl`. Any error shows nothing, exits 0, logs one line to
+  `deliver.log` and leaves the lines unread (a failed put-back logs a second line and leaves a claim
+  file that the next delivery takes over). `fleet.park` now writes under a file lock and only into
+  the file still at its path, and delivery reads a claim under that lock, so a park in flight at the
+  moment of the claim is not lost. Known gap: a hook killed between marking a line delivered and
+  printing it leaves that line in the delivered file, unshown. The session-start count of parked
+  messages is gone.
+- **A short message may pass the resume gate's headroom rule** (`resume_short_chars`,
+  `resume_short_window`; both 0, so off, as shipped). With both set, a message of at most that many
+  characters to a WARM session passes the headroom rule while the session is under the window. The
+  cold rules do not change.
+
+- **A door for a kill whose target the shell computes** (`hooks/killdoor.py`, `kill` in the rule
+  doors). On 2026-09-28 a session ran `pkill -P $(pgrep -o -f "…" || echo 1)`: the search found
+  nothing, the fallback printed `1`, and `pkill -P 1` ended every app on the machine. The door reads
+  the Bash command string and names a `kill`, `pkill` or `killall` whose target comes from `$( )`,
+  backticks, a variable or `xargs`; any `pkill -P` or `pkill -f`; `pgrep -f`; and pid 0, pid 1 or a
+  negative pid; a `pkill`/`killall` that selects every process (no pattern, `-v`, `.`, `-u` with
+  no name, or a pattern that matches every name). It reads inside substitutions, `bash -c` (options
+  before `-c` and trailing arguments included), `eval`, here-strings, background jobs, shell
+  heredocs, the rest of a heredoc opener's line (`cat > f <<'EOF' && pkill -P 1`), `if`/`for`/`while`
+  bodies, `case` arms (`stop)`, `stop )`, `$s)`, and a `case $(…) in` subject written over several lines), `( )`, `{ }`,
+  function bodies, `xargs` through `sudo`, `env`, `nohup` or `timeout`, and lines joined by a
+  backslash. It reads `\kill`, `pk''ill` and `PKILL` as the command they are, and a quoted or escaped
+  option (`"-P"`, `\-P`, `$'-P'`) as the option. A kill nested more than six shells, evals or
+  substitutions deep is refused, because the door cannot read it. A heredoc with a quoted end word
+  (`<<'EOF'`) is text the shell never runs, so a commit message that quotes a kill passes; a
+  here-string (`<<<'abc'`) is not a heredoc, so the command after it is read (in `shellread`, which
+  the delete door shares), and a multi-line here-string and a `<<-` heredoc with a tab-indented end word are read whole; a `# comment` on the command line is not searched, while a `#` or an apostrophe inside an unquoted heredoc body hides nothing, since bash expands `$( )` there; a quoted heredoc body is cut at `&` nowhere, and an escaped quote outside quotes (`it\'s`, `'\''`) opens none (in `shellread` too); a backslash at a line end joins the next line as bash does, so `make && \⏎ rm -rf dist` still shows the delete door its `rm`; the kill door reads `<<\EOF` as the quoted heredoc it is. A part of the command the door cannot
+  read costs only that part, never the rest. `kill 12345` with the digits typed out passes, and so
+  does `kill -0` with any target and no second signal option, because signal 0 sends nothing and
+  only asks whether the pid is alive; `kill -0 -s 9 -1` is refused, because bash's `kill` reads
+  every signal option before the first pid. It warns until
+  `limits.kill_deny_from`, then refuses inside the vault or a marked project (a note elsewhere);
+  `kill_door: false` turns it off. The refusal says what to do instead: the pid captured at launch, letting the run finish, or
+  handing the line to the owner.
+
+- **A refused `/compact` is handed to the session, not only to you.** A PreCompact hook's refusal
+  is shown only to the person (the hooks documentation, fetched 2026-09-28). A second PreCompact
+  registration now carries `asyncRewake`: when the door refuses, it wakes the session with the
+  refusal as a task, so the session fixes its point and says READY again. It never blocks anything
+  and stays silent on a pass, a `/compact force` and every automatic compaction. That Claude Code
+  honours `asyncRewake` on PreCompact is read from the field's general definition; it has not been
+  seen live yet, so the door's own refusal also tells you to ask for `/compact-ready` if the
+  session has not answered within a minute. The check command in both refusals is one
+  shell-quoted line, safe to paste.
+- **`compactpoint.py check <file> --session-id <id>`** runs the door's own check (age, the three
+  lines, size) on the point the door will judge — this session's newest point in any file it
+  recorded, or in a handoff — and says NOT READY, naming that file, when it is not `<file>`. The
+  session id defaults to `CLAUDE_CODE_SESSION_ID`, as for `write`; without one, where the door is
+  on, it never says READY: a point that passes on its own gets `NOT CONFIRMED — pass --session-id`
+  and exit 1, because the door may judge another file. Of two points stamped the same minute the
+  later one counts, as at the door.
+  READY names the minute the point turns too old (`READY until HH:MM`). `/compact-ready` runs it
+  before it says READY. **`compactpoint.py renew <file>`** restamps the newest point's heading,
+  because editing an existing point kept its old stamp and the door refused it as stale
+  (2026-09-28, 46 minutes); it changes only the heading's bytes, keeps CRLF line endings and the
+  file's mode, renews a symlink's target and leaves the link, and refuses a file that is not UTF-8.
+  Text written below a point is named when it pushes the point past 8,000 characters (2026-09-27,
+  10,859), and `write` refuses to leave another writer's text after a new point.
+
+### Changed
+
+- **The context notices fire once per context WINDOW, not once per session.** A compaction clears
+  the levels fired and the cached floor; the next window's floor is its own first call. The REACH
+  notice no longer says the gate refuses "every" message, and with `compact_point: "on"` it prints
+  the `compactpoint.py write` line for the session (it writes nothing).
+- **The claim line at a prompt is printed only when it changed.** Session start always prints it.
+- **Parked messages name their sender through the session registry**, as the gate names targets,
+  so a resumed sender is no longer "?".
+
+### Fixed
+
+- **A session that had just compacted was measured by its old figure.** The resume gate and the
+  context notice read the last usage record, which after a compaction is the old window's until the
+  session's next call (specimen: refused at 374,589; the next call measured 118,717). A compaction
+  boundary after the last usage record now reads as "compacted, not yet measured": the gate lets
+  the message through (the Fable-cold rule still applies) and the notice stays quiet.
+- **The session record is written whole or not at all.** Every writer of `session-start-<sid>.json`
+  (the session-state update, the claims, SessionStart) writes a hidden temp file beside it and
+  renames it into place, keeping the old mode and writing through a symlink, so a reader never
+  sees it half-written. The session-state update still holds its lock across the whole
+  read, change and rename.
+- **The launch-pin door no longer warns on a `claude` call that launches nothing.** It warned on
+  `claude --version; claude remote-control --help`. `--help` and `--version` anywhere in the call,
+  `claude plugin …` and the other admin subcommands, and `claude remote-control` (which has no
+  `--model` flag; the Project sets the model) now pass. A quoted prompt is one word, so
+  `claude -p "what does --help do"` is still a launch; only `claude`'s own words count, so a
+  `--help` in a heredoc body, after a `&` (a glued `)&` too) or in a comment does not make a launch
+  pass; a comment starts only where bash starts one, at the start of a word; after `--` a
+  `--help` is the prompt, so `claude -p -- --help` is a launch. A `$( )`, `<( )`, `>( )` or
+  backtick span is one word whose parentheses cut nothing, and a heredoc body is cut out with the
+  lines after its end word kept, on any line of the command; a `<<` inside quotes or `$(( ))` is
+  text, not a heredoc (`claude -p "std::cout << x` ⏎ `…" --model … --effort …` keeps its pins), and
+  a `<<` with no end-word line after it cuts nothing, so `claude --resume $(cat .sid) --model … --effort …` and `claude -p
+  "$(cat <<'EOF'` … `)" --model … --effort …` keep their pins; a `--model $(cat .model)` counts as
+  pinned, as it did before. `claude --settings s.json mcp list` passes. The door now also sees a launch behind `nohup`, `sudo -u me` /
+  `--user me`, `time -p`, `timeout`, `env --unset`/`--chdir`/`-`/`-S '…'`, inside `$( )`, in a
+  heredoc a shell reads (`bash <<'EOF'`, `cat <<EOF | bash`), in a function body and after
+  `then`/`do`. `command -v claude`, `-V`, `-pv` and `-p -v` only look it up, and only that
+  command is skipped: `command -v claude & claude -p "task"` is still a launch. A quoted heredoc
+  body (`<<'EOF'`) is text the shell never runs, so a commit or PR message that quotes
+  `claude -p` passes. The older opt-in `require_launch_model` / `require_launch_effort` flags read
+  launches the same way (they kept their own copy of the list); with both off they read nothing,
+  and a command the reader cannot read is logged and runs, and costs no later door. The shared
+  prefix reader (`shellread.strip_prefix`) reads on from the value of `env -S` /
+  `--split-string`, so `env --split-string kill -9 -1` reaches the kill door and `env -S git -C /v
+  add -A` the git doors; an empty or one-word quoted value (`env -S '' git add -A`, `env -S 'nohup'
+  kill …`) keeps the head word after it.
+
+- **`compact_door.py --help` no longer hangs.** Any argument that is not a hook entry prints the
+  usage and returns before reading standard input, which a terminal never closes.
+- **The session record is never read half written.** `session-start-<id>.json` was rewritten by
+  truncating it and writing it again, while every door reads it without the lock; a reader in
+  between saw an empty record. The compact door's wake-up hook read it that way and told a session
+  its `/compact` had been refused while the door had let it through (345 of 8,573 threaded reads in
+  review). Every writer of the record (`update_session_state`, the SessionStart record and the
+  region-claim record) now writes a new file beside it and renames it into place. The wake-up hook
+  also judges a refusal again after a second and stays silent when the door recorded a pass or a
+  `/compact force` for the same `/compact`.
+- **A stale handoff is saved, not renewed.** When the point the door judges is a handoff (stamped
+  by its modification time), the task handed to the session now says to re-check its three lines
+  and save it; it said to run `renew`, which refuses a file with no compact-point heading. For a
+  point with a heading, the task says to re-check the three lines now and only then `renew`.
+
 ## 0.5.0 — 2026-09-27 — Linux and Windows, and checks for rules a script can decide
 
 ### Added

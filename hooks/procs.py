@@ -47,28 +47,99 @@ def is_claude(cmd: str) -> bool:
     return False
 
 
+def _exe_index(toks: list[str]) -> int | None:
+    """Index of the token that EXECUTES claude (`claude` or `claude.exe`), or None.
+
+    Stricter than `is_claude`, because a thread's marks (`--sdk-url`, `remote-control`) are plain
+    text that a shell's own command line can carry: the shell that ran this very fix had the thread
+    command in its `-c` string and was taken for a thread. So no token BEFORE the executable may be
+    a flag: `/bin/zsh -c …claude.exe --sdk-url…` is a shell, while `…/bin/claude.exe --print …`,
+    `/bin/sh …/bin/claude.exe …` (a script run by its interpreter) and a path with a space in it
+    (`…/Application Support/…/claude`) are not."""
+    for i, tok in enumerate(toks):
+        if tok.startswith("-"):
+            return None
+        if os.path.basename(tok.rstrip("/")) in ("claude", "claude.exe"):
+            return i
+    return None
+
+
+def is_thread(cmd: str) -> bool:
+    """True for a session a Remote Control host (or the cloud) started: a `claude`/`claude.exe`
+    process carrying `--sdk-url`. On this Mac a Project thread runs as
+    `…/claude-code/bin/claude.exe --print --sdk-url https://…/sessions/cse_… --session-id cse_…`,
+    a child of the host. Its basename is `claude.exe`, which `is_claude` does not match — that is
+    why every thread's walk used to run past its own process and land on the host."""
+    toks = cmd.split()
+    i = _exe_index(toks)
+    return i is not None and any(t == "--sdk-url" or t.startswith("--sdk-url=") for t in toks[i + 1:])
+
+
+def is_host(cmd: str) -> bool:
+    """True for a Remote Control host, `claude remote-control …`: a claude executable with the
+    subcommand `remote-control` anywhere among its arguments, and no `-p`/`--print` (a thread and
+    a one-shot run both carry one; a host never does). "Anywhere", because a flag before the
+    subcommand takes a value (`claude --permission-mode auto remote-control`) and a test on the
+    first non-flag token read that host as a plain session, which then held the lock for good.
+    A host outlives every thread it starts and its own first session never leaves, so it must
+    never be anyone's lock holder; a false "host" only costs a claim (under-claim is the safe side)."""
+    toks = cmd.split()
+    i = _exe_index(toks)
+    if i is None:
+        return False
+    rest = toks[i + 1:]
+    return "remote-control" in rest and not any(t in ("-p", "--print") for t in rest)
+
+
+def _walk(kind_of, max_hops: int) -> tuple[int | None, str]:
+    """Walk up from this process; the first parent `kind_of` names ends the walk.
+    Returns (pid or None, kind), kind "none" when nothing was found."""
+    me = os.getpid()
+    cur = me
+    for _ in range(max_hops):
+        info = ps_info(cur)
+        if not info:
+            return None, "none"
+        ppid = info[0]
+        if ppid <= 1:
+            return None, "none"
+        parent = ps_info(ppid)
+        if not parent:
+            return None, "none"
+        kind = kind_of(parent[1])
+        if kind:
+            return (ppid if ppid != me else None), kind
+        cur = ppid
+    return None, "none"
+
+
 def claude_pid(max_hops: int = 6) -> int | None:
     """The Claude Code process this hook is running under, found by walking the parent chain.
 
     Returns None rather than a guess. There is no fallback to the hook's own pid or to a shell's:
     a lock owned by a process that exits in milliseconds is worse than no lock, because it reads
     as a live holder to `status` and as a reapable wedge to everyone else."""
-    me = os.getpid()
-    cur = me
-    for _ in range(max_hops):
-        info = ps_info(cur)
-        if not info:
-            return None
-        ppid = info[0]
-        if ppid <= 1:
-            return None
-        parent = ps_info(ppid)
-        if not parent:
-            return None
-        if is_claude(parent[1]):
-            return ppid if ppid != me else None
-        cur = ppid
-    return None
+    return _walk(lambda cmd: "claude" if is_claude(cmd) else None, max_hops)[0]
+
+
+def session_process(max_hops: int = 6) -> tuple[int | None, str]:
+    """(pid, kind) of the SESSION this hook runs for, telling a host's threads apart.
+
+    kind is "thread" (a `--sdk-url` child of a host: its own pid, one per thread), "claude" (an
+    ordinary session, exactly what `claude_pid` answers), "host" (the walk reached
+    `claude remote-control` first: pid None, a host is never a holder) or "none".
+    PROJECTCLAIM-1: under a host, `claude_pid` answered the HOST's pid for every thread, so all
+    threads of one folder held a region as one holder that never died."""
+    def kind_of(cmd: str) -> str | None:
+        if is_host(cmd):                 # first, and not gated on `is_claude`: a `claude.exe` host
+            return "host"                # is no `claude` by basename and was walked past
+        if is_thread(cmd):
+            return "thread"
+        if is_claude(cmd):
+            return "claude"
+        return None
+    pid, kind = _walk(kind_of, max_hops)
+    return (None if kind == "host" else pid), kind
 
 
 def pid_alive(pid: int | None) -> bool:

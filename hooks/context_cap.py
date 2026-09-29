@@ -39,8 +39,10 @@ NOT A STOP CONDITION, and never a model-judged one. Both levels print one line o
 on a PostToolUse chore and allow everything; nothing is refused, no turn is ever cost. What to do
 about it is the session's judgment — the hook supplies the arithmetic the session cannot see.
 
-FIRES ONCE PER LEVEL PER SESSION. A notice repeated on every tool call is noise, and noise is how a
-real warning gets scrolled past. The levels reached are recorded in the session's own state file.
+FIRES ONCE PER LEVEL PER CONTEXT WINDOW. A notice repeated on every tool call is noise, and noise is
+how a real warning gets scrolled past. The levels reached are recorded in the session's own state
+file, and a compaction clears them (`new_window`, CONTEXTMSG-1): the next window reaches the same
+marks again, and must hear about it again.
 
 IF THAT STATE FILE CANNOT BE WRITTEN the notice FIRES ANYWAY, on every call, and SAYS SO IN ITS OWN
 TEXT. That is a deliberate choice between two bad directions, not an oversight: going quiet when the
@@ -161,17 +163,67 @@ def _read_head(path: Path, nbytes: int) -> list[str]:
 
 def current_context(transcript: Path, sidechain: bool = False) -> int | None:
     """The context at this session's most recent completed call, or None if unreadable."""
+    return reading(transcript, sidechain)[0]
+
+
+def _is_boundary(rec: dict, sidechain: bool) -> bool:
+    return (rec.get("type") == "system" and rec.get("subtype") == "compact_boundary"
+            and bool(rec.get("isSidechain")) == sidechain)
+
+
+def reading(transcript: Path, sidechain: bool = False) -> "tuple[int | None, bool]":
+    """(context at the most recent completed call, COMPACTED since that call).
+
+    CONTEXTMSG-1. A `compact_boundary` record AFTER the last usage record means the figure is from
+    the window before the compaction: until the session's next call, nothing on disk says how large
+    it is now (the boundary's own `postTokens` is the summary alone, not the context the next call
+    carries). The resume gate read that stale figure and refused a message to a session that had
+    just compacted from 374,589 to ~119,000 (specimen 2026-09-29 12:02). A caller that acts on the
+    figure checks the flag."""
     try:
-        pairs = _main_chain_contexts(_read_tail(transcript, TAIL_BYTES), sidechain)
+        lines = _read_tail(transcript, TAIL_BYTES)
     except OSError:
-        return None
-    return pairs[-1][1] if pairs else None
+        return None, False
+    pairs = _main_chain_contexts(lines, sidechain)
+    if not pairs:
+        return None, False
+    last_id, compacted = pairs[-1][0], False
+    for line in lines:                                 # file order: a boundary after the last call
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(rec, dict):
+            continue
+        if _is_boundary(rec, sidechain):
+            compacted = True
+        elif (rec.get("type") == "assistant"
+              and ((rec.get("message") or {}).get("id")) == last_id):
+            compacted = False
+    return pairs[-1][1], compacted
 
 
-def boot_floor(transcript: Path) -> int | None:
-    """The context at this session's FIRST call — what it carried before doing anything."""
+def _read_from(path: Path, offset: int, nbytes: int) -> list[str]:
+    """Lines from `offset` on. A start inside a line drops that partial line; a start exactly at a
+    line's beginning (where a compaction left the file) keeps it — it is the window's first call."""
+    if offset <= 0:
+        return _read_head(path, nbytes)
+    with path.open("rb") as fh:
+        fh.seek(offset - 1)
+        data = fh.read(nbytes + 1)
+    if data[:1] == b"\n":
+        return data[1:].decode("utf-8", errors="replace").split("\n")
+    return data.decode("utf-8", errors="replace").split("\n")[1:]
+
+
+def boot_floor(transcript: Path, offset: int = 0) -> int | None:
+    """The context at this session's FIRST call — what it carried before doing anything — or, with
+    `offset` (where the latest compaction left the transcript), the first call of that window."""
     try:
-        pairs = _main_chain_contexts(_read_head(transcript, HEAD_BYTES))
+        pairs = _main_chain_contexts(_read_from(transcript, offset, HEAD_BYTES))
     except OSError:
         return None
     if not pairs:
@@ -216,14 +268,38 @@ def _update(sid: str, mutate) -> bool:
 
 
 def _floor_cached(sid: str, transcript: Path) -> int | None:
-    """The floor does not change during a session; read it once and keep it."""
-    cached = _load(sid).get("floor")
+    """The floor does not change during a context window; read it once and keep it. After a
+    compaction (`new_window`) it is read from the first call past where the compaction left the
+    transcript."""
+    doc = _load(sid)
+    cached = doc.get("floor")
     if isinstance(cached, int) and cached > 0:
         return cached
-    floor = boot_floor(transcript)
+    offset = doc.get("window_offset")
+    floor = boot_floor(transcript, offset if isinstance(offset, int) and offset > 0 else 0)
     if floor:
         _update(sid, lambda doc: doc.__setitem__("floor", floor))
     return floor
+
+
+def new_window(sid: str, transcript_path: str | None = None) -> bool:
+    """SessionStart `compact` (CONTEXTMSG-1): a compaction opens a new context window, so the levels
+    fired in the old one and its cached floor are cleared, and the transcript's size now is kept as
+    where the new window starts. Before this, each level fired once per SESSION: a seat that
+    compacted nine times after its one REACH notice was never told again."""
+    transcript = locate_transcript(sid, transcript_path)
+    try:
+        size = transcript.stat().st_size if transcript else 0
+    except OSError:
+        size = 0
+
+    def mutate(doc):
+        doc.pop("fired", None)
+        doc.pop("floor", None)
+        doc["window_offset"] = size
+    ok = _update(sid, mutate)
+    log("context_cap", f"new-window\t{sid}\toffset={size}\t{'ok' if ok else 'unrecorded'}")
+    return ok
 
 
 def _levels_fired(sid: str) -> set:
@@ -278,14 +354,43 @@ def reach_bound() -> int | None:
     return bound if bound > 0 else None
 
 
+def _short_clause() -> str:
+    """True with the short-message pass on or off (`resume_short_chars`, off by default)."""
+    chars = int(limits.get("resume_short_chars", 0) or 0)
+    upto = int(limits.get("resume_short_window", 0) or 0)
+    if chars <= 0 or upto <= 0:
+        return ""
+    return (f" (a message of at most {chars:,} characters still passes while this session is "
+            f"warm and under {upto:,})")
+
+
+def _compact_hint(sid: str) -> str:
+    """The `compactpoint.py write` line for this session, when the compact ritual is on. Printed,
+    never run: a point stamped by a hook but not filled in by the session would look fresh and
+    say nothing."""
+    try:
+        if not config.compact_point():
+            return ""
+        import shlex
+        import compact_door
+        files = compact_door.recorded_files(sid)
+        target = shlex.quote(files[-1]) if files else "<your state file>"
+        tool = Path(__file__).resolve().parent.parent / "tools" / "compactpoint.py"
+        return (f" If you will compact, write the compact point first: python3 "
+                f"{shlex.quote(str(tool))} write {target} --session-id {shlex.quote(sid)} — then "
+                f"fill its three lines.")
+    except Exception:                                  # a hint must never cost the notice
+        return ""
+
+
 def notice(sid: str, transcript_path: str | None) -> str | None:
     """One line for the session, or None. Never raises: every path degrades to no notice."""
     try:
         transcript = locate_transcript(sid, transcript_path)
         if transcript is None:
             return None
-        current = current_context(transcript)
-        if not current:                                # unreadable, or no completed call yet
+        current, compacted = reading(transcript)
+        if not current or compacted:                   # unreadable, no call yet, or a stale window
             return None
 
         cap = int(limits.get("context_hard_cap_tokens", 700000) or 0)
@@ -305,11 +410,12 @@ def notice(sid: str, transcript_path: str | None) -> str | None:
             unrecorded = not _record_fired(sid, "reach")
             gate_at = bound + int(limits.get("context_reach_margin_tokens", 30000) or 0)
             log("context_cap", f"reach\t{sid}\t{current}\tbound={bound}")
-            return (f"CONTEXT — REACH: {current:,} tokens. At {gate_at:,} the resume gate refuses "
-                    f"every message sent to this session, so once it goes idle nobody can hand it "
-                    f"more work. Bring your handoff up to date now, so a successor can start from "
-                    f"disk; if you are waiting on someone, write that into the handoff. Nothing "
-                    f"here is blocked."
+            return (f"CONTEXT — REACH: {current:,} tokens. From {gate_at:,} the resume gate refuses "
+                    f"messages sent to this session while it is idle{_short_clause()}, and a "
+                    f"refused message waits parked until this session's next prompt or compaction. "
+                    f"Bring your handoff up to date now, so a successor can start from disk; if you "
+                    f"are waiting on someone, write that into the handoff.{_compact_hint(sid)} "
+                    f"Nothing here is blocked."
                     + (UNRECORDED_SUFFIX if unrecorded else ""))
 
         if over and "warn" not in fired and "cap" not in fired:

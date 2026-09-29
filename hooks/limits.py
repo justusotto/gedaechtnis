@@ -65,6 +65,10 @@ DEFAULTS = {
     "resume_cold_s": 300,
     "resume_window": 420000,
     "resume_min_headroom": 70000,
+    # CONTEXTMSG-1: a message of at most `resume_short_chars` characters to a WARM target passes the
+    # headroom rule below `resume_short_window`. Both 0 = off, the shipped behaviour.
+    "resume_short_chars": 0,
+    "resume_short_window": 0,
     "split_min_entries": 8,
     "split_min_remaining_entries": 4,
     "split_min_remaining_share": 0.0,
@@ -121,6 +125,9 @@ DEFAULTS = {
     "row_identity_door": True,
     "row_identity_deny_from": "",
     "marker_roster_door": True,
+    # KILLDOOR-1: a kill whose target the shell computes (hooks/killdoor.py).
+    "kill_door": True,
+    "kill_deny_from": "",
     # BOOTFACTS-1: the SessionStart facts block's budget (hooks/factsbudget.py). 0 = no cap.
     "facts_max_bytes": 0,
     "facts_inline_limit_chars": 10000,

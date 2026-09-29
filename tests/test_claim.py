@@ -394,3 +394,183 @@ def test_a_holder_that_is_ANOTHER_process_is_named_by_pid(world):
     out = json.loads(p.stdout)["hookSpecificOutput"]["additionalContext"]
     assert "another writer holds it" in out and "holder pid 777" in out, out
     assert "not this session's own (4242)" in out
+
+
+# ------------------------------------- PROJECTCLAIM-1: the event name, and threads of a host ----
+def _run(w, payload, env_extra=None):
+    env = dict(w["env"], **(env_extra or {}))
+    p = subprocess.run([sys.executable, str(HOOKS / "claim.py"), "start"], input=json.dumps(payload),
+                       capture_output=True, text=True, env=env, timeout=60)
+    assert p.returncode == 0, p.stderr
+    return p
+
+
+def _tree(w, rows, default_parent):
+    """A PATH whose `ps` answers from a FAKED process tree: `rows` maps pid -> (ppid, command).
+    Any pid not in the table (the hook's own, which is real) is reported as a child of
+    `default_parent` run by a plain shell. No real process is looked at, none is signalled."""
+    d = w["tmp"] / f"tree{len(list(w['tmp'].glob('tree*')))}"
+    d.mkdir()
+    table = d / "table.txt"
+    table.write_text("".join(f"{pid}\t{ppid} {cmd}\n" for pid, (ppid, cmd) in rows.items()))
+    (d / "ps").write_text(
+        '#!/bin/sh\nfor a in "$@"; do p="$a"; done\n'
+        f'line=$(awk -F "\\t" -v p="$p" \'$1==p {{print $2}}\' "{table}")\n'
+        f'if [ -n "$line" ]; then echo "$line"; else echo "{default_parent} /bin/sh -c python3 claim.py start"; fi\n')
+    (d / "ps").chmod(0o755)
+    return {"PATH": str(d) + os.pathsep + w["env"].get("PATH", "")}
+
+
+HOST = "claude remote-control --name demo host --spawn same-dir --capacity 4"
+THREAD = ("/opt/x/.nvm/versions/node/v24/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe "
+          "--print --sdk-url https://api.anthropic.com/v1/code/sessions/cse_{0} --session-id cse_{0}")
+
+
+def _payload(w, event, sid="S1"):
+    d = {"cwd": str(w["repo"]), "session_id": sid}
+    if event:
+        d["hook_event_name"] = event
+    return d
+
+
+def _event_out(p):
+    return json.loads(p.stdout)["hookSpecificOutput"]["hookEventName"] if p.stdout.strip() else None
+
+
+def test_the_output_names_the_event_it_was_called_for(world):
+    """Defect 2: Claude Code refuses a hook whose output names another event than its own. A
+    UserPromptSubmit run must answer UserPromptSubmit (positive), a SessionStart run SessionStart
+    and an input naming no event the old answer (negatives: nothing changed there)."""
+    w = world
+    env = _tree(w, {9001: (1, "/opt/bin/claude --model m")}, 9001)
+    assert _event_out(_run(w, _payload(w, "UserPromptSubmit"), env)) == "UserPromptSubmit"
+    assert _event_out(_run(w, _payload(w, "SessionStart"), env)) == "SessionStart"
+    assert _event_out(_run(w, _payload(w, None), env)) == "SessionStart"
+    bad = dict(_payload(w, None), hook_event_name=123)       # not a string: the old answer
+    assert _event_out(_run(w, bad, env)) == "SessionStart"
+
+
+def test_the_off_line_names_its_event_too(world):
+    w = world
+    w["cfg"].write_text(json.dumps({"claim_tool": str(w["tmp"] / "absent.sh")}))
+    p = _run(w, _payload(w, "UserPromptSubmit"))
+    assert _event_out(p) == "UserPromptSubmit", p.stdout
+
+
+def test_a_thread_of_a_host_claims_with_its_OWN_pid_never_the_host_s(world):
+    w = world
+    env = _tree(w, {9000: (1, HOST), 9001: (9000, THREAD.format("A"))}, 9001)
+    p = _run(w, _payload(w, "UserPromptSubmit"), env)
+    assert calls(w) == ["claim-interactive Studio/Cards 9001"]
+    assert claims(w) == [{"region": "Studio/Cards", "pid": 9001}]
+    assert "pid 9001" in p.stdout and "9000" not in p.stdout
+
+
+def test_two_threads_under_one_host_are_two_holders(world):
+    w = world
+    rows = {9000: (1, HOST), 9001: (9000, THREAD.format("A")), 9002: (9000, THREAD.format("B"))}
+    _run(w, _payload(w, "UserPromptSubmit", sid="A"), _tree(w, rows, 9001))
+    _run(w, _payload(w, "UserPromptSubmit", sid="B"), _tree(w, rows, 9002))
+    assert claims(w, "A") == [{"region": "Studio/Cards", "pid": 9001}]
+    assert claims(w, "B") == [{"region": "Studio/Cards", "pid": 9002}]
+
+
+def test_a_thread_claims_nothing_at_start_up_only_at_its_first_prompt(world):
+    """The host's own first session never has a turn and never leaves; it must hold nothing."""
+    w = world
+    env = _tree(w, {9000: (1, HOST), 9001: (9000, THREAD.format("A"))}, 9001)
+    p = _run(w, _payload(w, "SessionStart"), env)
+    assert calls(w) == [] and claims(w) is None and p.stdout == ""
+    assert "skipped at SessionStart" in logtext(w, "claim")
+    _run(w, _payload(w, "UserPromptSubmit"), env)
+    assert calls(w) == ["claim-interactive Studio/Cards 9001"]
+
+
+def test_a_hook_directly_under_a_host_claims_nothing(world):
+    """At start-up that is the host's own session: logged, quiet. At a PROMPT it is a thread that
+    was not recognised: said to the session and to hook-errors."""
+    w = world
+    env = _tree(w, {9000: (1, HOST)}, 9000)
+    p = _run(w, _payload(w, "SessionStart"), env)
+    assert calls(w) == [] and claims(w) is None and p.stdout == ""
+    assert "Remote Control host" in logtext(w, "claim")
+    assert logtext(w, "hook-errors") == ""
+    p = _run(w, _payload(w, "UserPromptSubmit"), env)
+    assert calls(w) == [] and claims(w) is None
+    assert "NOT taken" in p.stdout and _event_out(p) == "UserPromptSubmit"
+    assert "no recognised thread process" in logtext(w, "hook-errors")
+
+
+@pytest.mark.parametrize("host", [
+    "claude --permission-mode auto remote-control --name h",
+    "/opt/x/bin/claude.exe remote-control --name h",
+])
+def test_a_host_spelled_otherwise_is_still_never_a_holder(world, host):
+    """Review finding 1: a flag with a value before the subcommand, and a `claude.exe` host, were
+    read as a plain session / walked past. Above the host sits a plain `claude` (8000) that must
+    not be picked up either."""
+    w = world
+    env = _tree(w, {8000: (1, "claude --model m"), 9000: (8000, host)}, 9000)
+    _run(w, _payload(w, "SessionStart"), env)
+    assert calls(w) == [] and claims(w) is None
+
+
+def test_a_plain_claude_session_claims_at_start_up_as_before(world):
+    w = world
+    env = _tree(w, {9001: (1, "claude --resume 2de0e225")}, 9001)
+    _run(w, _payload(w, "SessionStart"), env)
+    assert calls(w) == ["claim-interactive Studio/Cards 9001"]
+
+
+@pytest.mark.parametrize("depth,found", [(6, True), (7, False)])
+def test_a_session_six_hops_deep_is_found_as_before_and_seven_is_not(world, depth, found):
+    """The hop limit is unchanged: `claude_pid` and the claim agree at the edge."""
+    w = world
+    rows = {8000 + i: (8000 + i + 1, "/bin/sh -c wrapper") for i in range(1, depth)}
+    rows[8000 + depth] = (1, "claude --model m")
+    _run(w, _payload(w, "SessionStart"), _tree(w, rows, 8001))
+    assert calls(w) == ([f"claim-interactive Studio/Cards {8000 + depth}"] if found else [])
+
+
+def test_what_counts_as_a_thread_and_as_a_host():
+    sys.path.insert(0, str(HOOKS))
+    import procs
+    assert procs.is_thread(THREAD.format("A"))
+    assert procs.is_thread("/bin/sh /tmp/bin/claude.exe --print --sdk-url=https://a")
+    assert procs.is_thread("/x/claude.exe --sdk-url https://a")          # the flag right after the exe
+    assert not procs.is_thread("claude --resume x")
+    assert not procs.is_thread(HOST)
+    # a SHELL that merely carries the text of a thread command in its -c string is no thread
+    assert not procs.is_thread("/bin/zsh -c echo " + THREAD.format("A"))
+    assert procs.is_host(HOST)
+    assert procs.is_host("/usr/local/bin/claude --debug remote-control")
+    assert not procs.is_host("/bin/zsh -c claude remote-control")
+    assert not procs.is_host("claude -p fix the host")
+    assert not procs.is_host("claude -p fix the remote-control host")    # a one-shot run is no host
+    assert procs.is_host("claude --permission-mode auto remote-control")
+    assert not procs.is_host(THREAD.format("A"))
+
+
+# ---- CONTEXTMSG-1: the claim line at a prompt is printed only when it changes ----------------
+
+def test_the_same_claim_line_is_not_repeated_on_the_next_prompt(world):
+    w = world
+    w["cfg"].write_text(json.dumps({"claim_tool": str(w["tmp"] / "absent.sh")}))
+    first = _run(w, _payload(w, "UserPromptSubmit"))
+    assert "Region claim" in first.stdout                          # positive: said once
+    again = _run(w, _payload(w, "UserPromptSubmit"))
+    assert again.returncode == 0 and again.stdout == ""            # the same line: not again
+
+
+def test_a_changed_claim_line_and_every_session_start_are_printed(world):
+    w = world
+    working = w["cfg"].read_text()                                 # the fixture's own claim tool
+    w["cfg"].write_text(json.dumps({"claim_tool": str(w["tmp"] / "absent.sh")}))
+    _run(w, _payload(w, "UserPromptSubmit"))
+    assert "Region claim" in _run(w, _payload(w, "SessionStart")).stdout   # a new window hears it
+    env = _tree(w, {9001: (1, "/opt/bin/claude --model m")}, 9001)
+    w["cfg"].write_text(working)                                   # the claim tool is back: news
+    p = _run(w, _payload(w, "UserPromptSubmit"), env)
+    assert "Region claim held" in p.stdout, p.stdout
+    assert _run(w, _payload(w, "UserPromptSubmit"), env).stdout == ""
+    assert "Region claim" in _run(w, _payload(w, "UserPromptSubmit", sid="S2"), env).stdout

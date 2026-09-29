@@ -13,7 +13,7 @@ directory (Global/Errata: a suite that writes the application's real sidecar mak
 depend on the machine's state).
 """
 from __future__ import annotations
-import json, os, re, sys, time, traceback
+import itertools, json, os, re, sys, time, traceback
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config
@@ -655,6 +655,53 @@ def session_state_path(sid: str) -> Path:
     return config.state() / f"session-start-{safe_sid(sid)}.json"
 
 
+_ATOMIC_SEQ = itertools.count(1)      # per process; `next` on it is atomic under the GIL
+
+
+def write_text_atomic(path: Path, text: str) -> None:
+    """`path.write_text(text, encoding="utf-8")`, except that no reader ever sees the file half
+    written: the text goes to a new file beside it, which then replaces it in one rename.
+
+    ★ WHY. The session record is written under a lock but READ without one — by every door that
+    asks what this session touched, recorded or claimed. `write_text` truncates, then writes, so a
+    reader that lands between the two sees an empty or cut-off document; the readers treat that as
+    "nothing recorded" (they must: the record is bookkeeping). The compact door's `rewake` hook read
+    it that way and told a session its /compact had been REFUSED while the door had passed it (345
+    of 8,573 threaded reads, round-2 xhigh review, COMPACTDOOR-2). A rename is seen whole or not at
+    all. The new file gets the mode the old one had (or the umask's default, as `write_text` gives);
+    a symlink's target is written, not the link; where the rename itself fails (a Windows reader
+    holding the file open) it falls back to the plain write, as before. Raises OSError as
+    `write_text` does."""
+    path = Path(path)
+    if path.is_symlink():                  # `write_text` writes THROUGH a link; a rename would replace it
+        path = path.resolve()
+    try:
+        mode = os.stat(path).st_mode & 0o7777
+    except OSError:
+        mode = None
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{next(_ATOMIC_SEQ)}.tmp")   # hidden: no `session-start-*` glob sees it
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        if mode is not None:
+            os.chmod(tmp, mode)
+        try:
+            os.replace(tmp, path)
+            return
+        except OSError:
+            if platform() != "windows":
+                raise
+        os.unlink(tmp)
+        path.write_text(text, encoding="utf-8")
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def update_session_state(sid: str, mutate) -> dict:
     """Read-modify-write the session's record under an exclusive lock; returns the new document.
 
@@ -672,7 +719,7 @@ def update_session_state(sid: str, mutate) -> dict:
             except (OSError, ValueError):
                 doc = {}
             mutate(doc)
-            path.write_text(json.dumps(doc, indent=1), encoding="utf-8")
+            write_text_atomic(path, json.dumps(doc, indent=1))
             unlock_file(lk)
             return doc
     except OSError as e:

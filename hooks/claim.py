@@ -29,7 +29,8 @@ whole interface, and three of its rules shape the code below:
     reaping a lock whose pid is confirmed live on this host, and grants such a lock a long
     ceiling. A hook process lives for milliseconds, so claiming with the hook's own pid produces
     a lock that is stale before the session's first prompt. The pid handed over is therefore the
-    Claude Code process itself, found by walking up the parent chain (`_claude_pid`).
+    Claude Code process itself, found by walking up the parent chain (`procs.session_process`) —
+    under a Remote Control host, the thread's own process, never the host's.
 
 **Doing nothing is a first-class outcome — but it is SAID, not silent.** The hook calls nothing
 when the claim helper is not installed, when no `.atlas-lane` marker resolves from the session's
@@ -64,6 +65,18 @@ import procs
 
 EV = "SessionStart"
 
+
+def _event(inp: dict) -> str:
+    """The event this run answers, read from the hook's own input — never a constant.
+
+    `hooks.json` runs `claim.py start` on SessionStart AND on UserPromptSubmit, and Claude Code
+    refuses a hook whose output names another event than the one it was called for ("Hook returned
+    incorrect event name: expected 'UserPromptSubmit' but got 'SessionStart'", 76 times in 11
+    hours, 2026-09-28): the claim was taken and its context line dropped. `EV` stays only as the
+    answer for an input that names no event."""
+    ev = inp.get("hook_event_name")
+    return ev if isinstance(ev, str) and ev else EV
+
 # Vault top-level directories that are NOT regions: the shared surface and whatever non-tier
 # folders THIS vault has grown (`config.topology()["non_region_tops"]`; `Global/` alone by
 # default). A claim against one of these would serialize every lane in the fleet against every
@@ -92,6 +105,12 @@ def _run_tool(tool: Path, sub: str, region: str, pid: int, capture: bool = False
 # The parent-chain walk and the `claude` basename test moved to `procs.py` when the worktree sweep
 # needed the same two answers — a second implementation of either is the duplicated fact this
 # package refuses everywhere else. Behaviour is unchanged; `test_claim.py` is what says so.
+
+#
+# PROJECTCLAIM-1 (2026-09-29): the holder is the SESSION's own process — `procs.session_process`,
+# which tells a Remote Control host's threads apart (each thread is its own `--sdk-url` child) and
+# never answers the host (`claude remote-control …`), which outlives every thread it starts. A plain
+# `claude` session gets exactly the pid `claude_pid` gave it before.
 
 _ps = procs.ps_info
 _is_claude = procs.is_claude
@@ -147,7 +166,7 @@ def _write_claims(sid: str, doc: dict, claims: list[dict]) -> None:
     doc["claims"] = claims
     try:
         common.STATE.mkdir(parents=True, exist_ok=True)
-        _state_file(sid).write_text(json.dumps(doc, indent=1), encoding="utf-8")
+        common.write_text_atomic(_state_file(sid), json.dumps(doc, indent=1))   # never seen half written
     except OSError as e:
         log("hook-errors", f"claim\tcannot write {_state_file(sid)}: {e}")
 
@@ -183,20 +202,65 @@ def _off_line(inp: dict) -> str | None:
             f"still holds — coordinate by hand before writing there.")
 
 
+def _line_file(sid: str) -> Path:
+    return common.STATE / f"claim-line-{common.safe_sid(sid)}.txt"
+
+
+def _say(inp: dict, text: str) -> None:
+    """Print the claim line — at UserPromptSubmit only when it differs from the one this session
+    was last shown (CONTEXTMSG-1). The same line on every prompt is context spent on nothing; a
+    changed holder, a claim won or lost, is news and is printed. SessionStart always prints: a new
+    or compacted window has not seen it. Bookkeeping that fails prints, never goes quiet."""
+    sid = inp.get("session_id", "-")
+    path = _line_file(sid)
+    if _event(inp) == "UserPromptSubmit":
+        try:
+            if path.read_text(encoding="utf-8") == text:
+                return
+        except OSError:
+            pass
+    try:
+        common.STATE.mkdir(parents=True, exist_ok=True)
+        common.write_text_atomic(path, text)
+    except OSError as e:
+        log("hook-errors", f"claim\tcannot write {path}: {e}")
+    if text:
+        context(_event(inp), text)
+
+
 def cmd_start(inp: dict) -> None:
     pre = _preflight(inp)
     if pre is None:
-        off = _off_line(inp)
-        if off:
-            context(EV, off)
+        _say(inp, _off_line(inp) or "")
         return
     tool, cwd, regions = pre
     sid = inp.get("session_id", "-")
-    pid = _claude_pid()
+    pid, kind = procs.session_process()
+    if kind == "thread" and _event(inp) == "SessionStart":
+        # A Remote Control host starts a session of its own when it comes up, and that session
+        # never has a turn and never leaves: on 2026-09-28 one held a region's lock for 656
+        # minutes while other threads failed that claim 36 times. A thread of a host
+        # therefore claims at its first PROMPT (UserPromptSubmit runs this same `start`), never at
+        # start-up — a session that is never spoken to claims nothing.
+        log("claim", f"start\tsid={sid}\tthread={pid}\tskipped at SessionStart: a thread of a "
+                     f"host claims at its first prompt")
+        return
     if pid is None:
-        log("hook-errors", f"claim\tstart\tsid={sid}\tno claude process found within 6 hops of "
-                           f"pid {os.getpid()}; claiming nothing (a transient pid would be reaped "
-                           f"as a wedge and read as a live holder in the meantime)")
+        if kind == "host" and _event(inp) != "UserPromptSubmit":
+            log("claim", f"start\tsid={sid}\tself={os.getpid()}\tunder a Remote Control host "
+                         f"with no thread process between; claiming nothing (a host is never a holder)")
+        elif kind == "host":
+            # A host's own session is never spoken to, so a PROMPT that reaches the host means a
+            # thread whose process was not recognised: said, not silent.
+            log("hook-errors", f"claim\tstart\tsid={sid}\ta prompt under a Remote Control host with "
+                               f"no recognised thread process between; claiming nothing")
+            _say(inp, f"- Region claim NOT taken for {', '.join(regions)}: this session's "
+                      f"process was not recognised under its Remote Control host. Coordinate "
+                      f"by hand before writing there.")
+        else:
+            log("hook-errors", f"claim\tstart\tsid={sid}\tno claude process found within 6 hops of "
+                               f"pid {os.getpid()}; claiming nothing (a transient pid would be reaped "
+                               f"as a wedge and read as a live holder in the meantime)")
         return
     doc, claims = _read_claims(sid)
     held = {(c.get("region"), c.get("pid")) for c in claims}
@@ -244,8 +308,7 @@ def cmd_start(inp: dict) -> None:
                          f"Coordinate before writing there; the lock advises, it does not block. "
                          f"Before waiting on a holder, check its pid is not this session's own "
                          f"({pid}).")
-    if lines:
-        context(EV, "\n".join(lines))
+    _say(inp, "\n".join(lines))
 
 
 def _holders(tool: Path, pid: int) -> dict:

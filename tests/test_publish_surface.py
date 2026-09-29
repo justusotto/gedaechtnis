@@ -198,11 +198,14 @@ def test_control_an_owner_pronoun_would_be_seen():
 # PUBLICPOLISH-1: the first version scanned `rmtree` only).
 REMOVALS = {
     ("archive.py", "unlink"): 1,              # its own temp file after an atomic replace
-    ("hooks/common.py", "unlink"): 4,         # pre-exists markers, filelocks, a reserved .trashinfo
+    ("hooks/common.py", "unlink"): 6,         # pre-exists markers, filelocks, a reserved .trashinfo,
+                                              # write_text_atomic's own temp file (COMPACTDOOR-2)
+    ("tools/compactpoint.py", "unlink"): 1,   # renew's own temp file when the write fails
     ("hooks/mergewindow.py", "unlink"): 1,    # the merge-window lock it granted
     ("init.py", "unlink"): 2,                 # its own stamp and temp file
     ("hooks/worktree.py", "rmtree"): 1,       # a clone it made, holding nothing unique (README)
     ("hooks/fleet.py", "unlink"): 1,          # the mkstemp file read_screen made a moment before
+    ("hooks/deliver.py", "unlink"): 3,        # its own claim of a parked file, once read back or restored
     ("tools/sessions.py", "unlink"): 1,       # its own stale launch pid file in the state dir
     ("tools/suitelock.py", "unlink"): 2,      # its own suite-lock entry, and a dead suite's
 }

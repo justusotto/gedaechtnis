@@ -526,3 +526,104 @@ def test_an_overridden_message_is_sent_not_parked(world):
     session(world, total=355_000, age_s=60)
     assert not denied(send(world, message="RESUME-OVERRIDE: owner asked\ngo"))
     assert _parked_rows(world) == []
+
+
+# ------------------------------------------------ CONTEXTMSG-1 -----------------------------------
+
+def _compact(w, sid=TARGET, age_s=30):
+    """Append a compaction boundary AFTER the target's last usage record — the 12:02 case."""
+    with (w["projects"] / "-proj" / f"{sid}.jsonl").open("a") as fh:
+        fh.write(json.dumps({"type": "system", "subtype": "compact_boundary", "isSidechain": False,
+                             "timestamp": _ts(age_s), "content": "Conversation compacted",
+                             "compactMetadata": {"trigger": "manual", "preTokens": 374589,
+                                                 "postTokens": 11343}}) + "\n")
+
+
+def test_a_target_that_compacted_after_its_last_call_passes_as_not_yet_measured(world):
+    """Specimen 2026-09-29 12:02: refused at the pre-compaction 374,589; the next call measured
+    118,717. The figure before the boundary is the OLD window's."""
+    session(world, total=374_589, age_s=534)
+    _compact(world)
+    out = send(world)
+    assert not denied(out), out
+    assert "compacted, not yet measured" in note_of(out)
+
+
+def test_a_boundary_BEFORE_the_last_call_changes_nothing(world):
+    """Negative control: the window after the compaction has been measured, so its figure binds."""
+    session(world, total=374_589, age_s=534)
+    _compact(world)
+    session(world, total=360_000, age_s=60, older=None)       # a new window, measured again
+    with (world["projects"] / "-proj" / f"{TARGET}.jsonl").open() as fh:
+        recs = [json.loads(l) for l in fh if l.strip()]
+    recs.insert(0, {"type": "system", "subtype": "compact_boundary", "timestamp": _ts(900)})
+    (world["projects"] / "-proj" / f"{TARGET}.jsonl").write_text(
+        "\n".join(json.dumps(r) for r in recs) + "\n")
+    assert denied(send(world))
+
+
+def test_a_compacted_cold_fable_target_is_still_refused(world):
+    """The Fable-cold rule does not depend on size, so the stale figure does not excuse it."""
+    session(world, total=374_589, age_s=4 * 3600, model="claude-fable-5-1")
+    _compact(world, age_s=4 * 3600)
+    out = send(world)
+    assert denied(out) and "claude-fable-5-1" in out["permissionDecisionReason"]
+
+
+def _short_keys(w, chars=1500, window=400_000):
+    w["cfg"].write_text(json.dumps({"limits": {"resume_short_chars": chars,
+                                               "resume_short_window": window}}))
+
+
+def test_a_short_message_to_a_warm_target_passes_the_headroom_rule_with_the_keys_set(world):
+    _short_keys(world)
+    session(world, total=380_000, age_s=60)
+    out = send(world, message="r" * 1400)
+    assert not denied(out), out
+    assert "SHORT" in note_of(out)
+
+
+def test_the_same_short_message_is_refused_without_the_keys(world):
+    session(world, total=380_000, age_s=60)
+    assert denied(send(world, message="r" * 1400))
+
+
+def test_a_message_over_the_short_limit_is_refused(world):
+    _short_keys(world)
+    session(world, total=380_000, age_s=60)
+    assert denied(send(world, message="r" * 1600))
+
+
+def test_a_short_message_at_or_above_the_short_window_is_refused(world):
+    _short_keys(world)
+    session(world, total=400_000, age_s=60)
+    assert denied(send(world, message="short"))
+
+
+def test_the_short_pass_leaves_the_cold_rules_unchanged(world):
+    _short_keys(world)
+    session(world, total=250_000, age_s=2 * 3600)                    # cold and large
+    assert denied(send(world, message="short"))
+    session(world, total=100_000, age_s=4 * 3600, model="claude-fable-5-1")   # Fable and cold
+    assert denied(send(world, message="short"))
+
+
+def test_the_refused_senders_name_comes_from_the_registry(world):
+    """A resumed sender has no `--name` on its process; the registry names it, as it names targets."""
+    (world["sessions"] / "111111.json").write_text(json.dumps(
+        {"pid": os.getpid(), "sessionId": ME, "name": "the-seat", "status": "busy"}))
+    session(world, total=355_000, age_s=60)
+    assert denied(send(world))
+    assert _parked_rows(world)[0]["from"] == "the-seat"
+
+
+def test_the_short_pass_is_for_warm_targets_only_where_only_headroom_binds(world):
+    """With resume_cold_cap above the headroom bound, only the headroom rule can refuse a cold
+    target at 380,000 — the short pass must not lift it (reviewer mutation M9)."""
+    world["cfg"].write_text(json.dumps({"limits": {"resume_short_chars": 1500,
+                                                   "resume_short_window": 400_000,
+                                                   "resume_cold_cap": 900_000}}))
+    session(world, total=380_000, age_s=2 * 3600)                    # cold, under the cold cap
+    assert denied(send(world, message="short"))
+    session(world, total=380_000, age_s=60)                          # warm: the pass applies
+    assert not denied(send(world, message="short"))

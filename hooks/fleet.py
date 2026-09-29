@@ -227,6 +227,274 @@ def claude_processes() -> list[dict] | None:
     return out
 
 
+# ------------------------------------------------- the CLI's own registry: a second source ----
+# SESSLSBLIND-1. The launch ledger knows only what `sessions.py launch` started, and the process
+# table knows only a `--name` typed on the command line — so a session the owner resumed by hand
+# (`claude --resume <id>`, its name only in the registry) read as "no live session", a Remote
+# Control host read as a BLIND session, and a Project thread (image `claude.exe`, no `--name`)
+# did not appear at all. `~/.claude/sessions/<pid>.json` is the CLI's own record of every live
+# session; it is read here, and nothing else: never a transcript.
+#
+# A session is identified by its SESSION ID, never by its name: a host starts an idle thread
+# again under a new derived name (`demo-repo-57` came back as `demo-repo-1d`, 2026-09-28).
+
+def _image_is_claude(toks: list[str]) -> bool:
+    """`claude`, `node … claude`, or the native `claude.exe` a Remote Control host spawns."""
+    if not toks:
+        return False
+    first = os.path.basename(toks[0])
+    if first in ("claude", "claude.exe"):
+        return True
+    return (first.startswith("node") and len(toks) > 1
+            and os.path.basename(toks[1]) in ("claude", "claude.exe"))
+
+
+def is_host(toks: list[str]) -> bool:
+    """A Remote Control host: `claude remote-control …` — it serves threads, it is not one."""
+    if not _image_is_claude(toks):
+        return False
+    rest = toks[2:] if os.path.basename(toks[0]).startswith("node") else toks[1:]
+    return bool(rest) and rest[0] == "remote-control"
+
+
+def host_name(toks: list[str]) -> str | None:
+    """The host's `--name`, whole. `ps` loses the quoting, so `--name "demo-repo host"` comes
+    back as two tokens; the name runs to the next `--flag`."""
+    for i, tok in enumerate(toks):
+        if tok.startswith("--name="):
+            return tok[len("--name="):].strip("'\"") or None
+        if tok == "--name":
+            words = []
+            for w in toks[i + 1:]:
+                if w.startswith("--"):
+                    break
+                words.append(w)
+            return " ".join(words).strip("'\"") or None
+    return None
+
+
+def process_table() -> dict[int, dict] | None:
+    """Every claude process (sessions AND hosts): pid -> {ppid, start, toks}. None if unread."""
+    try:
+        p = subprocess.run(["ps", "-Ao", "pid=,ppid=,lstart=,command="], capture_output=True,
+                           text=True, stdin=subprocess.DEVNULL, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if p.returncode != 0:
+        return None
+    return parse_process_table(p.stdout or "")
+
+
+def parse_process_table(text: str) -> dict[int, dict]:
+    """`pid ppid <lstart: 5 tokens> command…` lines -> {pid: {ppid, start, toks}}, claude only."""
+    out = {}
+    for line in text.splitlines():
+        bits = line.split()
+        if len(bits) < 8:
+            continue
+        toks = bits[7:]
+        if not _image_is_claude(toks):
+            continue
+        try:
+            out[int(bits[0])] = {"ppid": int(bits[1]), "start": " ".join(bits[2:7]), "toks": toks}
+        except ValueError:
+            continue
+    return out
+
+
+def registry_records() -> list[dict]:
+    """Every `<pid>.json` in the CLI's session registry, parsed; unreadable files are skipped."""
+    import resume_gate                                        # noqa: PLC0415 — one reader, one place
+    return resume_gate._registry()
+
+
+FORK_SOURCE_KEYS = ("forkParentSessionId", "forkedFromSessionId", "forkSessionId")
+
+
+def _fork_source(rec: dict, toks: list[str] | None) -> str | None:
+    for k in FORK_SOURCE_KEYS:
+        if rec.get(k):
+            return str(rec[k])
+    if toks and "--fork-session" in toks:
+        for flag in ("--resume", "-r", "--session-id"):
+            v = _flag(toks, flag)
+            if v and not v.startswith("-"):
+                return v
+    return None
+
+
+def _flag(toks: list[str], flag: str) -> str | None:
+    import stallbrief                                         # noqa: PLC0415 — one rule, one place
+    return stallbrief._flag_value(toks, flag)
+
+
+def _str(v) -> str | None:
+    """A registry field as a string, or None: the records are another program's files, so a list
+    or a number where a name belongs must not crash the page (review of SESSLSBLIND-1)."""
+    return v if isinstance(v, str) and v else None
+
+
+def _pid_of(rec: dict) -> int | None:
+    v = rec.get("pid")
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, int):
+        return v
+    if isinstance(v, str) and v.isdigit():
+        return int(v)
+    return None
+
+
+def _start_epoch(lstart: str) -> float | None:
+    """`ps -o lstart` (local time, either token order) as epoch seconds, or None."""
+    toks = " ".join(str(lstart).split())
+    for fmt in ("%a %d %b %H:%M:%S %Y", "%a %b %d %H:%M:%S %Y"):
+        try:
+            return time.mktime(time.strptime(toks, fmt))
+        except (ValueError, TypeError, OverflowError):
+            continue
+    return None
+
+
+def _same_process(rec: dict, proc: dict) -> bool:
+    """The record describes THIS process, not an earlier one whose pid was reused. `procStart`
+    (UTC) must match the start `ps` prints; without it, `startedAt` (epoch ms, written when the
+    session began) must not be older than the process. With neither, the record cannot be tied to
+    the process and is not trusted."""
+    if _str(rec.get("procStart")):
+        return _same_start(registry_start_local(rec["procStart"]), proc["start"])
+    began = rec.get("startedAt")
+    t0 = _start_epoch(proc["start"])
+    if isinstance(began, (int, float)) and not isinstance(began, bool) and t0 is not None:
+        return began / 1000.0 >= t0 - 5
+    return False
+
+
+def live_view(records: list[dict], table: dict[int, dict] | None) -> list[dict]:
+    """Classify every live claude session and host, from the registry and the process table.
+
+    Returns one dict per entry, `kind` one of:
+      HOST    a `claude remote-control` process (a host has no registry record of its own; if it
+              ever has one, it is still shown once, as HOST); `threads` counts the live sessions
+              it spawned.
+      THREAD  a session whose parent process is a host: a Project / Remote Control thread.
+      FORK    a background job of the CLI's daemon (`kind: bg`) — FORK even under a host — with the
+              session it was copied from when the record or its command line names it (`source`).
+      SESSION any other live session with a registry record.
+      BLIND   a claude process with a `--name` and NO registry record (no transcript, not resumable).
+    A record whose pid is dead, or that cannot be tied to the live process (`_same_process`: the
+    pid was reused), is not live and is left out; one pid is listed once. With no process table
+    (`ps` unreadable), liveness falls back to `procs.pid_alive` and no HOST or parent can be told.
+    """
+    out, recorded = [], set()
+    hosts = {pid: p for pid, p in (table or {}).items() if is_host(p["toks"])}
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        pid = _pid_of(rec)
+        if pid is None or pid in recorded or pid in hosts:
+            continue
+        if table is not None:
+            proc = table.get(pid)
+            if proc is None or not _same_process(rec, proc):
+                continue
+        else:
+            if not procs.pid_alive(pid):
+                continue
+            proc = None
+        recorded.add(pid)
+        e = {"pid": pid, "session_id": _str(rec.get("sessionId")), "name": _str(rec.get("name")),
+             "status": _str(rec.get("status")), "cwd": _str(rec.get("cwd")),
+             "remote": _str(rec.get("bridgeSessionId")), "rec_kind": _str(rec.get("kind"))}
+        if rec.get("kind") == "bg":
+            e["kind"] = "FORK"
+            e["source"] = _fork_source(rec, proc["toks"] if proc else None)
+        elif proc and proc["ppid"] in hosts:
+            e["kind"] = "THREAD"
+            e["host_pid"] = proc["ppid"]
+            e["host"] = host_name(hosts[proc["ppid"]]["toks"])
+        else:
+            e["kind"] = "SESSION"
+        out.append(e)
+    for pid, p in sorted(hosts.items()):
+        out.append({"kind": "HOST", "pid": pid, "name": host_name(p["toks"]),
+                    "threads": sum(1 for e in out if e.get("host_pid") == pid)})
+    for pid, p in sorted((table or {}).items()):
+        if pid in recorded or pid in hosts:
+            continue
+        name = _flag(p["toks"], "--name")
+        if name:
+            out.append({"kind": "BLIND", "pid": pid, "name": name})
+    return out
+
+
+# A parked message can be delivered only to a session the resume gate can find by name: one with a
+# registry record (not BLIND, not a HOST) and the ONLY live one carrying that name.
+DELIVERABLE_KINDS = ("SESSION", "THREAD", "FORK")
+
+
+def live_names(view: list[dict]) -> set[str]:
+    """Every name at least one live session with a record carries (for the parked-message check).
+    A host's name and a BLIND session's name are left out: neither can take a message."""
+    return {e["name"] for e in view if e.get("name") and e["kind"] in DELIVERABLE_KINDS}
+
+
+def holders(view: list[dict], parked_name: str) -> list[dict]:
+    """The live sessions a parked file's name belongs to. The file name is `safe_sid(name)`, so
+    the live names are compared in that form too."""
+    return [e for e in view if e.get("name") and e["kind"] in DELIVERABLE_KINDS
+            and (e["name"] == parked_name or common.safe_sid(e["name"]) == parked_name)]
+
+
+# PROJECTDESK-1: which live THREADs are real Project threads. A host also spawns sessions for
+# itself within seconds of its own start (measured 2026-09-28: the six language-deck hosts' children
+# and the demo-repo host's, each within seconds of the host).
+HOST_OWN_SECONDS = 30
+_THREAD_ID = re.compile(r"\b(?:cse|session)_([0-9][A-Za-z0-9]+)")
+
+
+def thread_ids(text: str) -> set[str]:
+    """The id suffixes in any text: a Project's thread list, pasted or saved, carries `cse_01X…`;
+    the registry's `bridgeSessionId` carries `session_01X…` with the SAME suffix."""
+    return set(_THREAD_ID.findall(text or ""))
+
+
+def _ids_of(e: dict, proc: dict | None) -> set[str]:
+    """Both readings of a thread's remote id: its record's `bridgeSessionId` and its command
+    line's `--session-id` / `--sdk-url`."""
+    seen = thread_ids(e.get("remote") or "")
+    if proc:
+        for flag in ("--session-id", "--sdk-url"):
+            seen |= thread_ids(_flag(proc["toks"], flag) or "")
+    return seen
+
+
+def project_threads(view: list[dict], table: dict[int, dict] | None,
+                    project_ids: set[str] | None, window: float = HOST_OWN_SECONDS) -> list[dict]:
+    """Each live THREAD with a `verdict`:
+      PROJECT      its remote id is in the Project's thread list (`project_ids`, suffixes);
+      HOST-OWN     not in the list, and it started within `window` seconds of its host;
+      UNCONFIRMED  neither — or no list was given and it did not start with its host.
+    The id decides, never the name (a thread's name changes when the host restarts it)."""
+    out = []
+    for e in view:
+        if e["kind"] != "THREAD":
+            continue
+        proc = (table or {}).get(e["pid"])
+        host = (table or {}).get(e.get("host_pid"))
+        ids = _ids_of(e, proc)
+        t0 = _start_epoch(proc["start"]) if proc else None
+        h0 = _start_epoch(host["start"]) if host else None
+        if project_ids and ids & project_ids:
+            verdict = "PROJECT"
+        elif t0 is not None and h0 is not None and 0 <= t0 - h0 <= window:
+            verdict = "HOST-OWN"
+        else:
+            verdict = "UNCONFIRMED"
+        out.append(dict(e, verdict=verdict, ids=sorted(ids)))
+    return out
+
+
 def load_average() -> str:
     try:
         return " ".join(f"{x:.1f}" for x in os.getloadavg())
@@ -920,6 +1188,26 @@ def parked_path(name: str) -> Path:
     return config.state() / f"parked-{common.safe_sid(name)}.jsonl"
 
 
+def delivered_path(name: str) -> Path:
+    """Where `deliver.py` moves a parked line once it is shown to its recipient (CONTEXTMSG-1)."""
+    return config.state() / f"parked-{common.safe_sid(name)}.delivered.jsonl"
+
+
+def session_name_of(sid: str | None) -> str | None:
+    """The NAME of the session with this id: the registry record's `name` first, the process's
+    `--name` second, else None.
+
+    ONE key for writer and reader (CONTEXTMSG-1). The resume gate addresses a target by its
+    registry name, but the park writer named the SENDER and the facts line named the RECIPIENT by
+    `--name` alone, which a resumed session (`claude --resume <id>`) does not carry: the recipient
+    was never shown its parked lines and the sender showed as "?"."""
+    if sid and sid != "-":
+        for rec in registry_records():
+            if str(rec.get("sessionId") or "") == sid and rec.get("name"):
+                return str(rec["name"])
+    return procs.session_name(procs.claude_pid())
+
+
 def park(to: str, sender: str | None, reason: str, text: str) -> Path | None:
     """Keep a message the resume gate refused, where the recipient's successor will be shown it."""
     row = {"schema": PARKED_SCHEMA, "kind": "refused-wake", "to": to, "from": sender or "?",
@@ -928,12 +1216,45 @@ def park(to: str, sender: str | None, reason: str, text: str) -> Path | None:
     try:
         config.state().mkdir(parents=True, exist_ok=True)
         path = parked_path(to)
-        with path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
-        return path
+        # Locked, and written only into the file that is STILL at the path (CONTEXTMSG-1 review):
+        # `deliver.py` claims the parked file by renaming it and then takes this same lock before
+        # reading. A park that opened the file just before the rename would otherwise write into
+        # the claim after it was read, and the line would be deleted with it.
+        for _ in range(20):
+            with path.open("a", encoding="utf-8") as fh:
+                common.lock_file(fh)
+                try:
+                    same = os.fstat(fh.fileno()).st_ino == os.stat(path).st_ino
+                except FileNotFoundError:
+                    same = False
+                if same:
+                    fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+                    fh.flush()
+                    common.unlock_file(fh)
+                    return path
+                common.unlock_file(fh)
+        raise OSError("the parked file kept moving while it was written")
     except OSError as e:
         common.log("hook-errors", f"fleet\tpark\t{to}\t{e}")
         return None
+
+
+def append_lines(path: Path, text: str) -> None:
+    """Append to a parked file under the same lock and same-file check as `park` (CONTEXTMSG-1)."""
+    for _ in range(20):
+        with path.open("a", encoding="utf-8") as fh:
+            common.lock_file(fh)
+            try:
+                same = os.fstat(fh.fileno()).st_ino == os.stat(path).st_ino
+            except FileNotFoundError:
+                same = False
+            if same:
+                fh.write(text)
+                fh.flush()
+                common.unlock_file(fh)
+                return
+            common.unlock_file(fh)
+    raise OSError(f"{path} kept moving while it was written")
 
 
 def parked(name: str) -> list[dict]:
@@ -973,6 +1294,8 @@ def all_parked() -> dict[str, int]:
         return out
     for f in files:
         name = f.name[len("parked-"):-len(".jsonl")]
+        if name.endswith(".delivered"):                   # already shown to its recipient
+            continue
         n = len(parked(name))
         if n:
             out[name] = n

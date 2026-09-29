@@ -73,6 +73,14 @@ EXEMPT = {
 
     # --- the state directory, reached only through config.state(); no argument steers the path.
     "hooks/common.py::log": "state dir; the path is config.state() joined to a literal name",
+    # COMPACTDOOR-2 round 2 (finding A): the session record written in one rename, never half.
+    "hooks/common.py::write_text_atomic": "replaces a file its callers name — every caller passes "
+                                          "the state dir (config.state()/common.STATE) joined to a "
+                                          "literal name, carrying at most a session id sanitized by "
+                                          "safe_sid() or a sha1 of the cwd — through a hidden sibling temp file of its own, "
+                                          "chmod to the old file's mode, then os.replace; the temp file "
+                                          "is unlinked on any failure, and on Windows a failed rename "
+                                          "falls back to the plain write_text it replaced",
     # --- PLATFORM-1: the freedesktop Trash, used instead of a delete on a Linux with no Trash command.
     "hooks/common.py::_freedesktop_trash": "moves a path the caller asked to trash INTO the user's own "
                                             "Trash ($XDG_DATA_HOME or ~/.local/share/Trash, the spec's fixed "
@@ -86,6 +94,9 @@ EXEMPT = {
     "hooks/fleet.py::record_proposals": "state dir; config.state() joined to a literal name",
     "hooks/fleet.py::due": "state dir; config.state() joined to literal names",
     "hooks/fleet.py::park": "state dir; config.state() joined to a name sanitized by safe_sid()",
+    "hooks/deliver.py::_claim": "state dir; renames fleet.parked_path() (safe_sid name) to a claim beside it, same directory",
+    "hooks/deliver.py::_restore": "state dir; puts its own claim files back as fleet.parked_path(), same directory",
+    "hooks/deliver.py::deliver": "state dir; removes only claim files _claim() created beside fleet.parked_path()",
     "hooks/fleet.py::read_screen": "removes only the mkstemp file this function created a moment before",
     "tools/sessions.py::cmd_launch": "state dir; its lock and a pid file named by safe_sid() of the session name",
     "tools/sessions.py::cmd_replay": "the --out file the person running the replay names on the command line, and its folder; nothing else is written",
@@ -93,6 +104,11 @@ EXEMPT = {
                                               "session id sanitized by safe_sid()",
     "tools/compactpoint.py::write": "appends to the state file the caller named on the command line, as "
                                     "/compact-ready tells it to; a compact point is the session's own note",
+    "tools/compactpoint.py::renew": "rewrites the caller-named state file in place — a symlink's target, "
+                                    "never the link — through a sibling temp file given the file's own "
+                                    "mode, then os.replace (the temp file is unlinked if the write fails); "
+                                    "only when the file is UTF-8 and already holds a compact-point heading, "
+                                    "and the bytes are copied as read except that one heading's text",
     "hooks/wtsweep.py::record": "state dir; the path is config.state() joined to the literal name "
                                "'worktree-sweep.json' by state_file(), with nothing caller-supplied "
                                "in it. The DESTRUCTIVE half of this module is the `git worktree "
@@ -144,6 +160,7 @@ EXEMPT = {
     "hooks/common.py::take_filelock": "state dir; the lock filename is a sha1 of the real target path",
     "hooks/common.py::release_filelock": "state dir; the lock filename is a sha1 of the real target path",
     "hooks/claim.py::_write_claims": "state dir, via config.state() and a session id sanitized by safe_sid()",
+    "hooks/claim.py::_say": "state dir, via common.STATE and a session id sanitized by safe_sid()",
     "hooks/context_economy.py::_update": "state dir, via config.state() and a sanitized session id",
     "hooks/lesson_push.py::_update": "state dir only: both writes are config.state() joined to a literal name plus a session id sanitized by safe_sid(); no caller-supplied value, and no vault path, reaches either",
     "hooks/lesson_push.py::index_for": "state dir only: the cache path is config.state() joined to a literal prefix, a session id sanitized by safe_sid() and a region key sanitized to [A-Za-z0-9_-] by _index_path(); neither the written path nor the vault path being indexed can reach it",

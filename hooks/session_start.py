@@ -142,6 +142,15 @@ def main() -> None:
     vault_head = head if rc == 0 else None
     import hashlib as _h
     _key = _h.sha1(cwd.encode()).hexdigest()[:10]
+    if inp.get("source") == "compact":
+        # CONTEXTMSG-1: a compaction opens a new context window. The context notices fire once per
+        # WINDOW, so what fired in the old one, and the old window's floor, are cleared here.
+        try:
+            import context_cap
+            context_cap.new_window(sid, inp.get("transcript_path"))
+        except Exception:
+            import traceback as _tb
+            log("hook-errors", "session_start/context_cap: " + _tb.format_exc().replace("\n", " | "))
     if inp.get("source") in ("compact", "resume"):
         try:                                            # the session began earlier: keep ITS start head, do not re-stamp
             prev = json.loads((common.STATE / f"session-start-{_key}.json").read_text(encoding="utf-8"))
@@ -191,9 +200,9 @@ def main() -> None:
         "boot_files": boot_files, "ts": time.strftime("%Y-%m-%dT%H:%M:%S")}, indent=1)
     sid_file = common.STATE / f"session-start-{common.safe_sid(sid)}.json"
     if not sid_file.exists() or inp.get("source") == "startup":
-        sid_file.write_text(payload, encoding="utf-8")                              # per SESSION: two sessions in one repo never collide
-    (common.STATE / f"session-start-{key}.json").write_text(payload, encoding="utf-8")   # per cwd, for a reader that knows only its cwd
-    (common.STATE / "session-start.json").write_text(payload, encoding="utf-8")            # the latest
+        common.write_text_atomic(sid_file, payload)                              # per SESSION: two sessions in one repo never collide
+    common.write_text_atomic(common.STATE / f"session-start-{key}.json", payload)   # per cwd, for a reader that knows only its cwd
+    common.write_text_atomic(common.STATE / "session-start.json", payload)            # the latest
     _sid = common.safe_sid(sid)
     lines = ["Gedächtnis session facts (hook-generated):", f"- Session id {_sid}; this session's start record is ~/.claude/gedaechtnis/session-start-{_sid}.json (pass that path to the debriefer)."]
     offered = False
@@ -260,11 +269,8 @@ def main() -> None:
         _mail = idlenotify.facts_line()
         if _mail:
             lines.append(_mail)
-        # TERMOVERLOAD-1 — messages the resume gate refused to deliver to THIS session's name.
-        import fleet, procs as _procs
-        _parked = fleet.parked_line(_procs.session_name(_procs.claude_pid()))
-        if _parked:
-            lines.append(_parked)
+        # TERMOVERLOAD-1's parked messages are no longer COUNTED here: `deliver.py` shows them
+        # (CONTEXTMSG-1), on this same event, and a count beside the text would say it twice.
     except Exception:                                  # a notify bug must not cost a session its facts
         import traceback as _tb
         log("hook-errors", "session_start/idlenotify: " + _tb.format_exc().replace("\n", " | "))
