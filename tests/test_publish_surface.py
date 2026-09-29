@@ -135,7 +135,7 @@ def test_every_program_started_is_one_the_readme_names():
     assert undeclared == {}, f"a program the README does not list: {undeclared}"
     assert dynamic <= DYNAMIC_OK, f"a new run-time-chosen program: {sorted(dynamic - DYNAMIC_OK)}"
     for word in ("`git`", "`ps`", "`lsof`", "`grep`", "`cp`", "`osascript`", "`python3`", "`bash`",
-                 "`notify_command`", "`answer_router`", "`claim_tool`", "sends nothing and fetches nothing",
+                 "`notify_command`", "`answer_router`", "`claim_tool`", "make no network calls",
                  "`/usr/bin/trash`", "`gio trash`", "`trash-put`", "`powershell`",
                  "`screen`", "`tmux`", "`sysctl`"):
         assert word in README, f"the README no longer says {word}"
