@@ -38,8 +38,8 @@ steps (3 and 4) need a logged-in Claude Code; steps 5 and 6 show the same checks
    cd ~/src/my-project && python3 ~/src/gedaechtnis/init.py --repo . --shape project --yes
    ```
 
-   It prints one `created` line per file and ends with
-   `committed 8 created file(s) as the vault's first commit`.
+   It prints one `created` line per file, then
+   `committed 8 created file(s) as the vault's first commit` and the next step.
 
 2. Look at what it made: `ls ~/Gedaechtnis/my-project` shows `Aporia.md Canon.md Errata.md Map.md
    Patterns.md Position.md`, and `cat ~/src/my-project/.atlas-lane` shows the paths this
