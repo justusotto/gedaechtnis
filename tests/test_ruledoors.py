@@ -307,8 +307,8 @@ def test_the_facts_line_names_every_door():
 
 def test_the_README_door_table_has_a_row_for_every_rule_door():
     """DERIVED from RULES: a door added to the module without a README row reddens here."""
-    readme = (HOOKS.parent / "README.md").read_text(encoding="utf-8")
-    table = readme[readme.index("## The doors"):readme.index("## What this plugin runs")]
+    # The door table lives in docs/doors.md since the README was trimmed.
+    table = (HOOKS.parent / "docs" / "doors.md").read_text(encoding="utf-8")
     rows = [ln for ln in table.splitlines() if ln.startswith("| ")]
     for door in rd.RULES:
         assert sum(f"`{door}_door" in ln for ln in rows) == 1, door

@@ -130,7 +130,7 @@ ALLOWED_LITERALS = (".atlas-lane", "atlas-region")
 
 # `.claude-plugin/` carries the manifest — as shipped as anything else here, and it was
 # outside the first spelling of this sweep entirely.
-SWEPT_DIRS = ("hooks", "eval", "commands", "agents", "rules", "tools", ".claude-plugin")
+SWEPT_DIRS = ("hooks", "eval", "commands", "agents", "rules", "tools", ".claude-plugin", "docs")
 SWEPT_FILES = ("README.md", "CHANGELOG.md", "LICENSE", "names.json")
 SWEPT_SUFFIXES = {".py", ".md", ".json", ".sh", ".txt"}
 

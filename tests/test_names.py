@@ -143,6 +143,7 @@ def test_readme_table_matches_names_json():
     table against names.json so a future row change is caught here, not discovered stale."""
     import json as _json
     table = _json.loads((PLUGIN / "names.json").read_text(encoding="utf-8"))
-    text = (PLUGIN / "README.md").read_text(encoding="utf-8")
+    # The table moved to docs/install.md with the README trim; README and docs/ are read as one text.
+    text = "\n".join(q.read_text(encoding="utf-8") for q in [PLUGIN / "README.md", *sorted((PLUGIN / "docs").glob("*.md"))])
     for stem, row in table.items():
         assert f"`{stem}.md` | {row['en']} | {row['gloss']} |" in text, stem

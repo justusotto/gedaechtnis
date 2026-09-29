@@ -93,7 +93,7 @@ def test_the_rules_do_not_promise_a_cleanup_question_THE_PRODUCT_DOES_NOT_ASK():
 
 
 def test_the_readme_agrees_with_the_rules_about_the_count():
-    readme = (PLUGIN / "README.md").read_text(encoding="utf-8")
+    readme = "\n".join(q.read_text(encoding="utf-8") for q in [PLUGIN / "README.md", *sorted((PLUGIN / "docs").glob("*.md"))])  # README and docs/
     assert "two questions a session ever asks" in readme
     assert "three questions a session ever asks" not in readme
 

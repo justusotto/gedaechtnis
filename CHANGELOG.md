@@ -87,6 +87,11 @@ Sections used: **Added** · **Changed** · **Fixed** · **Removed** · **Known l
 
 ### Changed
 
+- **The README is short; the detail moved to `docs/`.** The README now says what the plugin does,
+  how to install it, a ten-minute demo path with commands that were run, and what is in the box.
+  The door table, the hook table, configuration, platforms, measurements and the publishing notes
+  are pages under `docs/`, and `docs/why-hooks-not-prompts.md` explains the design choice with
+  dated figures. The tests that check the README against the code read README and `docs/` together.
 - **The context notices fire once per context WINDOW, not once per session.** A compaction clears
   the levels fired and the cached floor; the next window's floor is its own first call. The REACH
   notice no longer says the gate refuses "every" message, and with `compact_point: "on"` it prints

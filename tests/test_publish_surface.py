@@ -20,7 +20,8 @@ import ast
 from pathlib import Path
 
 PLUGIN = Path(__file__).resolve().parents[1]
-README = (PLUGIN / "README.md").read_text(encoding="utf-8")
+# README.md and the docs/ pages it links, read as one text: the detail moved to docs/.
+README = "\n".join(q.read_text(encoding="utf-8") for q in [PLUGIN / "README.md", *sorted((PLUGIN / "docs").glob("*.md"))])
 
 NETWORK = {"urllib", "http", "requests", "socket", "ftplib", "smtplib", "ssl", "asyncio",
            "aiohttp", "httpx", "websocket", "xmlrpc", "telnetlib", "poplib", "imaplib"}
