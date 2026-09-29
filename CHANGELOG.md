@@ -12,7 +12,7 @@ re-check.
 
 Sections used: **Added** · **Changed** · **Fixed** · **Removed** · **Known limits**.
 
-## Unreleased
+## 0.6.0 — 2026-09-29 — parked messages delivered, a door for computed kill targets
 
 ### Added
 
