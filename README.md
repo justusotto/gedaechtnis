@@ -20,15 +20,16 @@ python3 ~/src/gedaechtnis/init.py --repo .
 
 `init.py` creates the notes repository (`~/Gedaechtnis`), a folder in it for this project, one
 `@`-import line in the project's `CLAUDE.md`, a `.atlas-lane` marker naming what this project's
-sessions may write, and the symlink that loads the plugin. It overwrites nothing; a second run
+sessions may write (a *lane* is that writer identity: one per project, so the hooks can tell
+whose writes are whose), and the symlink that loads the plugin. It overwrites nothing; a second run
 reports `kept`. Run it with no `--repo` to be offered every project Claude Code has worked in.
 Installed from a plugin directory instead, the plugin writes nothing until a project is given a
 memory. Details: [docs/install.md](docs/install.md).
 
 ## Ten minutes: see it work
 
-Every command below was run in a throwaway home directory on 2026-09-29, macOS. The session
-steps (3 and 4) need a logged-in Claude Code; steps 5 and 6 show the same checks without one.
+Steps 1, 2, 5 and 6 were run in a throwaway home directory on 2026-09-29, macOS. Steps 3 and 4
+need a logged-in Claude Code and show what a session prints.
 
 1. Install, as above, with the starter headings for a software project:
 
@@ -45,7 +46,8 @@ steps (3 and 4) need a logged-in Claude Code; steps 5 and 6 show the same checks
    Patterns.md Position.md`, and `cat ~/src/my-project/.atlas-lane` shows the paths this
    project's sessions may write.
 
-3. Start a session in the project (`claude`). Its context begins with a facts block, for example:
+3. Start a session in the project (`claude`). Its context begins with a facts block. An example,
+   trimmed, from the hook's output in the throwaway run (your commit sha and paths will differ):
 
    ```
    Gedächtnis session facts (hook-generated):
