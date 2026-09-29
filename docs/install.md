@@ -1,5 +1,14 @@
 # Installing, and what it creates
 
+Four words used throughout:
+
+- **vault** — the git repository that holds the notes, `~/Gedaechtnis` by default.
+- **region** — one folder in the vault, one per project.
+- **lane** — the writer identity a project's sessions use, and the vault paths they may write. A
+  repo declares it in a `.atlas-lane` file. (The file keeps that name for now: the hooks read it in
+  every set-up repo, so renaming it needs a migration.)
+- **door** — a hook that checks a tool call before it runs and can refuse it, with the reason.
+
 ## From a clone
 
 ```sh
@@ -63,8 +72,8 @@ memory. To give one a memory, run `init.py` from the installed copy (the session
 the command), or answer the session's one question. Run from an installed copy, `init.py` does not
 add the `~/.claude/skills` symlink and does not write `~/.claude/settings.json`.
 
-Use one install method. A clone plus a directory install loads the plugin twice, and every hook
-runs twice.
+Use one install method. A clone plus a directory install loads the plugin twice, and its hooks
+run twice.
 
 ## What it creates
 

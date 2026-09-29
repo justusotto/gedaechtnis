@@ -1,7 +1,7 @@
 # What this plugin runs, sends and fetches
 
-**It sends nothing and fetches nothing.** No file the plugin ships imports a network library, and
-no command it runs contacts a remote. It has no account, no telemetry and no update check. Your
+**The plugin's own scripts make no network calls; Claude Code itself does.** No file the plugin
+ships imports a network library, and no command it runs contacts a remote. It has no account, no telemetry and no update check. Your
 notes stay in your vault on your disk; the plugin's own state (logs, per-session records) stays in
 `~/.claude/gedaechtnis/`.
 
@@ -20,7 +20,7 @@ against the source):
 - `osascript` — to move a file to the Trash through Finder, only on a Mac without
   `/usr/bin/trash`. The path is passed as an argument, never as script text.
 - `/usr/bin/trash` (macOS), `gio trash` or `trash-put` (Linux), `powershell` (Windows) — to move a
-  file to the Trash or the Recycle Bin, whichever this machine has (see [Platforms](#platforms)).
+  file to the Trash or the Recycle Bin, whichever this machine has (see [Platforms](platforms.md)).
   The path is passed as an argument, or on Windows as an environment value, never as script text.
 - `python3` — the plugin's own scripts, and two commands only if you configure them:
   `notify_command` and `answer_router`.

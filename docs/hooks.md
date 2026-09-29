@@ -21,4 +21,4 @@ Ten hook events, in nineteen matcher entries carrying thirty-three hook commands
 | When a subagent stops | Gives back what it was holding, so its parent is not left waiting. |
 | On worktree create / remove | Makes a copy-on-write clone for an isolated build. On removal it fetches the clone's commits back into the source repo first, then deletes the clone only if it holds nothing unique. Uncommitted work goes to the Trash, never `rm`. |
 
-Logs live under the state directory, one file per hook or door (`deny.log`, `partition.log`, `chore.log`, `session.log`, `hook-errors.log`, `facets.log`, `scope.log` and others); nothing is logged anywhere else.
+Logs live under the state directory, one file per hook or door (`deny.log`, `partition.log`, `chore.log`, `session.log`, `hook-errors.log`, `facets.log`, `scope.log` and others).

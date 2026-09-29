@@ -1,6 +1,7 @@
 # Platforms
 
-macOS fully. Linux and Windows run the same hooks and doors; this is what differs.
+Developed and used on macOS. Linux and Windows branches exist but have only been tested from a
+Mac; this is what differs.
 
 - **The Trash.** On macOS a deletion goes to the Trash with `/usr/bin/trash`. On Linux it goes to
   the Trash with `gio trash`, or `trash-put` from trash-cli, or, with neither installed, the

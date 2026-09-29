@@ -33,5 +33,9 @@ moves at most `max_move_share` (a quarter) of a file and changes at most `max_fi
 per pass, leaves a file alone if it changed while the pass was working, and writes into its commit
 what it moved and the command that undoes it.
 
+**Closing finished sessions.** `session_close_apply` in `limits` (off as shipped) lets the Stop hook quit a
+session it judges finished, and end its process with `kill -9` if it outlives the quit. Leave it off
+unless you launch sessions with `tools/sessions.py` and have read the list it prints while off.
+
 `GEDAECHTNIS_CONFIG` moves the config file itself. `GEDAECHTNIS_NO_TRASH=1` makes the two tools that would
 send something to the Trash leave it in place. `declined`, written only by `init.py --decline`, lists refusals.

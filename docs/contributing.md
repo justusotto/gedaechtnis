@@ -16,12 +16,11 @@ tree, any file `.gitignore` covers that is tracked anyway.
 
 **Never `git push --tags` and never `git push --follow-tags`.** A clone made from a private
 repository inherits that repository's tags, and each points at a private commit. Pushing them
-publishes those commits and their whole ancestry. On 2026-09-10 one `--tags` published five
-inherited tags, and deleting them from the remote minutes later does not remove the objects until
-the host collects them. Two guards hold the rule: `publish_check.py` refuses a clone carrying any
+publishes those commits and their whole history, and deleting them afterwards does not remove the
+objects until the host collects them. Two guards hold the rule: `publish_check.py` refuses a clone carrying any
 tag that is not a `v*` release, and a `PreToolUse` gate refuses `--tags` from such a clone when the
 session runs in the vault or a marked project (elsewhere it tells you). A single
-tag pushed by name is never blocked. A release is one orphan commit, not a continuation:
+tag pushed by name is never blocked. A release is built as a single commit with no history:
 
 ```sh
 bash tools/release_orphan.sh --sha <the commit you are publishing>
@@ -60,7 +59,5 @@ marker files it keeps in its state directory. One exception: when a worktree clo
 itself is removed and holds nothing unique (every commit fetched back into the source repository,
 no uncommitted or stashed work), the clone directory is deleted rather than sent to the Trash. A
 clone that does hold something goes to the Trash. A file no rule names is kept until someone
-writes the rule that names it; age never decides. A rule
-that needs judgment stays prose, because a guard that guesses produces false refusals, and a false
-refusal is paid for in work that quietly does not happen. A hook bug never takes the session down:
+writes the rule that names it; age never decides. A rule that needs judgment stays prose, because a guard that guesses produces false refusals. Hooks catch their own errors:
 every hook body logs its traceback and exits 0. No file names a directory of its own; all read `hooks/config.py`.
