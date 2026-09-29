@@ -7,8 +7,8 @@ with git. The rules that protect those notes and a script can check, such as "ne
 in the notes repository", are hooks: the tool call is refused with the reason, so a session does
 not have to remember the rule. Rules that need judgment stay as prose.
 
-It sends nothing and fetches nothing: no account, no telemetry, no network calls. Python 3.9 or
-later; nothing to build.
+The plugin's own scripts make no network calls; Claude Code itself does. No account, no telemetry.
+Python 3.9 or later; nothing to build.
 
 ## Install
 
