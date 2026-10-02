@@ -17,6 +17,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -43,6 +44,8 @@ def sandbox(tmp_path, monkeypatch):
     state.mkdir()
     monkeypatch.setenv("GEDAECHTNIS_STATE_DIR", str(state))
     monkeypatch.setenv("GEDAECHTNIS_VAULT", str(tmp_path / "vault"))
+    # CLONESWEEP-1: the sweep also lists the clones folder; unset, that is the machine's own.
+    monkeypatch.setenv("GEDAECHTNIS_WORKTREES", str(tmp_path / "clones"))
     # The config file too (REDS32-1, RECHECK-1 item 11): unset, `config` read the machine's own
     # ~/.claude/gedaechtnis/config.json, whose `limits.worktree_sweep: true` outranks the limits
     # FILE a test points at — so the key test was red alone and green only when an earlier test in
@@ -641,3 +644,362 @@ def test_a_process_in_a_SIBLING_whose_name_shares_a_prefix_does_not_occupy(sandb
         proc.kill()
         proc.wait()
     assert [Path(p).name for p in result["removed"]] == ["A"]
+
+
+# ------------------------------------------- CLONESWEEP-1: the copy-on-write clones ----
+
+@pytest.fixture
+def clones(sandbox, monkeypatch, tmp_path):
+    """HOME in the temp dir (the To-delete folder is under it) and no minimum age, set through
+    the vault's own `limits` object."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "config.json").write_text(
+        json.dumps({"limits": {"worktree_clone_min_age_seconds": 0}}), encoding="utf-8")
+    import limits                                                  # noqa: PLC0415
+    limits._reset_for_tests()
+    yield sandbox
+    limits._reset_for_tests()
+
+
+def make_clone(sandbox, name: str = "agent-1", dirt_at_birth: str | None = None) -> tuple[Path, float]:
+    """What `worktree.py create` leaves: a full copy, the marker and the birth manifest."""
+    import shutil, worktree                                        # noqa: PLC0415
+    repo = sandbox["repo"]
+    if dirt_at_birth:
+        (repo / dirt_at_birth).write_text("born with it\n", encoding="utf-8")
+    dst = sandbox["tmp"] / "clones" / f"repo--{name}"
+    shutil.copytree(repo, dst, symlinks=True)
+    (dst / ".gedaechtnis-clone-manifest.json").write_text(json.dumps(worktree.dirt_manifest(dst)))
+    (dst / ".gedaechtnis-clone-of").write_text(str(repo) + "\n", encoding="utf-8")
+    time.sleep(0.05)                    # whatever a test writes next is later than the marker
+    return dst, (dst / ".gedaechtnis-clone-of").stat().st_mtime
+
+
+def write_after_birth(path: Path, born: float, text: str = "x\n") -> None:
+    path.write_text(text, encoding="utf-8")
+    assert path.stat().st_mtime > born
+
+
+def test_a_finished_clone_is_PROPOSED_then_MOVED_to_the_to_delete_folder(clones):
+    repo, ws = clones["repo"], clones["wtsweep"]
+    clone, born = make_clone(clones, dirt_at_birth="scratch.txt")
+    write_after_birth(clone / "run.log", born)                     # generated: not work
+    assert ws.sweep(repo, apply=False)["proposed"] == [str(clone.resolve())]
+    assert clone.exists(), "a proposing pass moved the clone"
+
+    result = ws.sweep(repo, apply=True)
+    dest = ws.to_delete_dir() / clone.name
+    assert result["removed"] == [str(clone.resolve())] and result["kept"] == []
+    assert not clone.exists() and (dest / "f.txt").read_text() == "one\n"
+    assert str(clones["tmp"] / "home" / "Downloads" / "To delete ") in str(dest)
+    assert str(dest) in (dest.parent / "ledger.tsv").read_text()
+    assert (dest.parent / "README-what-went-where.html").read_text().startswith(
+        '<!doctype html>\n<meta charset="utf-8">\n')
+    assert result["undo"] == [ws.undo_mv(dest, clone.resolve())]
+
+
+def test_a_clone_YOUNGER_than_the_minimum_age_is_kept(clones, monkeypatch):
+    repo, ws = clones["repo"], clones["wtsweep"]
+    clone, _ = make_clone(clones)
+    (clones["tmp"] / "config.json").write_text("{}", encoding="utf-8")   # the shipped day
+    import limits                                                  # noqa: PLC0415
+    limits._reset_for_tests()
+    assert ws.sweep(repo, apply=True)["kept"] == [(str(clone.resolve()), ws.KEPT_YOUNG)]
+    assert clone.exists()
+
+
+def test_a_clone_with_its_OWN_uncommitted_file_is_kept(clones):
+    repo, ws = clones["repo"], clones["wtsweep"]
+    clone, born = make_clone(clones, dirt_at_birth="scratch.txt")
+    write_after_birth(clone / "scratch.txt", born, "edited in the clone\n")
+    assert ws.sweep(repo, apply=True)["kept"] == [(str(clone.resolve()), ws.KEPT_DIRTY)]
+    assert clone.exists()
+
+
+def test_a_clone_commit_is_kept_until_main_has_it_or_its_PATCH(clones):
+    repo, ws = clones["repo"], clones["wtsweep"]
+    clone, born = make_clone(clones)
+    (clone / "g.txt").write_text("two\n", encoding="utf-8")
+    git("add", "--", "g.txt", cwd=clone)
+    git("commit", "-q", "-m", "two", "--", "g.txt", cwd=clone)
+    assert ws.sweep(repo, apply=True)["kept"] == [(str(clone.resolve()), ws.KEPT_UNMERGED)]
+    # the same change lands on main under another sha (a rebase, a cherry-pick): patch-equivalent
+    (repo / "pad.txt").write_text("pad\n", encoding="utf-8")
+    git("add", "--", "pad.txt", cwd=repo)
+    git("commit", "-q", "-m", "pad", "--", "pad.txt", cwd=repo)
+    (repo / "g.txt").write_text("two\n", encoding="utf-8")
+    git("add", "--", "g.txt", cwd=repo)
+    git("commit", "-q", "-m", "two again", "--", "g.txt", cwd=repo)
+    assert ws.sweep(repo, apply=False)["proposed"] == [str(clone.resolve())]
+
+
+def test_a_clone_with_a_stash_of_its_own_or_a_live_session_is_kept(clones):
+    repo, ws, state = clones["repo"], clones["wtsweep"], clones["state"]
+    clone, born = make_clone(clones)
+    write_session(state, "live", cwd=str(repo), pid=os.getpid(), cwd_last=str(clone / "sub"))
+    assert ws.sweep(repo, apply=True)["kept"] == [(str(clone.resolve()), ws.KEPT_LIVE)]
+    (state / "session-start-live.json").unlink()
+    (clone / "f.txt").write_text("stashed\n", encoding="utf-8")
+    subprocess.run(["git", "stash", "push", "-q"], cwd=str(clone), check=True,
+                   env={**os.environ, "GIT_COMMITTER_DATE": f"@{int(born) + 60} +0000"})
+    git("checkout", "-q", "--", ".", cwd=clone)
+    assert ws.sweep(repo, apply=True)["kept"] == [(str(clone.resolve()), ws.KEPT_CLONE_STASH)]
+    assert clone.exists()
+
+
+def test_a_clone_of_ANOTHER_repo_and_an_unmarked_folder_are_never_listed(clones):
+    repo, ws = clones["repo"], clones["wtsweep"]
+    other, _ = make_clone(clones, name="other")
+    (other / ".gedaechtnis-clone-of").write_text(str(clones["tmp"] / "elsewhere") + "\n")
+    (clones["tmp"] / "clones" / "plain-folder").mkdir()
+    assert ws.clones_of(repo) == []
+    assert ws.sweep(repo, apply=True) == {"removed": [], "kept": [], "proposed": [], "undo": []}
+
+
+# ------------------------------- CLONESWEEP-1: a pidless session record expires ----
+
+def test_a_pidless_session_record_stops_protecting_once_its_file_is_OLD(sandbox):
+    """Negative control: `test_a_session_record_with_NO_pid_field_protects_the_worktree` above —
+    the same record, fresh, still keeps the worktree."""
+    repo, ws, state = sandbox["repo"], sandbox["wtsweep"], sandbox["state"]
+    wt = add_worktree(repo, "EXPIRED")
+    merge_into_main(repo, "wt-EXPIRED")
+    write_session(state, "ancient", cwd=str(repo), pid=None, with_pid_field=False, cwd_last=str(wt))
+    old = time.time() - 2 * 86400
+    os.utime(state / "session-start-ancient.json", (old, old))
+    assert [Path(p).name for p in ws.sweep(repo)["removed"]] == ["EXPIRED"]
+
+
+# ---- the review's holes (TOOLS-C review, 2026-10-02): each was PROPOSED before the fix ----
+
+def test_a_born_dirty_file_with_a_QUOTED_name_edited_in_the_clone_is_kept(clones):
+    """git prints `café.txt` as an escaped, quoted string unless asked for -z; read that way the
+    manifest recorded it as "gone" and the edit read as "born deleted"."""
+    repo, ws = clones["repo"], clones["wtsweep"]
+    clone, born = make_clone(clones, dirt_at_birth="café \"q\".txt")
+    assert ws.sweep(repo, apply=False)["proposed"] == [str(clone.resolve())]   # untouched: fine
+    write_after_birth(clone / "café \"q\".txt", born, "edited\n")
+    assert ws.sweep(repo, apply=False)["kept"] == [(str(clone.resolve()), ws.KEPT_DIRTY)]
+
+
+def test_a_born_dirty_file_REPLACED_with_an_old_timestamp_is_kept(clones):
+    """`cp -p` and `mv` keep an old modification time; the inode change time still moves."""
+    repo, ws = clones["repo"], clones["wtsweep"]
+    clone, born = make_clone(clones, dirt_at_birth="scratch.txt")
+    (clone / "scratch.txt").write_text("replaced\n", encoding="utf-8")
+    os.utime(clone / "scratch.txt", (born - 3600, born - 3600))
+    assert ws.sweep(repo, apply=False)["kept"] == [(str(clone.resolve()), ws.KEPT_DIRTY)]
+
+
+@pytest.mark.parametrize("how", ["detached", "tag", "other-ref", "merge"])
+def test_a_commit_only_the_clone_holds_keeps_it_WHEREVER_it_hangs(clones, how):
+    repo, ws = clones["repo"], clones["wtsweep"]
+    clone, _ = make_clone(clones)
+    if how == "merge":                       # the clone merges by hand; the source merges the same
+        for r in (repo, clone):              # branch itself, so every NON-merge commit is on main
+            git("checkout", "-q", "-b", "side", cwd=r)
+            (r / "s.txt").write_text("side\n", encoding="utf-8")
+            git("add", "--", "s.txt", cwd=r)
+            subprocess.run(["git", "commit", "-q", "-m", "side", "--", "s.txt"], cwd=str(r), check=True,
+                           env={**os.environ, "GIT_AUTHOR_DATE": "@1700000000 +0000",
+                                "GIT_COMMITTER_DATE": "@1700000000 +0000"})
+            git("checkout", "-q", "main", cwd=r)
+            git("merge", "-q", "--no-ff", "-m", f"merge in {r.name}", "side", cwd=r)
+    else:
+        (clone / "g.txt").write_text("two\n", encoding="utf-8")
+        git("add", "--", "g.txt", cwd=clone)
+        git("commit", "-q", "-m", "two", "--", "g.txt", cwd=clone)
+        if how == "tag":
+            git("tag", "keep-me", cwd=clone)
+        if how == "other-ref":
+            git("update-ref", "refs/wip/x", "HEAD", cwd=clone)
+        if how != "detached":
+            git("reset", "-q", "--hard", "HEAD~1", cwd=clone)       # no branch holds it any more
+        else:
+            git("checkout", "-q", "--detach", cwd=clone)
+            git("branch", "-f", "main", "HEAD~1", cwd=clone)
+    assert ws.sweep(repo, apply=True)["kept"] == [(str(clone.resolve()), ws.KEPT_UNMERGED)]
+    assert clone.exists()
+
+
+def test_a_FAILING_git_cherry_never_reads_as_merged(clones, monkeypatch):
+    repo, ws = clones["repo"], clones["wtsweep"]
+    clone, _ = make_clone(clones)
+    (clone / "g.txt").write_text("two\n", encoding="utf-8")
+    git("add", "--", "g.txt", cwd=clone)
+    git("commit", "-q", "-m", "two", "--", "g.txt", cwd=clone)
+    real = ws._git
+
+    def broken(args, **k):
+        if args[:1] == ["cherry"]:
+            return subprocess.CompletedProcess(args, 128, "", "fatal")
+        return real(args, **k)
+    monkeypatch.setattr(ws, "_git", broken)
+    assert ws.sweep(repo, apply=True)["kept"] == [(str(clone.resolve()), ws.KEPT_UNMERGED)]
+
+
+def test_a_broken_marker_or_config_never_escapes_the_sweep_and_the_worktree_half_is_reported(clones):
+    repo, ws = clones["repo"], clones["wtsweep"]
+    wt = add_worktree(repo, "DONE")
+    merge_into_main(repo, "wt-DONE")
+    clone, _ = make_clone(clones)
+    bad = clones["tmp"] / "clones" / "not-utf8"
+    bad.mkdir()
+    (bad / ".gedaechtnis-clone-of").write_bytes(b"\xff\xfe\n")
+    (clones["tmp"] / "config.json").write_text(json.dumps(
+        {"limits": {"worktree_clone_min_age_seconds": 0, "worktree_generated": [1, "*.log"]}}))
+    import limits                                                  # noqa: PLC0415
+    limits._reset_for_tests()
+    (clone / "new.txt").write_text("work\n", encoding="utf-8")
+    result = ws.sweep(repo, apply=True)
+    assert [Path(p).name for p in result["removed"]] == ["DONE"] and not wt.exists()
+    assert result["kept"] == [(str(clone.resolve()), ws.KEPT_DIRTY)]
+
+
+def test_a_session_working_in_ONE_directory_keeps_its_record_young(sandbox):
+    """The expiry reads the record file's age; `record_cwd` skips the write when the directory has
+    not changed, so without the hourly touch a live pidless session would age out in place."""
+    import common                                                  # noqa: PLC0415
+    state = sandbox["state"]
+    common.record_cwd("stay", "/somewhere")
+    f = common.session_state_path("stay")
+    old = time.time() - 2 * 86400
+    os.utime(f, (old, old))
+    common.record_cwd("stay", "/somewhere")
+    assert time.time() - f.stat().st_mtime < 60
+    assert ("/somewhere", None, False) in common.session_locations(stale_no_pid=86400)
+
+
+# ---- fix-only review acf80012: N1 (a linked worktree of the clone's own), N2 (reflog-only commits),
+# ---- N3 (content, not the clock), and four guards that had no test (its mutants M1, M3, M4, M5)
+
+def test_a_clone_in_which_a_git_worktree_was_ADDED_is_kept_and_an_inherited_one_is_not(clones):
+    """N1: `for-each-ref` does not list a linked worktree's HEAD and no status reads its files, so
+    a clone with a hand-written file in its own linked worktree was PROPOSED. Control first: the
+    `.git/worktrees/` entry a clone is BORN with (the source's worktree) does not keep it."""
+    repo, ws = clones["repo"], clones["wtsweep"]
+    git("worktree", "add", "-q", "-b", "src-wt", str(clones["tmp"] / "src-linked"), "main", cwd=repo)
+    clone, _ = make_clone(clones)
+    assert (clone / ".git" / "worktrees" / "src-linked").is_dir()
+    assert ws.sweep(repo, apply=False)["proposed"] == [str(clone.resolve())]
+    lw = clones["tmp"] / "clone-linked"
+    git("worktree", "add", "-q", "--detach", str(lw), cwd=clone)
+    (lw / "notes.txt").write_text("hand-written, uncommitted, in no status the sweep reads\n")
+    result = ws.sweep(repo, apply=True)
+    assert (str(clone.resolve()), ws.KEPT_CLONE_LINKED) in result["kept"] and result["removed"] == []
+    assert clone.exists()
+
+
+def test_a_commit_on_a_linked_worktrees_HEAD_counts_as_a_tip_of_the_clone(clones, monkeypatch):
+    """N1, second guard: with the "added after birth" check out of the way (as after a touched
+    marker), the linked worktree's detached commit must still read as held only by the clone."""
+    repo, ws = clones["repo"], clones["wtsweep"]
+    clone, _ = make_clone(clones)
+    lw = clones["tmp"] / "clone-linked"
+    git("worktree", "add", "-q", "--detach", str(lw), cwd=clone)
+    monkeypatch.setattr(ws, "clone_worktree_added", lambda wt, born: False)
+    assert ws.sweep(repo, apply=False)["proposed"] == [str(clone.resolve())]   # control: no commit yet
+    (lw / "g.txt").write_text("two\n", encoding="utf-8")
+    git("add", "--", "g.txt", cwd=lw)
+    git("commit", "-q", "-m", "in the linked worktree", "--", "g.txt", cwd=lw)
+    assert ws.sweep(repo, apply=False)["kept"] == [(str(clone.resolve()), ws.KEPT_UNMERGED)]
+
+
+def test_a_commit_only_the_clones_REFLOG_holds_keeps_it(clones):
+    """N2: `commit; reset --hard HEAD~1` leaves a commit no ref names. Control: the same history
+    made in the SOURCE before the clone was born is the source's own and keeps nothing."""
+    repo, ws = clones["repo"], clones["wtsweep"]
+
+    def commit_and_drop(r):
+        (r / "g.txt").write_text(f"dropped in {r.name}\n", encoding="utf-8")
+        git("add", "--", "g.txt", cwd=r)
+        git("commit", "-q", "-m", "dropped", "--", "g.txt", cwd=r)
+        git("reset", "-q", "--hard", "HEAD~1", cwd=r)
+    commit_and_drop(repo)
+    clone, _ = make_clone(clones)
+    assert ws.sweep(repo, apply=False)["proposed"] == [str(clone.resolve())]
+    commit_and_drop(clone)
+    assert ws.sweep(repo, apply=True)["kept"] == [(str(clone.resolve()), ws.KEPT_UNMERGED)]
+
+
+def test_more_unknown_tips_than_the_cap_is_kept_unjudged(clones, monkeypatch):
+    """Control: one tip the source lacks, patch-equivalent to a commit on main, is held."""
+    repo, ws = clones["repo"], clones["wtsweep"]
+    clone, born = make_clone(clones)
+    for r, msg in ((clone, "two"), (repo, "the same patch under another sha")):
+        (r / "g.txt").write_text("two\n", encoding="utf-8")
+        git("add", "--", "g.txt", cwd=r)
+        git("commit", "-q", "-m", msg, "--", "g.txt", cwd=r)
+    assert ws.clone_commits_kept_elsewhere(repo, clone, born) is True
+    monkeypatch.setattr(ws, "MAX_CLONE_TIPS", 0)
+    assert ws.clone_commits_kept_elsewhere(repo, clone, born) is False
+
+
+def test_a_born_dirty_file_is_judged_by_its_CONTENT_whatever_the_clocks_say(clones):
+    """N3: an edit followed by a touch of the marker moved "born" past the edit and the clone was
+    PROPOSED. Control: the same file rewritten with the SAME content after birth is not work."""
+    repo, ws = clones["repo"], clones["wtsweep"]
+    clone, born = make_clone(clones, dirt_at_birth="scratch.txt")
+    write_after_birth(clone / "scratch.txt", born, "born with it\n")            # same bytes, new times
+    assert ws.sweep(repo, apply=False)["proposed"] == [str(clone.resolve())]
+    (clone / "scratch.txt").write_text("edited\n", encoding="utf-8")
+    time.sleep(0.05)
+    os.utime(clone / ".gedaechtnis-clone-of")                                    # born moves past the edit
+    assert ws.sweep(repo, apply=False)["kept"] == [(str(clone.resolve()), ws.KEPT_DIRTY)]
+
+
+def test_porcelain_z_skips_the_ORIGINAL_path_of_a_rename(sandbox):
+    common = _common_for(sandbox)
+    assert common.porcelain_z("R  f2.txt\0f.txt\0?? café \"q\".txt\0 M a b\0") == [
+        ("R ", "f2.txt"), ("??", "café \"q\".txt"), (" M", "a b")]
+    assert common.porcelain_z("") == [] and common.porcelain_z(None) == []
+
+
+def test_a_staged_rename_at_birth_edited_in_the_clone_is_kept(clones):
+    repo, ws = clones["repo"], clones["wtsweep"]
+    git("mv", "f.txt", "f2.txt", cwd=repo)
+    clone, born = make_clone(clones)
+    assert ws.sweep(repo, apply=False)["proposed"] == [str(clone.resolve())]   # untouched: fine
+    write_after_birth(clone / "f2.txt", born, "edited after the rename\n")
+    assert ws.sweep(repo, apply=False)["kept"] == [(str(clone.resolve()), ws.KEPT_DIRTY)]
+
+
+def test_a_dirty_DIRECTORY_a_nested_repository_always_keeps_the_clone(clones):
+    """Its inside is never read, so nothing can show it unchanged."""
+    repo, ws = clones["repo"], clones["wtsweep"]
+    nested = repo / "vendor" / "lib"
+    nested.mkdir(parents=True)
+    git("init", "-q", "-b", "main", cwd=nested)
+    (nested / "x.txt").write_text("x\n", encoding="utf-8")
+    clone, _ = make_clone(clones)
+    assert ws.sweep(repo, apply=False)["kept"] == [(str(clone.resolve()), ws.KEPT_DIRTY)]
+
+
+def test_an_exception_in_the_clone_half_still_reports_what_the_worktree_half_removed(clones, monkeypatch):
+    repo, ws = clones["repo"], clones["wtsweep"]
+    wt = add_worktree(repo, "DONE")
+    merge_into_main(repo, "wt-DONE")
+    make_clone(clones)
+
+    def boom(*a, **k):
+        raise RuntimeError("classify fell over")
+    monkeypatch.setattr(ws, "classify_clone", boom)
+    result = ws.sweep(repo, apply=True)
+    assert [Path(p).name for p in result["removed"]] == ["DONE"] and not wt.exists()
+    assert len(result["kept"]) == 1 and "the clone sweep stopped" in result["kept"][0][1]
+
+
+def test_a_FAILING_rev_list_never_reads_as_merged(clones, monkeypatch):
+    repo, ws = clones["repo"], clones["wtsweep"]
+    clone, _ = make_clone(clones)
+    (clone / "g.txt").write_text("two\n", encoding="utf-8")
+    git("add", "--", "g.txt", cwd=clone)
+    git("commit", "-q", "-m", "two", "--", "g.txt", cwd=clone)
+    real = ws._git
+
+    def broken(args, **k):
+        if args[:1] == ["rev-list"]:
+            return subprocess.CompletedProcess(args, 128, "", "fatal")
+        return real(args, **k)
+    monkeypatch.setattr(ws, "_git", broken)
+    assert ws.sweep(repo, apply=True)["kept"] == [(str(clone.resolve()), ws.KEPT_CLONE_GIT)]

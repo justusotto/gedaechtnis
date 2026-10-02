@@ -26,7 +26,9 @@ def world(tmp_path):
     (projects / "-proj").mkdir(parents=True)
     sessions.mkdir()
     cfg = tmp_path / "config.json"
-    cfg.write_text("{}")
+    # The short-message pass ships ON since HANDLINES-1; the headroom tests below test the rule it
+    # lifts, so the world switches it off and the short-pass tests switch it back on themselves.
+    cfg.write_text(json.dumps({"limits": {"resume_short_chars": 0}}))
     # The sending session runs in a MARKED repo (its cwd is `projects`): the wake refusal applies
     # only there (PLUGDIR-1); the unmarked case is its own negative control below.
     (projects / ".atlas-lane").write_text("lane: TEST\npath: Test/\n")
@@ -148,16 +150,21 @@ def test_exactly_at_the_cold_cap_is_refused(world):
     assert denied(send(world))
 
 
-def test_HEADROOM_under_the_minimum_is_refused_even_warm(world):
-    session(world, total=355_000, age_s=60)
+def test_HEADROOM_under_the_minimum_is_refused_when_COLD(world):
+    """MSGGATE-1: the headroom rule is a cold rule; cold_cap is raised so it is the only reason."""
+    world["cfg"].write_text(json.dumps({"limits": {"resume_cold_cap": 900_000}}))
+    session(world, total=355_000, age_s=2 * 3600)
     out = send(world)
     assert denied(out), out
     assert "65,000 tokens of headroom, under resume_min_headroom 70,000" in out["permissionDecisionReason"]
 
 
-def test_exactly_at_the_headroom_bound_is_refused(world):
-    session(world, total=350_000, age_s=60)
+def test_exactly_at_the_headroom_bound_is_refused_when_cold(world):
+    world["cfg"].write_text(json.dumps({"limits": {"resume_cold_cap": 900_000}}))
+    session(world, total=350_000, age_s=2 * 3600)
     assert denied(send(world))
+    session(world, total=349_999, age_s=2 * 3600)
+    assert not denied(send(world))
 
 
 def test_a_COLD_FABLE_session_is_refused_at_any_size(world):
@@ -185,12 +192,13 @@ def test_a_5_MINUTE_cache_is_cold_after_20_minutes(world):
 
 def test_the_bounds_come_from_limits(world):
     world["cfg"].write_text(json.dumps({"limits": {
-        "resume_cold_cap": 100_000, "resume_window": 300_000, "resume_min_headroom": 10_000}}))
+        "resume_cold_cap": 100_000, "resume_window": 300_000, "resume_min_headroom": 10_000,
+        "resume_short_chars": 0}}))
     session(world, total=120_000, age_s=10 * 3600)
     out = send(world)
     assert denied(out) and "resume_cold_cap 100,000" in out["permissionDecisionReason"], out
-    session(world, total=295_000, age_s=60)
-    assert "under resume_min_headroom 10,000" in send(world)["permissionDecisionReason"]
+    session(world, total=300_000, age_s=60)                  # warm: resume_window is its bound
+    assert "at or above resume_window 300,000" in send(world)["permissionDecisionReason"]
 
 
 def test_the_fallback_lifetime_comes_from_limits_when_the_transcript_does_not_say(world):
@@ -458,9 +466,13 @@ def test_a_subagent_is_measured_from_ITS_OWN_chain_not_a_main_chain_record(world
     assert "context 300,000 tokens" in send(world, to=AGENT)["permissionDecisionReason"]
 
 
-def test_a_subagent_near_the_window_is_refused_even_warm(world):
+def test_a_warm_subagent_at_its_window_is_refused_and_under_it_gets_a_short_message(world):
+    subagent(world, total=420_000, age_s=30, ttl="1h")
+    out = send(world, to=AGENT)
+    assert "at or above resume_window 420,000" in out["permissionDecisionReason"], out
+    assert "sub-agent, warm — context 420,000, window 420,000 — REFUSED" in out["permissionDecisionReason"]
     subagent(world, total=360_000, age_s=30, ttl="1h")
-    assert "under resume_min_headroom" in send(world, to=AGENT)["permissionDecisionReason"]
+    assert "sub-agent, warm" in note_of(send(world, to=AGENT))
 
 
 def test_a_COLD_FABLE_subagent_is_refused(world):
@@ -507,12 +519,12 @@ def _parked_rows(w, name="builder-7"):
 
 
 def test_a_refused_message_is_parked_for_the_recipients_name_and_the_sender_is_told(world):
-    session(world, total=355_000, age_s=60)
+    session(world, total=420_000, age_s=60)                  # warm, at its window
     out = send(world, message="please take row 5")
     assert denied(out), out
     rows = _parked_rows(world)
     assert len(rows) == 1 and rows[0]["text"] == "please take row 5"
-    assert rows[0]["schema"] == "parked/1" and "headroom" in rows[0]["reason"]
+    assert rows[0]["schema"] == "parked/1" and "resume_window" in rows[0]["reason"]
     assert "parked in" in out["permissionDecisionReason"]
 
 
@@ -553,7 +565,7 @@ def test_a_boundary_BEFORE_the_last_call_changes_nothing(world):
     """Negative control: the window after the compaction has been measured, so its figure binds."""
     session(world, total=374_589, age_s=534)
     _compact(world)
-    session(world, total=360_000, age_s=60, older=None)       # a new window, measured again
+    session(world, total=420_000, age_s=60, older=None)       # a new window, measured again
     with (world["projects"] / "-proj" / f"{TARGET}.jsonl").open() as fh:
         recs = [json.loads(l) for l in fh if l.strip()]
     recs.insert(0, {"type": "system", "subtype": "compact_boundary", "timestamp": _ts(900)})
@@ -570,60 +582,124 @@ def test_a_compacted_cold_fable_target_is_still_refused(world):
     assert denied(out) and "claude-fable-5-1" in out["permissionDecisionReason"]
 
 
-def _short_keys(w, chars=1500, window=400_000):
-    w["cfg"].write_text(json.dumps({"limits": {"resume_short_chars": chars,
-                                               "resume_short_window": window}}))
+# ------------------------------------------------ MSGGATE-1: a warm session gets its messages ----
+
+def _short(w, chars=1500, **more):
+    w["cfg"].write_text(json.dumps({"limits": dict({"resume_short_chars": chars}, **more)}))
 
 
-def test_a_short_message_to_a_warm_target_passes_the_headroom_rule_with_the_keys_set(world):
-    _short_keys(world)
-    session(world, total=380_000, age_s=60)
-    out = send(world, message="r" * 1400)
-    assert not denied(out), out
-    assert "SHORT" in note_of(out)
+def test_the_SPECIMEN_a_short_message_to_a_warm_session_at_373k_is_DELIVERED(world):
+    """2026-09-29: messages of 267-420 characters to a warm session at 353-385k were parked."""
+    world["cfg"].write_text("{}")                            # shipped values
+    session(world, total=373_042, age_s=18)
+    note = note_of(send(world, message="r" * 267))
+    assert ("Resume check for `builder-7`: live session, warm — context 373,042, window 420,000 — "
+            "DELIVERED (short: 267 characters, at most resume_short_chars 1,500)") in note, note
 
 
-def test_the_same_short_message_is_refused_without_the_keys(world):
-    session(world, total=380_000, age_s=60)
-    assert denied(send(world, message="r" * 1400))
+def test_a_short_message_is_delivered_up_to_just_under_the_window(world):
+    _short(world)
+    session(world, total=419_999, age_s=60)
+    assert not denied(send(world, message="r" * 1500))
 
 
-def test_a_message_over_the_short_limit_is_refused(world):
-    _short_keys(world)
-    session(world, total=380_000, age_s=60)
-    assert denied(send(world, message="r" * 1600))
+def test_at_the_window_even_a_short_message_is_refused(world):
+    _short(world)
+    session(world, total=420_000, age_s=60)
+    out = send(world, message="ok")
+    assert denied(out) and "at or above resume_window 420,000" in out["permissionDecisionReason"]
 
 
-def test_a_short_message_at_or_above_the_short_window_is_refused(world):
-    _short_keys(world)
+def test_the_margin_never_blocks_a_short_message(world):
+    """Under the window by less than the margin: a long message is refused, a short one is not."""
+    _short(world, context_reach_margin_tokens=50_000)
     session(world, total=400_000, age_s=60)
-    assert denied(send(world, message="short"))
+    assert not denied(send(world, message="r" * 1500))
+    assert denied(send(world, message="r" * 1501))
 
 
-def test_the_short_pass_leaves_the_cold_rules_unchanged(world):
-    _short_keys(world)
+def test_a_LONG_message_that_fits_is_delivered_with_its_sum(world):
+    _short(world)
+    session(world, total=380_000, age_s=60)
+    note = note_of(send(world, message="r" * 3000))           # 1,000 tokens; 380k+1k+20k < 420k
+    assert ("DELIVERED (fits: context 380,000 + message ~1,000 tokens (3,000 characters) + "
+            "context_reach_margin_tokens 20,000 = 401,000, under resume_window 420,000)") in note, note
+
+
+def test_a_LONG_message_that_does_not_fit_is_PARKED_with_the_numbers(world):
+    _short(world)
+    session(world, total=399_500, age_s=60)
+    out = send(world, message="r" * 1600)                     # 534 tokens: 399,500+534+20,000
+    assert denied(out), out
+    why = out["permissionDecisionReason"]
+    assert why.startswith("Resume check for `builder-7`: live session, warm — context 399,500, "
+                          "window 420,000 — PARKED."), why
+    assert ("context 399,500 + message ~534 tokens (1,600 characters) + context_reach_margin_tokens "
+            "20,000 = 420,034, not under resume_window 420,000") in why, why
+    assert _parked_rows(world)[0]["text"] == "r" * 1600
+
+
+def test_the_fit_rule_is_strict_at_the_window(world):
+    """need == window is refused, need == window - 1 is delivered (the `>=`)."""
+    _short(world, context_reach_margin_tokens=0)
+    session(world, total=419_000, age_s=60)
+    assert denied(send(world, message="r" * 3000))            # 419,000 + 1,000 = 420,000
+    assert not denied(send(world, message="r" * 2997))        # 419,000 + 999
+
+
+def test_with_the_short_pass_OFF_every_warm_message_takes_the_fit_rule(world):
+    _short(world, chars=0)
+    session(world, total=380_000, age_s=60)
+    note = note_of(send(world, message="ok"))
+    assert "DELIVERED (fits:" in note, note
+    session(world, total=419_990, age_s=60)
+    assert denied(send(world, message="ok"))
+
+
+def test_resume_short_window_is_no_longer_read(world):
+    _short(world, resume_short_window=100_000)
+    session(world, total=380_000, age_s=60)
+    assert not denied(send(world, message="short"))
+
+
+def test_the_warm_rules_leave_the_cold_rules_unchanged(world):
+    _short(world)
     session(world, total=250_000, age_s=2 * 3600)                    # cold and large
-    assert denied(send(world, message="short"))
+    out = send(world, message="short")
+    assert denied(out) and "cold and its context is at or above resume_cold_cap" in \
+        out["permissionDecisionReason"]
+    assert "live session, cold — context 250,000, window 420,000 — PARKED" in \
+        out["permissionDecisionReason"]
     session(world, total=100_000, age_s=4 * 3600, model="claude-fable-5-1")   # Fable and cold
     assert denied(send(world, message="short"))
+    session(world, total=120_000, age_s=10 * 3600)                    # cold and small: woken
+    assert "live session, cold — context 120,000, window 420,000 — DELIVERED" in \
+        note_of(send(world, message="short"))
+
+
+def test_a_cold_target_under_the_cold_cap_still_meets_the_headroom_rule(world):
+    """With resume_cold_cap above the headroom bound, only the headroom rule can refuse a cold
+    target at 380,000 — the warm pass must not lift it (reviewer mutation M9)."""
+    _short(world, resume_cold_cap=900_000)
+    session(world, total=380_000, age_s=2 * 3600)                    # cold, under the cold cap
+    assert denied(send(world, message="short"))
+    session(world, total=380_000, age_s=60)                          # warm: delivered
+    assert not denied(send(world, message="short"))
 
 
 def test_the_refused_senders_name_comes_from_the_registry(world):
     """A resumed sender has no `--name` on its process; the registry names it, as it names targets."""
     (world["sessions"] / "111111.json").write_text(json.dumps(
         {"pid": os.getpid(), "sessionId": ME, "name": "the-seat", "status": "busy"}))
-    session(world, total=355_000, age_s=60)
+    session(world, total=420_000, age_s=60)
     assert denied(send(world))
     assert _parked_rows(world)[0]["from"] == "the-seat"
 
 
-def test_the_short_pass_is_for_warm_targets_only_where_only_headroom_binds(world):
-    """With resume_cold_cap above the headroom bound, only the headroom rule can refuse a cold
-    target at 380,000 — the short pass must not lift it (reviewer mutation M9)."""
-    world["cfg"].write_text(json.dumps({"limits": {"resume_short_chars": 1500,
-                                                   "resume_short_window": 400_000,
-                                                   "resume_cold_cap": 900_000}}))
-    session(world, total=380_000, age_s=2 * 3600)                    # cold, under the cold cap
-    assert denied(send(world, message="short"))
-    session(world, total=380_000, age_s=60)                          # warm: the pass applies
-    assert not denied(send(world, message="short"))
+
+
+def test_an_override_also_leads_with_the_decision_line(world):
+    session(world, total=420_000, age_s=60)
+    note = note_of(send(world, message="RESUME-OVERRIDE: the owner asked\nplease"))
+    assert note.startswith("Resume check for `builder-7`: live session, warm — context 420,000, "
+                           "window 420,000 — DELIVERED (override).") and "overridden" in note, note

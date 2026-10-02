@@ -434,6 +434,9 @@
     "cwd": "{REPO}",
     "session_id": "A",
     "rule": "keeps its answers in the ARTIFACT's own store",
+    "env": {
+      "GEDAECHTNIS_PROFILE": "atlas"
+    },
     "setup": [
       {
         "op": "write",
@@ -468,6 +471,9 @@
     "cwd": "{REPO}",
     "session_id": "A",
     "rule": "keeps its answers in the ARTIFACT's own store",
+    "env": {
+      "GEDAECHTNIS_PROFILE": "atlas"
+    },
     "setup": [
       {
         "op": "write",

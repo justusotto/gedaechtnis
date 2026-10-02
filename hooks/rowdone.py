@@ -15,6 +15,7 @@ Deterministic throughout: no model reads anything, and every refusal is one prin
 
     python3 rowdone.py apply <sha> <handoff> [--repo R]   every row the handoff names with <sha>
     python3 rowdone.py flip  <q-id> <sha> --by <session> [--repo R]   one row, by hand
+    python3 rowdone.py owed                               try the marks a busy vault deferred
     python3 rowdone.py flip  <q-id> --vault-sha <sha> --by <session>  one row finished by a VAULT
                                          commit (no code merge): the sha must be a commit in the vault
 
@@ -24,9 +25,9 @@ Exit codes (one line printed per row either way):
     3  REFUSED: the sha is not on main (with --vault-sha: not a commit in the vault)
     4  FILE-IT <id>: no queue row carries that id
     5  REFUSED: the queue file is outside this lane's rows — a notice is written instead
-    6  REFUSED: a test suite is watching the vault (the suite lock, `tools/suitelock.py`)
+    6  REFUSED: a test suite is watching the vault (the suite lock, `tools/suitelock.py`) — owed
     7  REFUSED: the row is not uniquely identified (count ≠ 1, or its two id readings disagree)
-    8  REFUSED: the queue file has uncommitted changes (a path-limited commit would carry them)
+    8  REFUSED: the queue file has uncommitted changes (a path-limited commit would carry them) — owed
     9  the handoff names no row with that sha
 
 ★ WHERE IT RUNS. Two doors in `chore.py`, both calling `apply` here:
@@ -34,6 +35,14 @@ Exit codes (one line printed per row either way):
     handoff naming that sha;
   * Stop — every handoff this session wrote (`common.handoff_paths`), so a session that forgot, or
     wrote its handoff after the verify, still lands its marks at exit.
+
+★ A BUSY VAULT IS NOT A LOST MARK (ROWDONEQ-1). When the suite lock (exit 6) or an uncommitted
+queue file (exit 8) refuses a flip, the mark is written as an OWED entry — row id, sha, session,
+handoff, repository, lane — into `rowdone-owed.json` in the state directory. Every later Stop of a
+session of that lane tries the owed entries first-come, without waiting, and the first one that
+finds the vault quiet applies them through the same `flip` (every check runs again). An entry
+leaves the file when its row is flipped or the refusal is final; one that is still refused after
+`OWED_DAYS` is dropped and logged. `rowdone.py owed` applies them by hand.
 
 ★ SWITCHED ON PER REPOSITORY by a committed `.rowdone` file at the repository root — the same
 shape as `.merge-window`. It says where the queues are (`queues:` — a vault-relative directory,
@@ -92,6 +101,8 @@ SUBJECT_DAYS = 14
 SUBJECT_ID = re.compile(r"(?:^|\s)Merge\s+(?:q:)?([A-Z][A-Z0-9]*-\d{4}-\d{2}-\d{2}-[A-Za-z0-9-]*[A-Za-z0-9])"
                         r"|\(q:([A-Za-z0-9][A-Za-z0-9-]*[A-Za-z0-9])\)")
 STALE_FILE = "queue-stale-open.json"
+OWED_FILE, OWED_DAYS = "rowdone-owed.json", 7
+RETRY = (PYTEST, DIRTY, NOT_ON_MAIN)                 # refusals a later, quieter moment can clear
 
 
 class Ambiguous(Exception):
@@ -290,17 +301,104 @@ def _notice(lane: str, owner: str, qid: str, sha: str, by: str, rel: str, prefix
     return out_rel
 
 
+def _owed_update(mutate) -> list:
+    """Read-modify-write the owed list under an exclusive lock; returns the list as written.
+    Written only when it changed, so a Stop with nothing owed touches nothing."""
+    import json
+    path = config.state() / OWED_FILE
+    try:
+        rootguard.permit(path, "rowdone owed list in the state dir")
+        rootguard.permit(config.state() / "rowdone-owed.lock", "rowdone owed list's lock in the state dir")
+        config.state().mkdir(parents=True, exist_ok=True)
+        with open(config.state() / "rowdone-owed.lock", "w") as lk:
+            common.lock_file(lk)
+            try:
+                doc = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                doc = []
+            doc = [e for e in doc if isinstance(e, dict)] if isinstance(doc, list) else []
+            new = mutate(list(doc))
+            if new != doc:
+                common.write_text_atomic(path, json.dumps(new, indent=1) + "\n")
+            common.unlock_file(lk)
+            return new
+    except (OSError, rootguard.OutsideRoot) as e:
+        common.log("hook-errors", f"rowdone-owed\t{e}")
+        return []
+
+
+def owe(qid: str, sha: str, by: str, repo: Path, lane: str | None, vault_sha: bool,
+        handoff: str | None) -> bool:
+    """Record a mark the vault was too busy to take. One entry per (row, sha, lane) — the lane
+    is part of the key because only the entry's own lane ever applies it: were another lane's
+    entry to stand in for the owner's, the owner would be told "owed" and the row would never flip.
+    No lane, no entry: a session without a lane could not flip the row at a quiet vault either."""
+    if not lane:
+        return False
+
+    def add(doc: list) -> list:
+        if not any(e.get("qid") == qid and same_sha(str(e.get("sha")), sha) and e.get("lane") == lane
+                   for e in doc):
+            doc.append({"qid": qid, "sha": sha, "by": by, "repo": str(repo), "lane": lane,
+                        "vault_sha": bool(vault_sha), "handoff": handoff, "at": time.time()})
+        return doc
+    _owed_update(add)
+    return True
+
+
+def apply_owed(lane: str | None, prefixes: list[str], ps_lines: list[str] | None = None,
+               now: float | None = None) -> list[tuple[int, str]]:
+    """Try this lane's owed marks, without waiting on the suite lock. A flipped row or a final
+    refusal closes its entry; a retryable refusal keeps it until it is `OWED_DAYS` old."""
+    global _WAIT_DEADLINE
+    mine = [e for e in _owed_update(lambda d: d) if lane and e.get("lane") == lane]
+    if not mine:
+        return []
+    before, _WAIT_DEADLINE = _WAIT_DEADLINE, time.monotonic()   # owed marks never wait on the lock
+    try:
+        return _apply_owed(mine, lane, prefixes, ps_lines, time.time() if now is None else now)
+    finally:
+        _WAIT_DEADLINE = before                      # ... and leave the process's own budget as it was
+
+
+def _apply_owed(mine: list, lane: str, prefixes: list[str], ps_lines: list[str] | None,
+                now: float) -> list[tuple[int, str]]:
+    results, closed = [], []
+    for e in mine:
+        qid, sha, repo = str(e.get("qid")), str(e.get("sha")), Path(str(e.get("repo")))
+        cfg = repo_config(repo)
+        if cfg is None:
+            code, line = USAGE, f"q:{qid} — rowdone is off in {repo}"
+        else:
+            code, line = flip(qid, sha, str(e.get("by") or "unknown-session"), repo, lane, prefixes,
+                              queue_files(cfg), ps_lines, vault_sha=bool(e.get("vault_sha")),
+                              handoff=e.get("handoff"))
+        keep = code in RETRY and now - float(e.get("at") or 0) < OWED_DAYS * 86400
+        if not keep:
+            closed.append((qid, sha))
+        results.append((code, ("owed, kept: " if keep else "owed, closed: ") + line))
+        if code == PYTEST:
+            break                                    # the vault is busy for every other entry too
+    if closed:
+        _owed_update(lambda d: [x for x in d if not (
+            x.get("lane") == lane and (str(x.get("qid")), str(x.get("sha"))) in closed)])
+    return results
+
+
 def flip(qid: str, sha: str, by: str, repo: Path, lane: str | None, prefixes: list[str],
          files: list[Path], ps_lines: list[str] | None = None,
-         vault_sha: bool = False) -> tuple[int, str]:
+         vault_sha: bool = False, handoff: str | None = None) -> tuple[int, str]:
     """`vault_sha`: the row was finished by a vault commit, not a code merge (a filing, a doc or
     kernel edit) — `sha` is then verified as a commit IN THE VAULT (`git cat-file -e <sha>^{commit}`)
     instead of as an ancestor of a code repository's main. Everything after the check is the same."""
+    def owed() -> str:
+        ok = owe(qid, sha, by, repo, lane, vault_sha, handoff)
+        return " — owed, applied at the next quiet Stop" if ok else ""
+    if not SHA_OK.match(sha or ""):                  # before anything can be owed: never a sha later
+        return NOT_ON_MAIN, f"REFUSED q:{qid} — {sha!r} is not a sha"
     busy = suite_busy(ps_lines)
     if busy:
-        return PYTEST, f"REFUSED q:{qid} — {busy}; nothing written"
-    if not SHA_OK.match(sha or ""):
-        return NOT_ON_MAIN, f"REFUSED q:{qid} — {sha!r} is not a sha"
+        return PYTEST, f"REFUSED q:{qid} — {busy}; nothing written{owed()}"
     if vault_sha:
         v = _git(config.vault(), "cat-file", "-e", f"{sha}^{{commit}}")
         if v.returncode != 0:
@@ -332,7 +430,8 @@ def flip(qid: str, sha: str, by: str, repo: Path, lane: str | None, prefixes: li
         return FOREIGN, f"REFUSED q:{qid} — {rel} is {owner or 'not this lane'}'s; {tail}"
     st = _git(config.vault(), "status", "--porcelain", "--", rel)
     if st.returncode != 0 or st.stdout.strip():
-        return DIRTY, f"REFUSED q:{qid} — {rel} has uncommitted changes; a path-limited commit would carry them"
+        return DIRTY, (f"REFUSED q:{qid} — {rel} has uncommitted changes; a path-limited commit "
+                       f"would carry them{owed()}")
     before = "\n".join(lines)
     end = i + 1
     while end < len(lines) and lines[end].strip() and lines[end][:1] in (" ", "\t"):
@@ -376,7 +475,8 @@ def apply(sha: str, handoff: Path, repo: Path, lane: str | None, prefixes: list[
     if not rows:
         return [(NO_ROW, f"{Path(handoff).name} names no row with {sha}")]
     files = queue_files(cfg)
-    return [flip(q, sha, s or "unknown-session", repo, lane, prefixes, files, ps_lines) for q, s, _h in rows]
+    return [flip(q, sha, s or "unknown-session", repo, lane, prefixes, files, ps_lines,
+                 handoff=str(handoff)) for q, s, _h in rows]
 
 
 def handoff_candidates(repo: Path, cfg: dict, sid: str | None, extra_roots: list[Path]) -> list[Path]:
@@ -441,6 +541,13 @@ def at_stop(sid: str, cwd: str | None) -> list[tuple[int, str]]:
             for code, line in apply(sha, h, repo, lane, prefixes):
                 results.append((code, line))
                 common.log("rowdone", f"stop\t{code}\t{line}")
+    # ROWDONEQ-1: marks an earlier landing could not write, tried now — unless this session's own
+    # rows were just refused as busy, which answers the question for the owed ones too.
+    if not any(c == PYTEST for c, _l in results):
+        lane, prefixes = context_for(Path(cwd or os.getcwd()), cwd, sid)
+        for code, line in apply_owed(lane, prefixes):
+            results.append((code, line))
+            common.log("rowdone", f"owed\t{code}\t{line}")
     return results
 
 
@@ -534,10 +641,25 @@ def _write_stale(stale: dict) -> None:
         common.log("rowdone", f"stale-open write failed: {e}")
 
 
+def owed_line(lane: str | None) -> list[str]:
+    mine = [e for e in _owed_update(lambda d: d) if e.get("lane") == lane]
+    if not mine:
+        return []
+    shown = ", ".join(f"q:{e.get('qid')} ({e.get('sha')})" for e in mine[:6])
+    return [f"- Row marks owed by {lane}, written while the vault was busy: {len(mine)} — {shown}"
+            + (" …" if len(mine) > 6 else "") + ". They are applied at the next quiet Stop of a "
+            f"{lane} session, or now with `rowdone.py owed`."]
+
+
 def facts_lines(lane: str | None, limit: int = 12) -> list[str]:
-    """SessionStart: the stale-open rows recorded for THIS lane by any lane's Stop scan."""
+    """SessionStart: the stale-open rows recorded for THIS lane by any lane's Stop scan, after
+    the marks this lane still owes (ROWDONEQ-1)."""
     if not lane:
         return []
+    return owed_line(lane) + _stale_lines(lane, limit)
+
+
+def _stale_lines(lane: str, limit: int) -> list[str]:
     try:
         data = __import__("json").loads((config.state() / STALE_FILE).read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -572,7 +694,14 @@ def main(argv: list[str] | None = None) -> int:
         k = argv.index("--vault-sha")
         vault_sha = argv[k + 1] if k + 1 < len(argv) else ""
         del argv[k:k + 2]
-    usage = ("usage: rowdone.py apply <sha> <handoff> [--repo R] · "
+    if argv == ["owed"]:
+        lane, prefixes, _m = common.lane_for(os.getcwd())
+        res = apply_owed(lane, prefixes)
+        for _c, line in res:
+            print(line)
+        print(f"owed entries tried: {len(res)}" + ("" if lane else " (no lane declared here)"))
+        return OK
+    usage = ("usage: rowdone.py apply <sha> <handoff> [--repo R] · rowdone.py owed · "
              "rowdone.py flip <q-id> <sha> --by <session> [--repo R] · "
              "rowdone.py flip <q-id> --vault-sha <sha> --by <session>")
     if vault_sha is not None:

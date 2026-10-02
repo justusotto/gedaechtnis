@@ -30,6 +30,7 @@ they tell the session what they noticed and let the call run.
 | `claude` launch without `--model` / `--effort` (subcommands that start no session pass) | vault or marked project | warns; refuses from `launch_pin_deny_from` (a note elsewhere) | `launch_pin_door: false`; `require_launch_model` / `require_launch_effort: true` refuse at once, anywhere |
 | An API key, token, private key or card number added to any file but a `.env` | vault or marked project | warns; refuses from `secret_deny_from` (a note elsewhere) | `secret_door: false` |
 | A `kill`, `pkill` or `killall` whose target the shell computes (`$( )`, backticks, a variable, `xargs`); `pkill -P`, `pkill -f`, `pgrep -f`; pid 0, 1 or negative | vault or marked project | warns; refuses from `kill_deny_from` (a note elsewhere) | `kill_door: false` |
+| A whole HTML page whose first two lines are not `<!doctype html>` and `<meta charset="utf-8">` | vault or marked project | warns; refuses from `html_head_deny_from` (a note elsewhere) | `html_head_door: false` |
 | Sub-agent call without a `model` | anywhere | off | `require_agent_model: true` turns it on |
 | Merge or push while another session holds the merge window | repositories carrying `.merge-window` | refuses | remove `.merge-window` |
 | Merge or push before a green full test run | repositories with `gedaechtnis/tests`, only with `suite_gate: true` | off | leave `suite_gate` unset; `SUITE_GATE_ALLOW=1` lets one through |
@@ -38,13 +39,21 @@ they tell the session what they noticed and let the call run.
 
 ### Doors written for one working style
 
-These five suit a vault used with work queues, review pages and several
-projects that share one roster. Turn each off with its key, or remove the marker, if you do not work that way.
+These four suit a vault used with work queues, review pages and several projects that share one
+roster. They are off as shipped. One line in `config.json` turns all four on:
 
-| door | where it acts | default | how to turn it off |
+```json
+"profile": "atlas"
+```
+
+Each also has its own key in the `limits` object of `config.json`. A key set there (`true` or
+`false`) wins over the profile, so one door can be on without the others, or off with the profile on.
+
+| door | where it acts | when on | its key |
 |---|---|---|---|
-| `open` of a local copy of a page that keeps its answers in an artifact store | vault or marked project | refuses; a note elsewhere | remove the marker |
-| A whole HTML page whose first two lines are not `<!doctype html>` and `<meta charset="utf-8">` | vault or marked project | warns; refuses from `html_head_deny_from` | `html_head_door: false` |
-| A new Markdown file that asks its reader for a verdict with two or more unmarked choices | vault or marked project | warns; refuses from `judge_md_deny_from` | `judge_md_door: false` |
-| An added queue row whose two `q:` ids name different rows | vault or marked project | warns; refuses from `row_identity_deny_from` | `row_identity_door: false` |
-| An `.atlas-lane` marker whose `path:` lines differ from its roster row | vault or marked project | warns only (the change is two writes; refusing the first would block the second) | `marker_roster_door: false` |
+| `open` of a local copy of a page that keeps its answers in an artifact store | vault or marked project | refuses; a note elsewhere | `artifact_open_door` |
+| A new Markdown file that asks its reader for a verdict with two or more unmarked choices | vault or marked project | warns; refuses from `judge_md_deny_from` | `judge_md_door` |
+| An added queue row whose two `q:` ids name different rows | vault or marked project | warns; refuses from `row_identity_deny_from` | `row_identity_door` |
+| An `.atlas-lane` marker whose `path:` lines differ from its roster row | vault or marked project | warns only (the change is two writes; refusing the first would block the second) | `marker_roster_door` |
+
+A refusal date set for one of these while the door is off does nothing; the session-start facts say so.

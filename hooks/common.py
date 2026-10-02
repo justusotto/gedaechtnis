@@ -783,6 +783,12 @@ def record_cwd(sid: str, cwd: str | None) -> None:
     try:
         doc = json.loads(session_state_path(sid).read_text(encoding="utf-8"))
         if isinstance(doc, dict) and doc.get("cwd_last") == cwd:
+            # The record's AGE is read by the worktree sweep (a pidless record older than a day
+            # stops protecting a worktree), so a session that keeps working in ONE directory must
+            # keep its record young: touched at most once an hour, still no locked write.
+            p = session_state_path(sid)
+            if time.time() - os.path.getmtime(p) > 3600:
+                os.utime(p)
             return
     except (OSError, ValueError):
         pass
@@ -827,13 +833,16 @@ def handoff_paths(sid: str) -> list[str]:
     return [x for x in got if isinstance(x, str)] if isinstance(got, list) else []
 
 
-def session_locations() -> list[tuple[str, int | None, bool]]:
+def session_locations(stale_no_pid: float | None = None) -> list[tuple[str, int | None, bool]]:
     """(directory, pid, pid_field_present) for every place every session is or was working.
 
     All of `cwd_seen`, plus `cwd_last` and the SessionStart `cwd`, are yielded per record. A
     session is "in" the place it started AND every recent place it has worked, and for a decision
     about deleting a directory all of them count — see `record_cwd` on why the latest one alone is
-    not enough when a subagent and its parent share a session id."""
+    not enough when a subagent and its parent share a session id.
+
+    `stale_no_pid` (seconds): a record with no `pid` field whose file is older than this is left
+    out. Such a record can never be shown dead; without an age it would count for ever."""
     import glob
     out, seen_pairs = [], set()
     for f in glob.glob(str(config.state() / "session-start-*.json")):
@@ -844,6 +853,12 @@ def session_locations() -> list[tuple[str, int | None, bool]]:
         if not isinstance(d, dict):
             continue
         pid, has_pid = d.get("pid"), "pid" in d
+        if stale_no_pid is not None and not has_pid:
+            try:
+                if time.time() - os.path.getmtime(f) > stale_no_pid:
+                    continue
+            except OSError:
+                pass
         places = list(d.get("cwd_seen") or []) + [d.get("cwd_last"), d.get("cwd")]
         for place in places:
             if not place or not isinstance(place, str):
@@ -854,6 +869,21 @@ def session_locations() -> list[tuple[str, int | None, bool]]:
             seen_pairs.add(key)
             out.append(key)
     return out
+
+
+def porcelain_z(out: str) -> list[tuple[str, str]]:
+    """[(XY, path)] from `git status --porcelain -z`: the real path, never git's quoted spelling
+    (a line-based read sees `"caf\\303\\251.txt"` and stats a file that does not exist). A rename or
+    copy entry is followed by its ORIGINAL path as a field of its own; that field is skipped."""
+    fields, rows, i = (out or "").split("\0"), [], 0
+    while i < len(fields):
+        f = fields[i]
+        i += 1
+        if len(f) > 3:
+            rows.append((f[:2], f[3:]))
+            if "R" in f[:2] or "C" in f[:2]:
+                i += 1
+    return rows
 
 
 def touched_paths(sid: str) -> list[str]:

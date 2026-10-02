@@ -399,6 +399,115 @@ def checklist(root: Path) -> list[tuple[str, bool, str]] | None:
     return out
 
 
+# ------------------------------------------------ the public pages' wording (PUBLICTONE-1) ---------
+# README.md and docs/*.md are read by strangers, in the author's name. A sentence there that claims
+# more than was measured ("impossible", "sends nothing", a superlative) is a finding like a leaked
+# path is: the tree is not publishable until it is reworded. `rules/public-tone.json` holds the
+# three lists, so a phrase is added without a code change:
+#   refused   a phrase that may not appear at all (whole words, any case)
+#   needs     a phrase that may appear only in a sentence that also carries its qualifier
+#   counted   a word with a per-file ceiling: the count on the day the rule was written. A page may
+#             use it less, never more; lowering a ceiling after a rewording is an edit to the file.
+# Run only when the root is a plugin that carries the file. A page on the tree's leave-out list
+# (`rules/publish-exclude.json`) is not a public page and is not read.
+TONE_FILE = "rules/public-tone.json"
+_SENTENCE_END = re.compile(r"(?<=[.!?])\s+|\n\s*\n")
+
+
+def public_pages(root: Path) -> list[Path]:
+    import json
+    skip: set = set()
+    try:
+        skip = set(json.loads((root / "rules" / "publish-exclude.json").read_text(encoding="utf-8"))["exclude"])
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    pages = [root / "README.md"] + sorted((root / "docs").glob("*.md"))
+    return [p for p in pages if p.is_file() and p.relative_to(root).as_posix() not in skip]
+
+
+def _word_rx(phrase: str):
+    """The phrase as whole words: spaces (a no-break space too) or one line break between
+    its words, and no letter, digit, `_` or `-` on either side, so `best-effort`, `best_match` and
+    a config key ending in a listed word are not findings."""
+    words = [re.escape(w) for w in phrase.split()]
+    # The gap is spaces with at most ONE line break: a heading and the paragraph under it are not a phrase.
+    gap = r"(?:[^\S\n]+|[^\S\n]*\n[^\S\n]*)"
+    return re.compile(r"(?<![A-Za-z0-9_-])" + gap.join(words) + r"(?![A-Za-z0-9_-])", re.I)
+
+
+_EDGE_UNDERSCORE = re.compile(r"(?<![A-Za-z0-9])_+|_+(?![A-Za-z0-9])")
+
+
+def _plain(text: str) -> str:
+    """The page without Markdown emphasis and code marks (`*`, backtick, and `_` at the edge of a
+    word; a `_` inside an identifier stays), which would otherwise split or hide a phrase. No line
+    break is removed, so line numbers stay those of the file."""
+    return _EDGE_UNDERSCORE.sub("", text.replace("*", "").replace("`", ""))
+
+
+def _tone_lists(doc) -> tuple[list, dict, dict] | None:
+    """(refused, needs, counted) when the file has the shape `tone()` reads, else None."""
+    if not isinstance(doc, dict):
+        return None
+    refused, needs, counted = doc.get("refused"), doc.get("needs"), doc.get("counted")
+    if not isinstance(refused, list) or not all(isinstance(x, str) and x.strip() for x in refused):
+        return None
+    if not isinstance(needs, dict) or not all(isinstance(k, str) and k.strip() and isinstance(v, str) and v.strip()
+                                              for k, v in needs.items()):
+        return None
+    if not isinstance(counted, dict):
+        return None
+    for word, ceilings in counted.items():
+        if not isinstance(word, str) or not word.strip() or not isinstance(ceilings, dict):
+            return None
+        if not all(isinstance(n, int) and not isinstance(n, bool) and n >= 0 for n in ceilings.values()):
+            return None
+    return refused, needs, counted
+
+
+def tone(root: Path) -> tuple[list[tuple[str, int, str, str]], str | None] | None:
+    """([(page, line, phrase, why)], error) for a plugin root carrying the tone file, else None."""
+    import json
+    f = root / TONE_FILE
+    if not (root / ".claude-plugin" / "plugin.json").is_file() or not f.is_file():
+        return None
+    try:
+        lists = _tone_lists(json.loads(f.read_text(encoding="utf-8")))
+    except (OSError, ValueError) as e:
+        return [], f"{TONE_FILE} could not be read ({type(e).__name__})"
+    if lists is None:
+        return [], (f"{TONE_FILE} could not be read (it needs `refused`: a list of phrases, `needs`: "
+                    "phrase to qualifier, `counted`: word to a page-to-ceiling object of whole numbers)")
+    refused, needs, counted = lists
+    out: list[tuple[str, int, str, str]] = []
+
+    def line_of(text: str, offset: int) -> int:
+        return text.count("\n", 0, offset) + 1
+
+    for page in public_pages(root):
+        rel = page.relative_to(root).as_posix()
+        text = _plain(page.read_text(encoding="utf-8", errors="replace"))
+        for phrase in refused:
+            out += [(rel, line_of(text, m.start()), phrase, "an absolute claim or a superlative: say what was measured")
+                    for m in _word_rx(phrase).finditer(text)]
+        for phrase, qualifier in needs.items():
+            rx, qual, pos = _word_rx(phrase), _word_rx(qualifier), 0
+            for sentence in _SENTENCE_END.split(text):
+                start = text.find(sentence, pos)
+                pos = start + len(sentence) if start >= 0 else pos
+                m = rx.search(sentence)
+                if m and not qual.search(sentence):
+                    out.append((rel, line_of(text, max(start, 0) + m.start()), phrase,
+                                f"only in a sentence that also says `{qualifier}`"))
+        for word, ceilings in counted.items():
+            at = [line_of(text, m.start()) for m in _word_rx(word).finditer(text)]
+            allowed = ceilings.get(rel, 0)
+            if len(at) > allowed:
+                out.append((rel, at[-1], word, f"{len(at)} on this page, the ceiling is {allowed}: "
+                            f"reword the new sentence (lines {', '.join(map(str, at))})"))
+    return out, None
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Refuse to publish a tree that carries a person with it.")
     ap.add_argument("--root", default=str(Path(__file__).resolve().parents[1]),
@@ -435,6 +544,19 @@ def main() -> int:
         for text, ok, why in cl:
             print(f"checklist: {'PASS' if ok else 'FAIL'}  {text} — {why}")
             cl_failed = cl_failed or not ok
+    tn = tone(root)
+    tone_failed = False
+    if tn is None:
+        print(f"wording: skipped — no {TONE_FILE} at this root")
+    else:
+        tone_hits, tone_err = tn
+        tone_failed = bool(tone_hits or tone_err)
+        if tone_err:
+            print(f"wording: FAIL  {tone_err} — an unreadable list is not a clean page")
+        for page, n, phrase, why in tone_hits:
+            print(f"wording: FAIL  {page}:{n}: `{phrase}` — {why}")
+        if not tone_failed:
+            print(f"wording: PASS  README.md and docs/ carry no refused phrase ({len(public_pages(root))} page(s))")
     hits, walked = scan(root)
     for name in gi:
         hits.append((root / name, 0, "gitignore-tracked", redact(name)))
@@ -451,7 +573,7 @@ def main() -> int:
     # report said nothing was wrong with any of them.
     skipped = [] if (root / ".git").exists() else ["foreign tags", "tracked-but-ignored",
                                                   "commit messages and ref names"]
-    if not hits and not bad and not err and not gi_err and not hist and not hist_err and not cl_failed:
+    if not hits and not bad and not err and not gi_err and not hist and not hist_err and not cl_failed and not tone_failed:
         note = ""
         if skipped:
             note = (f"; NOT CHECKED (not a git root): {', '.join(skipped)} — run this against the "
@@ -460,6 +582,8 @@ def main() -> int:
               f"Historical blobs and the contents of past versions of files are never scanned "
               f"by this tool.")
         return 0
+    if tone_failed:
+        print(f"publish check: a wording line FAILED under {root} (above) — this tree is not publishable")
     if cl_failed:
         print(f"publish check: a checklist line FAILED under {root} (above) — this tree is not publishable")
     if hits:

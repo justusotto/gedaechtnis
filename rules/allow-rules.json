@@ -1,0 +1,19 @@
+{
+ "_": "PERMDESIGN-1. The ONE source of the narrow Bash allow and deny rules `tools/apply-allow-rules.sh` merges into each repository's Claude Code settings. `{path}` becomes the plugin's installed path (absolute, `~/`, and the skills link), never a path relative to the session's working tree, which the session can edit. `target` is relative to the plugin, or to the repository itself with `\"base\": \"repo\"`; a rule whose target does not exist there is not written. Narrow rules only: auto mode drops a broad interpreter rule such as `Bash(python*)`, and keeps a rule that names one script and one subcommand.",
+ "allow": [
+  {"target": "hooks/mergesha.py", "rule": "Bash(python3 {path} ff:*)",
+   "why": "land a branch: main read and fast-forwarded in one command, refused when main moved"},
+  {"target": "tools/configure.py", "rule": "Bash(python3 {path} set:*)", "why": "change a live limit (owner keys still need --owner, which is denied)"},
+  {"target": "tools/configure.py", "rule": "Bash(python3 {path} unset:*)", "why": "reset a live limit"},
+  {"target": "tools/configure.py", "rule": "Bash(python3 {path} get:*)", "why": "read a limit"},
+  {"target": "tools/configure.py", "rule": "Bash(python3 {path} show)", "why": "list the limits"},
+  {"target": "tools/sessions.py", "rule": "Bash(python3 {path} close)", "why": "the safe close: ledger, screen, host and attended checks decide"},
+  {"target": "tools/sessions.py", "rule": "Bash(python3 {path} close --dry-run)", "why": "what the close would do"},
+  {"target": "tools/sessions.py", "rule": "Bash(python3 {path} close --when-needed)", "why": "close finished sessions while memory is over the line"},
+  {"target": "tools/sessions.py", "rule": "Bash(python3 {path} close --all-finished)", "why": "close every finished session; never `close:*`, which would allow `--replay --out <any file>`"},
+  {"target": "tools/run_reviewed.sh", "rule": "Bash(bash {path}:*)", "why": "run a script whose exact bytes are in the reviewed ledger; anything else is refused"}
+ ],
+ "deny": [
+  {"target": "tools/configure.py", "rule": "Bash(python3 {path} *--owner*)", "why": "the owner's switches are set from the owner's own terminal"}
+ ]
+}

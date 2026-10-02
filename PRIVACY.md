@@ -16,7 +16,9 @@ analytics and no update check. It sends nothing anywhere and fetches nothing fro
   `suite_gate: true`, `.git/gedaechtnis/suite-runs.jsonl` records which test runs passed.
 - **Build copies.** When Claude Code asks for an isolated worktree, the plugin makes a copy of the
   project in `~/.claude/worktrees/`. It removes the copy when the worktree is removed, after
-  fetching its commits back; a copy holding uncommitted work goes to the Trash instead.
+  fetching its commits back; a copy holding uncommitted work goes to the Trash instead. With
+  `worktree_sweep_apply` on, a finished copy is moved to `~/Downloads/To delete <date>/`, with a
+  ledger file and a short README there.
 - **Two lines in each project you set up.** An `.atlas-lane` file that names the project's memory
   folder, and an import line in the project's `CLAUDE.md`.
 - **Optional.** If you ask for the plugin-outage check (`init.py --install-outage-check`), one entry

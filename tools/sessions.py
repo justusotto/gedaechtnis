@@ -2,10 +2,10 @@
 """sessions.py — launch a Claude session detached, see every session on one page, close the finished.
 
     python3 tools/sessions.py launch --name NAME --cwd DIR [--row Q-ID] [--worktree DIR]
-                                     [--handoff GLOB] LAUNCHER.sh
+                                     [--handoff GLOB] [--owner-go "HIS WORDS"] LAUNCHER.sh
     python3 tools/sessions.py ls
     python3 tools/sessions.py projects [--ids FILE | --ids-text 'cse_… cse_…']
-    python3 tools/sessions.py close [--apply]
+    python3 tools/sessions.py close [--dry-run] [--when-needed | --all-finished]
     python3 tools/sessions.py close --replay DAYS [--out FILE.md]
 
 THE LAUNCH RULE (TERMOVERLOAD-1). One session = one detached `screen` (or `tmux`) session, never a
@@ -17,9 +17,16 @@ duplicates. The launcher is a script whose last line is `exec claude …`; `laun
 so the pid written to PIDFILE IS the claude process (both `exec`s keep it) — the pid a later close
 kills is the one captured here, never one found by searching the process table. Before launching,
 under one lock, it REFUSES a second live session for the same row, worktree or name, and a launch
-over `session_cap` WORKING claude sessions (idle ones do not count — SESSCLOSE-2), over the
-launching seat's `session_cap_per_seat`, or over `session_swap_cap_share` of memory (swap, or memory
-pressure when the machine has no swap); each refusal prints its reason and exits non-zero.
+over `session_cap` WORKING claude sessions (idle ones do not count — SESSCLOSE-2), or over the
+launching seat's `session_cap_per_seat`; each refusal prints its reason and exits non-zero.
+
+THE MEMORY TEST (LAUNCHGATE-1) is the kernel's own pressure reading, never a share of swap: a launch
+passes when `kern.memorystatus_vm_pressure_level` is 1 (normal) AND `kern.memorystatus_level` (the
+percentage of memory free) is at least `session_launch_memory_floor`; warn (2) and critical (4)
+refuse, with the numbers and what would make it pass. Swap in use is not a reason: macOS leaves
+stale pages swapped after the pressure has ended. `--owner-go "<the owner's words>"` launches past
+the memory test only — never past the duplicate check or a cap — and writes who, when, the words
+and the readings to `owner-go.log` in the state directory.
 
 `ls` is the read-only page: per session its state (PROMPT / WORKING / IDLE / BLIND), context,
 handoff, parked messages, and the line to type to answer it — `screen -r NAME` (detach again with
@@ -37,14 +44,36 @@ UNCONFIRMED. The thread list is what a Project session's `list_thread_sessions` 
 pasted as text; every `cse_…` in it counts. Read-only; the name is never used to decide.
 
 `close` runs the close sweep once — over the launch ledger AND every other live interactive
-session the CLI has a record of. Without `--apply`, or while `session_close_apply` is off for this
-install, it only proposes. The flag lives in the vault's config, not here: a command-line switch
-cannot turn on what the owner has not. Each proposal prints the line that reopens the session.
+session the CLI has a record of — and closes the finished ones while `session_close_apply` is on
+(shipped on since HANDLINES-1). `--dry-run` prints exactly what would close and why, and for every
+finished session it would NOT close, the safety fact that refuses it. A close needs every one of:
+the ledger row this tool wrote (pid AND start time, still matching the live process) — or, for a
+session started by hand (CLOSETUNE-2), its registry record `~/.claude/sessions/<pid>.json` naming
+that pid with a `procStart` within 1 s of the live start, entrypoint `cli` (never Desktop), inside a
+screen window, and never one the owner typed into after its first prompt — a claude
+process whose parent chain reaches the launcher's screen/tmux session through shells only, not a
+Remote Control host, not attended (`CLAUDE_CODE_SESSION_ATTENDED`), no name on
+`session_close_never`. The close quits that screen/tmux session — no signal to a pid, never
+`kill -9` — and is written to `close.log` with who closed it and the line that reopens it.
 
-`close --replay DAYS` is the pilot (SESSCLOSE-2): it runs the transcript rules over the last DAYS of
-real transcripts and prints, per session, when the rules would first have closed it and whether it
-was messaged, resumed or wrote anything AFTER that moment — each such row is a would-be WRONG
-close. It reads transcripts only and exits 1 when any row is wrong.
+FINISHED is a fact about time (CLOSETUNE-1, `fleet.classify`): the last turn ended and is
+`session_close_idle_minutes` old (or its handoff says done/landed/stopped with no turn since its
+commit, or it reported to its seat 30 minutes ago); its last words are printed, never obeyed.
+What cannot be told (git, its screen, an old background task) keeps it only up to 4 × that age.
+`close --when-needed` is what the Remote Control hosts' 5-minute login item runs: while the machine
+is over its memory line (swap in use ≥ `session_close_swap_used_mb` MB, or the memory-pressure level
+< `session_close_memory_floor`) it closes the oldest finished sessions one by one, re-reading both
+figures after each, and stops as soon as the machine is under; under the line it reads the two
+figures and nothing else. `close --all-finished` closes every finished one, oldest first.
+
+`close --replay DAYS` is the pilot (SESSCLOSE-2; the live rule since CLOSETUNE-2 of 2026-10-02): it
+runs the close rule's transcript half over the last DAYS of real transcripts and prints, per
+session, when the rule would first have closed it and what came AFTER that moment. A turn the
+session then did on its own is a WRONG close; a message or a resume by someone else is a reopen.
+It closes nothing; it reads transcripts, the launch ledger (for each session's seat) and, per
+handoff a session wrote, one `git log`. It exits 1 when any row is wrong. It runs twice: the table
+keeps the doubt about an old unreported task (as the live rule does when it cannot read the process
+table); one sentence states the bound with that doubt dropped, which the exit code ignores.
 """
 from __future__ import annotations
 import argparse, os, re, shlex, subprocess, sys, time
@@ -101,15 +130,35 @@ def cmd_launch(a) -> int:
         count = len(procs_now) if procs_now is not None else None
         busy = fleet.working_count(procs_now)
         seat = a.seat or fleet.launching_seat()
-        share, source = fleet.memory_share()
-        over = (fleet.over_cap(busy, fleet.cap()) or fleet.over_seat(seat, fleet.ledger(), fleet.seat_cap())
-                or fleet.over_swap(share, fleet.swap_cap(), source))
-        if over:
+        over = fleet.over_cap(busy, fleet.cap()) or fleet.over_seat(seat, fleet.ledger(), fleet.seat_cap())
+        readings = fleet.launch_readings()
+        floor = fleet.launch_level_floor()
+        swap_floor = fleet.launch_swap_free_floor_mb()
+        mem, note = fleet.launch_memory(readings, floor, swap_floor)
+        go = fleet.owner_go_words(a.owner_go)
+        if a.owner_go is not None and not go:
+            print("refused: --owner-go needs the owner's words, with at least one letter or digit; "
+                  "an empty go is not a go.")
+            return 2
+        if over or (mem and not go):
             idle = [i["name"] for i in fleet.sweep(apply=False, rows=fleet.current_launches())
                     if not i["keep"]]
-            print(f"refused (cap): {over}."
-                  + (f" Finished and closeable: {', '.join(idle)}." if idle else ""))
+            print((f"refused (cap): {over}." if over else f"refused (memory): {mem}.")
+                  + (f" Finished and closeable: {', '.join(idle)}." if idle else "")
+                  + ("" if over else " " + fleet.launch_memory_help(readings, floor, swap_floor))
+                  + (" --owner-go passes the memory test only, never a cap." if over and go else ""))
             return 3
+        if mem:
+            if not fleet.owner_go_log(name, go, mem, readings, fleet.closer()):
+                print(f"refused (memory): {mem}. --owner-go was given, but owner-go.log could not "
+                      f"be written, and a go that leaves no record does not apply.")
+                return 3
+            print(f"owner-go: launching past the memory test ({mem}). Logged to "
+                  f"{config.state() / 'owner-go.log'} with the words given"
+                  + (f" (the first {fleet.OWNER_GO_CHARS} characters)"
+                     if len(go) > fleet.OWNER_GO_CHARS else "") + ".")
+        elif note:
+            print(f"note: {note}.")
         pidfile = config.state() / f"launch-{common.safe_sid(name)}.pid"
         try:
             pidfile.unlink()
@@ -187,7 +236,8 @@ def cmd_ls(_a) -> int:
                 f"context {ctx:,}" if ctx else "context unknown",
                 "handoff yes" if f["handoff"] else "handoff no"]
         if ctx and unreach and ctx >= unreach:
-            bits.append(f"UNREACHABLE (context ≥ {unreach:,})")
+            bits.append(f"UNREACHABLE once cold (context ≥ {unreach:,}; while warm it still "
+                        f"receives messages below resume_window {window:,})")
         n = len(fleet.parked(r["name"]))
         if n:
             bits.append(f"{n} parked message(s)")
@@ -287,8 +337,10 @@ def cmd_replay(a) -> int:
     idle = fleet.idle_minutes()
     files = closerules.transcripts(Path(os.environ.get("CLAUDE_PROJECTS_DIR")
                                         or Path.home() / ".claude" / "projects"), since)
-    rows = closerules.replay(files, now, since, idle)
-    text = replay_table(rows, now, since, idle, len(files), closerules.reuse_gaps(files, since))
+    facts = replay_facts()
+    rows = closerules.replay(files, now, since, idle, facts_fn=facts)
+    bound = closerules.replay(files, now, since, idle, facts_fn=facts, nothing_runs=True)
+    text = replay_table(rows, now, since, idle, len(files), closerules.reuse_gaps(files, since), bound)
     print(text)
     if a.out:
         Path(a.out).parent.mkdir(parents=True, exist_ok=True)
@@ -296,25 +348,58 @@ def cmd_replay(a) -> int:
     return 1 if any(r["wrong"] for r in rows) else 0
 
 
-def replay_table(rows, now, since, idle, nfiles, gaps=()) -> str:
+def replay_facts():
+    """What the replay needs beside a transcript: the seat the launch ledger recorded for that name,
+    and the commit time of a done/landed/stopped handoff the session wrote (one git read per file)."""
+    seats = {r.get("name"): r.get("seat") for r in fleet.ledger()}
+    seen: dict[tuple, float | None] = {}
+
+    def facts(sc: dict, end: dict):
+        hs = tuple(fleet.own_handoffs(end))
+        if hs and hs not in seen:
+            seen[hs] = fleet.handoff_done(None, sc.get("cwd"), hs)
+        return seen.get(hs), seats.get(sc.get("name"))
+    return facts
+
+
+def _bound_line(bound) -> str:
+    """The second run, with every old-task doubt dropped: what the live process read has to cover."""
+    closed = [r for r in bound if r["closed_at"]]
+    wrong = [r["name"] for r in closed if r["wrong"]]
+    return ("An old background task that never reported keeps a session here for 12 h, as it does "
+            "live when the process table cannot be read. The live pass reads it: with the registry "
+            "idle and no process of its own, such a task does not keep. Replayed as if NOTHING ran "
+            f"in any of them, the rule closes {len(closed)} and {len(wrong)} of those did another "
+            "turn on their own" + (f" ({', '.join(wrong)})" if wrong else "") + " — those are the "
+            "sessions the live read of their processes must keep, and the dry run shows whether it does.")
+
+
+def replay_table(rows, now, since, idle, nfiles, gaps=(), bound=None) -> str:
     closed = [r for r in rows if r["closed_at"]]
     wrong = [r for r in closed if r["wrong"]]
+    reused = [r for r in closed if r.get("reused")]
     ft = closerules.fmt_time
     out = [f"# Close-rule replay — {time.strftime('%Y-%m-%d %H:%M', time.localtime(now))}", "",
            f"Window {ft(since)} → {ft(now)} · {nfiles} transcripts · {len(rows)} sessions (grouped by "
            f"name; a resume under the same name counts as the same session) · idle threshold "
            f"{idle:g} min.", "",
-           f"**Would have closed: {len(closed)}. Would-be WRONG closes (messaged, resumed or wrote "
-           f"after the close moment): {len(wrong)}.**", "",
-           "Not replayed — live-only facts that can only KEEP a session, so leaving them out can only "
-           "ADD closes and the wrong count is an upper bound: the screen read (a prompt, an attached "
-           "screen), unsaved work, the process being alive, the registry status, a terminal window, "
-           "the exempt list. Also not replayed, in the other direction: a handoff file named by the "
-           "launch ledger (a handoff the session wrote with its own Write/Edit IS replayed).", "",
+           f"**Would have closed: {len(closed)}. WRONG closes (the session did another turn on its "
+           f"own after the close moment): {len(wrong)}. Messaged or resumed by someone after it "
+           f"(reopened with the `claude -r` line the close log prints): {len(reused)}.**", "",
+           "The rule replayed is the live one (`closerules.finished`): the last turn ended and is "
+           f"{idle:g} min old, or its own handoff says done/landed/stopped and was committed in "
+           "that turn, or it reported to its seat; either one and 30 min of quiet. Not replayed — "
+           "live-only facts that can only KEEP a session, so leaving them out can only ADD "
+           "closes: the screen read (a prompt, an attached screen), unsaved work, a live process "
+           "of its own, the registry status, a terminal window, the never list. One thing is read "
+           "as it is TODAY, not as it was: a handoff's State line and its last commit.", "",
+           *([] if bound is None else [_bound_line(bound), ""]),
            "## Would have closed", "",
            "| session | closed at | then | its last words (tail) |", "|---|---|---|---|"]
     for r in sorted(closed, key=lambda r: r["closed_at"]):
-        then = f"**WRONG** — {r['after_kind']} at {ft(r['after'])}" if r["wrong"] else "nothing after"
+        then = (f"**WRONG** — {r['after_kind']} at {ft(r['after'])}" if r["wrong"] else
+                f"reopened — {r['after_kind']} at {ft(r['after'])}" if r.get("reused") else
+                "nothing after")
         words = r["end_text"].replace("|", "/").replace("\n", " ")[-110:]
         out.append(f"| {r['name']} | {ft(r['closed_at'])} | {then} | {words} |")
     out += ["", f"## Finished turns that were used again later (the margin the {idle:g}-minute "
@@ -334,23 +419,59 @@ def replay_table(rows, now, since, idle, nfiles, gaps=()) -> str:
     return "\n".join(out)
 
 
+def _print_items(items, idle) -> None:
+    for i in items:
+        extra = "".join(f"\n    note: {n}" for n in i.get("notes") or [])
+        if i["closed"]:
+            print(f"closed  {i['name']} (pid {i['pid']}) — reopen with: {i['resume']}{extra}")
+        elif i["keep"]:
+            print(f"keep  {i['name']}: " + "; ".join(i["keep"]))
+        elif i.get("refused"):
+            print(f"refuse  {i['name']} (pid {i['pid']}): finished, but " + "; ".join(i["refused"]))
+        else:
+            unc = f"   # {i['uncommitted']}" if i.get("uncommitted") else ""
+            how = (i.get("admission") or fleet.REGISTRY_ADMITTED if i.get("outside") else
+                   f"launched by this tool, same pid and start time, inside its own "
+                   f"{i['attach'].split()[0]} session")
+            print(f"would close  {i['name']} (pid {i['pid']}): finished; {how}, not "
+                  f"attended, not on session_close_never — reopen with: {i['resume']}{unc}{extra}")
+
+
 def cmd_close(a) -> int:
     if a.replay is not None:
         return cmd_replay(a)
     on = fleet.applies()
-    apply = bool(a.apply) and on
-    if a.apply and not on:
+    apply = on and not a.dry_run
+    by = f"sessions.py close by {fleet.closer()}"
+    if a.when_needed or a.all_finished:
+        res = fleet.close_when_needed(apply=apply, by=by, all_finished=a.all_finished)
+        head = "all finished" if a.all_finished else "when needed"
+        if res["stopped"] == "under the line":
+            print(f"under the line ({fleet.figures(res['before'])}; line: swap < "
+                  f"{res['target']:.0f} MB and memory level ≥ {res['floor']:g}): nothing to do.")
+            return 0
+        if not res["candidates"] and res["over"] is None and not a.all_finished:
+            print(f"{head}: {res['stopped']}.")
+            return 0
+        print(f"{head}: before {fleet.figures(res['before'])}"
+              + (f" — over the line: {', '.join(res['over'])}" if res["over"] else ""))
+        if a.dry_run:
+            print("dry run: nothing is closed.")
+        elif not on:
+            print("session_close_apply is off for this install: proposing only.")
+        _print_items(res.get("items") or [], fleet.idle_minutes())
+        if res["candidates"] and not res["closed"]:
+            print("oldest first: " + ", ".join(i["name"] for i in res["candidates"]))
+        print(f"{head}: closed {len(res['closed'])}"
+              + (f" ({', '.join(i['name'] for i in res['closed'])})" if res["closed"] else "")
+              + f"; after {fleet.figures(res['after'])}; {res['stopped']}.")
+        return 0
+    if a.dry_run:
+        print("dry run: nothing is closed.")
+    elif not on:
         print("session_close_apply is off for this install: proposing only.")
-    items = fleet.sweep(apply=apply)
-    for i in items:
-        if i["closed"]:
-            print(f"closed  {i['name']} (pid {i['pid']})")
-        elif not i["keep"]:
-            print(f"would close  {i['name']} (pid {i['pid']})"
-                  + (" [not launched by this tool]" if i.get("outside") else "")
-                  + f" — reopen with: {i['resume']}")
-        else:
-            print(f"keep  {i['name']}: " + "; ".join(i["keep"]))
+    items = fleet.sweep(apply=apply, by=by)
+    _print_items(items, fleet.idle_minutes())
     fleet.record_proposals(items)
     return 0
 
@@ -366,6 +487,9 @@ def main(argv=None) -> int:
     la.add_argument("--handoff", help="glob of the handoff file this session will write")
     la.add_argument("--seat", help="the orchestrator this session counts against "
                                    "(default: the launching session's name)")
+    la.add_argument("--owner-go", metavar="WORDS",
+                    help="the owner's own words giving the go: launch past the MEMORY test only "
+                         "(never the duplicate check or a cap); logged to owner-go.log")
     la.add_argument("launcher")
     sub.add_parser("ls")
     pj = sub.add_parser("projects")
@@ -373,7 +497,17 @@ def main(argv=None) -> int:
                                   "cse_… in it counts)")
     pj.add_argument("--ids-text", help="the same, given inline")
     cl = sub.add_parser("close")
-    cl.add_argument("--apply", action="store_true")
+    cl.add_argument("--dry-run", action="store_true",
+                    help="print what would close and why each, and close nothing")
+    cl.add_argument("--apply", action="store_true",
+                    help="(kept for old command lines) `close` applies whenever session_close_apply is on")
+    cl.add_argument("--when-needed", action="store_true",
+                    help="only while the machine is over its memory line (session_close_swap_used_mb, "
+                         "session_close_memory_floor): close the oldest finished sessions until it is "
+                         "under; under the line it reads two figures and does nothing else")
+    cl.add_argument("--all-finished", action="store_true",
+                    help="close every finished session this tool launched, oldest first, whatever "
+                         "the memory line (the seat's manual sweep)")
     cl.add_argument("--replay", type=float, metavar="DAYS",
                     help="replay the close rules over the last DAYS of transcripts (the pilot)")
     cl.add_argument("--out", help="with --replay: also write the table to this file")

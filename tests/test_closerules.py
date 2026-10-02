@@ -205,9 +205,156 @@ def test_replay_flags_a_session_used_after_its_close_moment(tmp_path):
     write_t(root / "c.jsonl", title("q-1"), human(T0), say(T0 + 10, "Merged. Should I push?"))
     files = cr.transcripts(tmp_path / "projects", 0)
     rows = {r["name"]: r for r in cr.replay(files, T0 + 10**6, T0 - 1, 180)}
-    assert rows["w-1"]["wrong"] and rows["w-1"]["after_kind"] == "a message from another session"
+    # CLOSETUNE-2 (2026-10-02): the replay runs the LIVE rule. A message from someone else after
+    # the close is a reopen (`reused`), not a wrong close; last words are printed, not obeyed.
+    assert rows["w-1"]["reused"] and not rows["w-1"]["wrong"]
+    assert rows["w-1"]["after_kind"] == "a message from another session"
     assert rows["r-1"]["closed_at"] == T0 + 61 * 60 + 180 * 60 and not rows["r-1"]["wrong"]
-    assert rows["q-1"]["closed_at"] is None and "not-waiting" in rows["q-1"]["reason"]
+    assert rows["q-1"]["closed_at"] == T0 + 10 + 180 * 60 and not rows["q-1"]["reused"]
+
+
+def task_note(t, tid="bg1", status="completed"):
+    return rec("user", t, f"<task-notification>\n<task-id>{tid}</task-id>\n<status>{status}</status>"
+                          f"\n</task-notification>", origin={"kind": "task-notification"})
+
+
+def test_replay_calls_a_turn_the_session_did_on_its_own_a_wrong_close(tmp_path):
+    """Positive: a task of its own reports after the close moment. Negative: a peer's message."""
+    root = tmp_path / "projects" / "-p"
+    root.mkdir(parents=True)
+    write_t(root / "a.jsonl", title("own-1"), human(T0), say(T0 + 10, "Done."),
+            task_note(T0 + 10 + 200 * 60), say(T0 + 10 + 201 * 60, "The suite is green."))
+    write_t(root / "b.jsonl", title("msg-1"), human(T0), say(T0 + 10, "Done."),
+            peer(T0 + 10 + 200 * 60, "one more thing"))
+    rows = {r["name"]: r for r in cr.replay(cr.transcripts(tmp_path / "projects", 0),
+                                            T0 + 10**6, T0 - 1, 180)}
+    assert rows["own-1"]["wrong"] and rows["own-1"]["after_kind"] == "a background task reported"
+    assert rows["msg-1"]["reused"] and not rows["msg-1"]["wrong"]
+
+
+def queued(t, content, **kw):
+    return json.dumps({"type": "queue-operation", "operation": "enqueue", "timestamp": iso_ts(t),
+                       "content": content, **kw})
+
+
+NOTE = "<task-notification>\n<task-id>bg1</task-id>\n<status>completed</status>\n</task-notification>"
+LATER = T0 + 10 + 200 * 60
+
+
+@pytest.mark.parametrize("after, kind", [
+    # the shape an idle session's own task arrives in first: a queued notification
+    (queued(LATER, NOTE), "a background task reported"),
+    (queued(LATER, "report", origin={"kind": "task-notification"}), "a background task reported"),
+    (say(LATER, "The suite is green."), "it wrote a reply"),
+    # a record the replay does not know is never read as somebody else's act
+    (rec("user", LATER, "hook says", isMeta=True), "a system/meta message"),
+])
+def test_replay_counts_everything_but_someone_elses_act_as_a_wrong_close(tmp_path, after, kind):
+    root = tmp_path / "projects" / "-p"
+    root.mkdir(parents=True)
+    write_t(root / "a.jsonl", title("s-1"), human(T0), say(T0 + 10, "Done."), after)
+    (row,) = cr.replay(cr.transcripts(tmp_path / "projects", 0), T0 + 10**6, T0 - 1, 180)
+    assert row["wrong"] and not row["reused"] and row["after_kind"] == kind, row
+
+
+@pytest.mark.parametrize("after", [human(LATER, "one more"), peer(LATER), queued(LATER, "typed while busy")])
+def test_negative_someone_elses_act_after_a_close_is_a_reopen(tmp_path, after):
+    root = tmp_path / "projects" / "-p"
+    root.mkdir(parents=True)
+    write_t(root / "a.jsonl", title("s-1"), human(T0), say(T0 + 10, "Done."), after)
+    (row,) = cr.replay(cr.transcripts(tmp_path / "projects", 0), T0 + 10**6, T0 - 1, 180)
+    assert row["reused"] and not row["wrong"], row
+
+
+def test_a_reopen_does_not_end_the_walk_a_later_wrong_close_makes_the_row_wrong(tmp_path):
+    """Review MF1: closed, reopened by a peer, worked, closed again — and THEN its own task reports."""
+    root = tmp_path / "projects" / "-p"
+    root.mkdir(parents=True)
+    h = 3600
+    write_t(root / "a.jsonl", title("s-1"), human(T0), say(T0 + 10, "Done."),
+            peer(T0 + 4 * h, "one more thing"), say(T0 + 4 * h + 60, "Done again."),
+            task_note(T0 + 14 * h), say(T0 + 14 * h + 30, "The task finished."))
+    (row,) = cr.replay(cr.transcripts(tmp_path / "projects", 0), T0 + 10**6, T0 - 1, 180)
+    assert row["wrong"] and row["after_kind"] == "a background task reported", row
+    assert row["closed_at"] == T0 + 4 * h + 60 + 180 * 60
+    # negative: without the late report the row stays what its first close was, a reopen
+    write_t(root / "a.jsonl", title("s-1"), human(T0), say(T0 + 10, "Done."),
+            peer(T0 + 4 * h, "one more thing"), say(T0 + 4 * h + 60, "Done again."))
+    (row,) = cr.replay(cr.transcripts(tmp_path / "projects", 0), T0 + 10**6, T0 - 1, 180)
+    assert row["reused"] and not row["wrong"] and row["closed_at"] == T0 + 10 + 180 * 60, row
+
+
+def test_the_replay_table_also_states_the_bound_with_every_old_task_doubt_dropped(tmp_path):
+    """An old task that never reported, then reports: unread (the default) it keeps for 12 h and the
+    report comes first; replayed as if nothing ran, the close at 3 h is a wrong one, and is named."""
+    root = tmp_path / "projects" / "-p"
+    root.mkdir(parents=True)
+    h = 3600
+    write_t(root / "a.jsonl", title("suite-1"), human(T0),
+            use(T0 + 5, "u1", "Bash", run_in_background=True),
+            result(T0 + 6, "u1", "Command running in background with ID: bg1. Output is"),
+            say(T0 + 10, "The suite runs."), task_note(T0 + 5 * h), say(T0 + 5 * h + 9, "Green."))
+    files = cr.transcripts(tmp_path / "projects", 0)
+    (row,) = cr.replay(files, T0 + 10**6, T0 - 1, 180)
+    assert not row["wrong"] and row["closed_at"] == T0 + 5 * h + 9 + 180 * 60, row
+    (hi,) = cr.replay(files, T0 + 10**6, T0 - 1, 180, nothing_runs=True)
+    assert hi["wrong"] and hi["closed_at"] == T0 + 10 + 180 * 60, hi
+    sys.path.insert(0, str(TOOLS))
+    import sessions
+    text = sessions.replay_table([row], T0 + 10**6, T0 - 1, 180, 1, (), [hi])
+    assert "closes 1 and 1 of those did another turn on their own (suite-1)" in text
+    assert "on its own after the close moment): 0." in text
+
+
+def test_a_record_scan_does_not_count_never_stands_in_for_the_sessions_own_turn(tmp_path):
+    """Fix review MF1: a system/attachment/dequeue record in the same millisecond as the session's own
+    report must not be read as somebody's act; nor a queue record with no text."""
+    root = tmp_path / "projects" / "-p"
+    root.mkdir(parents=True)
+    for i, before in enumerate([
+            json.dumps({"type": "system", "timestamp": iso_ts(LATER), "subtype": "x"}),
+            json.dumps({"type": "attachment", "timestamp": iso_ts(LATER), "attachment": {"type": "x"}}),
+            json.dumps({"type": "queue-operation", "operation": "remove", "timestamp": iso_ts(LATER),
+                        "content": "typed"})]):
+        write_t(root / "a.jsonl", title("s-1"), human(T0), say(T0 + 10, "Done."), before, task_note(LATER))
+        (row,) = cr.replay(cr.transcripts(tmp_path / "projects", 0), T0 + 10**6, T0 - 1, 180)
+        assert row["wrong"] and row["after_kind"] == "a background task reported", (i, row)
+    write_t(root / "a.jsonl", title("s-1"), human(T0), say(T0 + 10, "Done."), queued(LATER, None))
+    (row,) = cr.replay(cr.transcripts(tmp_path / "projects", 0), T0 + 10**6, T0 - 1, 180)
+    assert row["wrong"] and row["after_kind"] == "a queue record without text", row
+
+
+def test_a_new_launch_under_the_name_does_not_hide_the_old_transcripts_own_turn(tmp_path):
+    """Fix review MF2: a.jsonl closes; b.jsonl (same name) is prompted first; then a's task reports."""
+    root = tmp_path / "projects" / "-p"
+    root.mkdir(parents=True)
+    h = 3600
+    write_t(root / "a.jsonl", title("s-1"), human(T0), say(T0 + 10, "Done."), task_note(T0 + 5 * h))
+    write_t(root / "b.jsonl", title("s-1"), human(T0 + 4 * h, "a new launch"))
+    (row,) = cr.replay(cr.transcripts(tmp_path / "projects", 0), T0 + 10**6, T0 - 1, 180)
+    assert row["wrong"] and row["after"] == T0 + 5 * h, row
+    # negative: when a's own transcript goes on with a peer's message, the row stays a reopen
+    write_t(root / "a.jsonl", title("s-1"), human(T0), say(T0 + 10, "Done."), peer(T0 + 5 * h))
+    (row,) = cr.replay(cr.transcripts(tmp_path / "projects", 0), T0 + 10**6, T0 - 1, 180)
+    assert row["reused"] and not row["wrong"], row
+    # the first review's survivor e6: another transcript that BEGINS with a reply is an own turn
+    write_t(root / "a.jsonl", title("s-1"), human(T0), say(T0 + 10, "Done."))
+    write_t(root / "b.jsonl", title("s-1"), say(T0 + 4 * h, "Still here."))
+    (row,) = cr.replay(cr.transcripts(tmp_path / "projects", 0), T0 + 10**6, T0 - 1, 180)
+    assert row["wrong"] and row["after_kind"] == "it wrote a reply", row
+
+
+def test_another_transcript_that_begins_with_the_sessions_own_turn_is_a_wrong_close(tmp_path):
+    root = tmp_path / "projects" / "-p"
+    root.mkdir(parents=True)
+    write_t(root / "a.jsonl", title("s-1"), human(T0), say(T0 + 10, "Done."))
+    write_t(root / "b.jsonl", title("s-1"), task_note(T0 + 5 * 3600))
+    (row,) = cr.replay(cr.transcripts(tmp_path / "projects", 0), T0 + 10**6, T0 - 1, 180)
+    assert row["wrong"] and row["after_kind"] == "a background task reported", row
+    # negative: one that begins with anything else was started by someone (a launch or a resume)
+    write_t(root / "b.jsonl", title("s-1"), rec("user", T0 + 5 * 3600, "session start", isMeta=True))
+    (row,) = cr.replay(cr.transcripts(tmp_path / "projects", 0), T0 + 10**6, T0 - 1, 180)
+    assert row["reused"] and not row["wrong"] and "another transcript" in row["after_kind"], row
 
 
 def test_replay_sees_a_resume_under_the_same_name_as_a_wrong_close(tmp_path):
@@ -216,7 +363,8 @@ def test_replay_sees_a_resume_under_the_same_name_as_a_wrong_close(tmp_path):
     write_t(root / "a.jsonl", title("s-1"), human(T0), say(T0 + 10, "Merged. SESSION COMPLETE."))
     write_t(root / "b.jsonl", title("s-1"), human(T0 + 5 * 3600, "resume: continue"))
     rows = cr.replay(cr.transcripts(tmp_path / "projects", 0), T0 + 10**6, T0 - 1, 180)
-    assert len(rows) == 1 and rows[0]["wrong"] and rows[0]["files"] == 2
+    assert len(rows) == 1 and rows[0]["reused"] and not rows[0]["wrong"] and rows[0]["files"] == 2
+    assert "another transcript under its name" in rows[0]["after_kind"]
 
 
 def test_the_replay_cli_writes_its_table_and_exits_red_on_a_wrong_close(tmp_path):
@@ -224,14 +372,22 @@ def test_the_replay_cli_writes_its_table_and_exits_red_on_a_wrong_close(tmp_path
     root.mkdir(parents=True)
     now = time.time()
     write_t(root / "a.jsonl", title("w-1"), human(now - 9 * 3600),
-            say(now - 9 * 3600 + 10, "Merged. SESSION COMPLETE."), peer(now - 3600))
+            say(now - 9 * 3600 + 10, "Merged. SESSION COMPLETE."), task_note(now - 3600))
     out = tmp_path / "REPLAY.md"
     env = dict(os.environ, CLAUDE_PROJECTS_DIR=str(tmp_path / "projects"),
                GEDAECHTNIS_STATE_DIR=str(tmp_path / "state"), GEDAECHTNIS_CONFIG=str(tmp_path / "no.json"))
     p = subprocess.run([sys.executable, str(TOOLS / "sessions.py"), "close", "--replay", "1",
                         "--out", str(out)], capture_output=True, text=True, env=env, timeout=60)
     assert p.returncode == 1, p.stdout + p.stderr
-    assert "WRONG closes (messaged, resumed or wrote after the close moment): 1" in out.read_text()
+    assert "did another turn on its own after the close moment): 1" in out.read_text()
+    # negative: a message from another session after the close is a reopen, and the exit is 0
+    write_t(root / "a.jsonl", title("w-1"), human(now - 9 * 3600),
+            say(now - 9 * 3600 + 10, "Merged. SESSION COMPLETE."), peer(now - 3600))
+    p = subprocess.run([sys.executable, str(TOOLS / "sessions.py"), "close", "--replay", "1",
+                        "--out", str(out)], capture_output=True, text=True, env=env, timeout=60)
+    assert p.returncode == 0, p.stdout + p.stderr
+    assert "on its own after the close moment): 0" in out.read_text()
+    assert "reopened — a message from another session" in out.read_text()
 
 
 # ----------------------------------------------------------------- fleet: SESSCLOSE-2 parts ----
@@ -339,7 +495,8 @@ def test_the_sweep_logs_the_reopen_line_with_every_proposal(fl):
                                                   "cwd": "/r"}],
                      gather_fn=lambda r, m, me: {"alive": True, "handoff": True, "status": "idle",
                                                  "scanned": True, "end": E(ts=T0 - 4 * 3600),
-                                                 "screen": "❯", "unsaved": [], "mux": "screen"})
+                                                 "screen": "❯", "unsaved": [], "mux": "screen"},
+                     refusals_fn=lambda r: ([], None))
     assert items[0]["keep"] == []
     log = (fl.config.state() / "session-close.log").read_text()
     assert "proposed\td-1" in log and "reopen: cd /r && claude -r d-1" in log

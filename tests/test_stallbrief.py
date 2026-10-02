@@ -33,7 +33,7 @@ def sb(tmp_path, monkeypatch):
     import config, idlenotify, procs, stallbrief                         # noqa: PLC0415
     for m in (config, procs, idlenotify, stallbrief):
         importlib.reload(m)
-    monkeypatch.setattr(procs, "claude_pid", lambda *a, **k: None)
+    monkeypatch.setattr(procs, "own_pid", lambda *a, **k: None)
     root = tmp_path / "projects"
     (root / "-some-repo").mkdir(parents=True)
 
@@ -186,7 +186,7 @@ def test_an_unmanaged_name_and_this_session_itself_are_not_listed(sb, monkeypatc
     sb["configure"](session_name_pattern=PATTERN)
     write_transcript(sb["root"], "s-builder-R1", [say(LIMIT, NOW - 60)])
     assert block(sb, [sess("my-scratch-session")]) == []
-    monkeypatch.setattr(sb["procs"], "claude_pid", lambda *a, **k: 4242)
+    monkeypatch.setattr(sb["procs"], "own_pid", lambda *a, **k: 4242)
     assert block(sb, [sess("s-builder-R1", pid=4242)]) == []
     assert block(sb, [sess("s-builder-R1", pid=4243)])[0].startswith("- Managed sessions (1 live")
 

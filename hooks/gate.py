@@ -37,6 +37,7 @@ import kernelentry
 import apostrophe_door
 import ruledoors
 import killdoor
+import limits as _limits
 
 EV = "PreToolUse"
 
@@ -430,7 +431,10 @@ def rule_data_integrity(cmd: str) -> str | None:
 
 def rule_artifact_not_file(cmd: str, cwd: str | None, notes: list | None = None) -> str | None:
     """MARKER-SCOPED (PLUGDIR-1 review): refuses only in the vault or a marked repo; elsewhere the
-    text goes to `notes` and `open` runs — a stranger's own page may carry the same store call."""
+    text goes to `notes` and `open` runs — a stranger's own page may carry the same store call.
+    OFF as shipped (PUBLICDOORS-1): `artifact_open_door`, on under `"profile": "atlas"`."""
+    if not _limits.get("artifact_open_door", False):
+        return None
     for seg in segments(cmd):
         w = seg.split()
         if not w or w[0] != "open":

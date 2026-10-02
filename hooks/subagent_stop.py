@@ -66,7 +66,8 @@ def main() -> None:
     # silently swallow the COMMIT this hook exists to make. Bookkeeping never takes the commit down
     # with it.
     try:
-        fanout.record_closed(sid)
+        aid = inp.get("agent_id")
+        fanout.record_closed(sid, aid if isinstance(aid, str) and aid else None)
     except Exception as e:                           # noqa: BLE001 — see the comment above
         log("hook-errors", f"fanout-release\t{sid}\t{e}".replace("\n", " | "))
     agent_id = inp.get("agent_id")

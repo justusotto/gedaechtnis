@@ -292,12 +292,12 @@ def _store_page(d: Path) -> Path:
 
 def test_artifact_door_positive_a_marked_repo_is_refused(tmp_path, repo):
     page = _store_page(mark(repo))
-    assert hso(bash(tmp_path, f"open {page}", repo)).get("permissionDecision") == "deny"
+    assert hso(bash(tmp_path, f"open {page}", repo, GEDAECHTNIS_PROFILE="atlas")).get("permissionDecision") == "deny"
 
 
 def test_artifact_door_negative_an_unmarked_repo_gets_a_note_and_runs(tmp_path, repo):
     page = _store_page(repo)
-    h = hso(bash(tmp_path, f"open {page}", repo))
+    h = hso(bash(tmp_path, f"open {page}", repo, GEDAECHTNIS_PROFILE="atlas"))   # PUBLICDOORS-1: off as shipped
     assert "permissionDecision" not in h and "ARTIFACT's own store" in h["additionalContext"], h
 
 

@@ -1,0 +1,61 @@
+{
+  "_about": "PUBLICTONE-1: wording the public pages (README.md, docs/*.md) may not carry. tools/publish_check.py reads this file; see the comment above `tone()` there. refused: whole words or phrases, any case; a line break or several spaces between the words still match, `*` and backticks are ignored, and a word joined to another by `-` or `_` (best-effort, a config key) is not a match. needs: a phrase allowed only in a sentence that also carries its qualifier. counted: a word with a per-file ceiling, set to the count on 2026-10-01; a page not listed has ceiling 0.",
+  "refused": [
+    "impossible",
+    "sends nothing",
+    "fetches nothing",
+    "guarantee",
+    "guarantees",
+    "guaranteed",
+    "perfect",
+    "perfectly",
+    "flawless",
+    "flawlessly",
+    "foolproof",
+    "bulletproof",
+    "unbreakable",
+    "best",
+    "fastest",
+    "safest",
+    "smartest",
+    "most powerful",
+    "most advanced",
+    "state of the art",
+    "state-of-the-art",
+    "world-class",
+    "cutting-edge",
+    "revolutionary",
+    "unmatched",
+    "unrivalled",
+    "unrivaled",
+    "seamless",
+    "seamlessly",
+    "effortless",
+    "effortlessly",
+    "blazing",
+    "100%",
+    "cannot fail",
+    "always works",
+    "never fails",
+    "can't fail",
+    "can not fail",
+    "100 %"
+  ],
+  "needs": {
+    "no network calls": "Claude Code"
+  },
+  "counted": {
+    "never": {
+      "README.md": 2,
+      "docs/configuration.md": 6,
+      "docs/contributing.md": 8,
+      "docs/doors.md": 1,
+      "docs/hooks.md": 15,
+      "docs/install.md": 4,
+      "docs/measurements.md": 1,
+      "docs/platforms.md": 1,
+      "docs/what-it-runs.md": 3,
+      "docs/why-hooks-not-prompts.md": 2
+    }
+  }
+}

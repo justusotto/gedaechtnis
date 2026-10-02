@@ -239,7 +239,7 @@ def facts_lines(worktrees: str | None = None, now: float | None = None,
     now = time.time() if now is None else now
     if sessions is None:
         sessions = live_sessions()
-    me = procs.claude_pid()
+    me = procs.own_pid()                 # this session, never its host (PROCSHOST-1)
     managed = [s for s in sessions
                if s["pid"] != me and idlenotify.match_name(s["name"]) is not None]
     if not managed:

@@ -20,10 +20,24 @@ Two ways in:
     blocks and never edits anything; a prompt that is not a cross-session message costs one
     substring test, and one with no claim in it one regular expression more.
 
-Read-only throughout: `git merge-base --is-ancestor` and, for a vault commit, `git show --name-only`.
+Read-only, except `ff`: `git merge-base --is-ancestor` and, for a vault commit, `git show --name-only`.
+
+THE LANDING (`ff`, PERMDESIGN-1). `python3 mergesha.py ff <branch> [--expect-main <sha>] [<repo>]`
+fast-forwards `main` to the branch tip and verifies it, in ONE command, so a narrow allow rule can
+let a builder land without anybody typing the merge line:
+
+  * it runs in the checkout where `main` is checked out, and reads `main` itself, in this command;
+  * it refuses when `main` is not an ancestor of the tip (main moved since the branch was stacked:
+    restack), when `--expect-main` is given and `main` is not that commit, when another session
+    holds the merge window, and when the suite gate is on and no green full run covers the tip
+    (with no escape: the door's typed `SUITE_GATE_ALLOW=1` prefix does not reach `ff`);
+  * it merges the tip's SHA (`git merge --ff-only`), re-reads `main`, and prints the same
+    `verify-merge` line; a window it granted itself, or this session held, is released after.
+
+Exit 0 on main, 3 refused, 2 usage or git failure. It never pushes, rebases or resets.
 """
 from __future__ import annotations
-import re, subprocess, sys
+import os, re, subprocess, sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -137,10 +151,94 @@ def from_prompt(inp: dict) -> str | None:
     return "Merge claims in that message, checked with git: " + " | ".join(rows) + "."
 
 
+REFUSED = 3
+
+
+def _one(repo: Path, *args: str) -> str | None:
+    p = _git(repo, *args)
+    return p.stdout.strip() if p is not None and p.returncode == 0 else None
+
+
+def ff(branch: str, repo: Path, expect: str | None = None, sid: str | None = None) -> tuple[int, str]:
+    """Fast-forward `main` to `branch` in `repo` (the checkout holding `main`), then verify.
+
+    Every precondition is read in this call; nothing is taken from the caller but the names."""
+    top = _one(repo, "rev-parse", "--show-toplevel")
+    if not top:
+        return 2, f"not a git repository: {repo}"
+    top = Path(top)
+    if _one(top, "symbolic-ref", "--short", "-q", "HEAD") != "main":
+        return REFUSED, (f"refused: `main` is not checked out in {top}; run ff from the checkout "
+                         "that holds `main`")
+    if branch.startswith("-"):
+        return 2, f"not a branch or commit: {branch}"
+    tip = _one(top, "rev-parse", "--verify", "--quiet", "--end-of-options", f"{branch}^{{commit}}")
+    before = _one(top, "rev-parse", "--verify", "--quiet", "refs/heads/main")
+    if not tip or not before:
+        return 2, f"git does not know `{branch}` (or `main`) in {top}"
+    if expect is not None:
+        full = _one(top, "rev-parse", "--verify", "--quiet", "--end-of-options", f"{expect}^{{commit}}")
+        if not SHA.match(expect) or full != before:
+            return REFUSED, (f"refused: main moved: expected {expect}, main is {before[:10]}; "
+                             "restack onto main and land again")
+    if tip == before:
+        return 0, line(verify(tip, top)) + " (already main; nothing merged)"
+    anc = _git(top, "merge-base", "--is-ancestor", before, tip)
+    if anc is None or anc.returncode != 0:
+        return REFUSED, (f"refused: main {before[:10]} is not an ancestor of `{branch}` {tip[:10]}: "
+                         "main moved since the branch was stacked; restack and land again")
+    import suitegate                                     # noqa: PLC0415 — only a landing pays for it
+    # No escape here: the door's `SUITE_GATE_ALLOW=1` must be typed in the command, where the
+    # transcript shows it; an allowed `ff` has no such prefix, so a red or missing run refuses.
+    if suitegate.enabled() and (top / "gedaechtnis" / "tests").is_dir():
+        why = suitegate.check(top, tip)
+        if why:
+            return REFUSED, "refused: " + why
+    import mergewindow                                   # noqa: PLC0415
+    sid = sid or os.environ.get("CLAUDE_CODE_SESSION_ID") or f"mergesha-ff-{os.getpid()}"
+    mine = False
+    if (top / mergewindow.MARKER).is_file():
+        cur = mergewindow.read(top)
+        if cur and cur.get("holder") != sid:
+            return REFUSED, (f"refused: the merge window is held by session {cur['holder']}; wait "
+                             "for its verify-merge, then land again")
+        rc, msg = mergewindow.grant(sid, top)
+        if rc != 0:
+            return REFUSED, "refused: " + msg
+        mine = True
+    try:
+        m = _git(top, "merge", "--ff-only", "--quiet", tip)
+        after = _one(top, "rev-parse", "--verify", "--quiet", "refs/heads/main")
+        if m is None or m.returncode != 0 or after != tip:
+            err = ((m.stderr or m.stdout).strip().splitlines() or ["?"])[-1] if m is not None else "git did not answer"
+            return 2, f"the fast-forward did not land: main is {(after or '?')[:10]}, tip {tip[:10]}: {err}"
+        r = verify(tip, top)
+        return (0 if r["state"] == ON else 2), f"main {before[:10]} -> {tip[:10]}; " + line(r)
+    finally:
+        if mine:
+            mergewindow.release(sid, top)
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
+    if argv and argv[0] == "ff":
+        rest, expect = list(argv[1:]), None
+        if "--expect-main" in rest:
+            i = rest.index("--expect-main")
+            if i + 1 >= len(rest):
+                rest = []
+            else:
+                expect = rest[i + 1]
+                del rest[i:i + 2]
+        if not 1 <= len(rest) <= 2:
+            print("usage: mergesha.py ff <branch> [--expect-main <sha>] [<repo>]", file=sys.stderr)
+            return 2
+        rc, msg = ff(rest[0], Path(rest[1]).expanduser() if len(rest) > 1 else Path.cwd(), expect)
+        print(msg, file=sys.stdout if rc == 0 else sys.stderr)
+        return rc
     if len(argv) < 2 or argv[0] != "verify-merge":
-        print("usage: mergesha.py verify-merge <sha> [<repo>]", file=sys.stderr)
+        print("usage: mergesha.py verify-merge <sha> [<repo>] · mergesha.py ff <branch> "
+              "[--expect-main <sha>] [<repo>]", file=sys.stderr)
         return 2
     sha = argv[1]
     if len(argv) > 2:

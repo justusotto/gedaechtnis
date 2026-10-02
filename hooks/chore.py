@@ -760,10 +760,10 @@ def do_answers(inp: dict) -> None:
 
 
 def do_wtsweep(inp: dict) -> None:
-    """Stop-time GIT-worktree sweep. Removes the finished ones; records the rest for the next boot.
-
-    ★ `git worktree`, not the APFS clones in `worktree.py` — see `wtsweep.py`'s docstring, which
-    carries the whole rule. This function is only the door: find the repo, ask, record. It prints
+    """Stop-time worktree sweep. Removes the finished git worktrees; records the rest for the next
+    boot. Since CLONESWEEP-1 the same call also judges the copy-on-write clones `worktree.py`
+    makes: a finished clone is MOVED to `~/Downloads/To delete <date>/` (never deleted), and only
+    with `worktree_sweep_apply` on — see `wtsweep.py`'s docstring, which carries the whole rule. This function is only the door: find the repo, ask, record. It prints
     nothing. A Stop hook that printed would be speaking to a session that has already stopped, and
     what a person needs to see is the state at their NEXT boot, which is what `record` is for.
 
@@ -800,7 +800,7 @@ def do_sessclose(inp: dict) -> None:
     # longer a reason to skip; the machine-wide rate limit is the only gate.
     if not fleet.due():
         return
-    fleet.record_proposals(fleet.sweep(apply=fleet.applies()))
+    fleet.record_proposals(fleet.sweep(apply=fleet.applies(), by=f"the Stop hook ({fleet.closer()})"))
 
 
 def do_rowdone(inp: dict) -> None:

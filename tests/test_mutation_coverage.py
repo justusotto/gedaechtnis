@@ -91,13 +91,32 @@ EXEMPT = {
     # safe_sid()); read_screen removes only the mkstemp file it created in the same call.
     "hooks/fleet.py::append_launch": "state dir; config.state() joined to a literal name",
     "hooks/fleet.py::close_log": "state dir; config.state() joined to a literal name",
+    "hooks/fleet.py::safe_close_log": "state dir; config.state() joined to the literal close.log (HANDLINES-1)",
+    "hooks/fleet.py::owner_go_log": "state dir; config.state() joined to the literal owner-go.log (LAUNCHGATE-1)",
+    # HANDLINES-1 — tools/configure.py writes only the package's own config file and its state log.
+    "tools/configure.py::backup": "copies config.config_path() to config.json.pre-<key>-<date> beside it; <key> was checked against the shipped schema first, and an existing backup is never overwritten",
+    "tools/configure.py::write_atomic": "config.config_path(), the package's own config file, through a mkstemp temp in the same directory; on failure removes only that temp",
+    "tools/configure.py::log": "state dir; config.state() joined to the literal config.log",
+    # PERMDESIGN-1 — the allow-rules merge writes the settings file of a repository the person
+    # listed (the roster, or --repo), only with --apply, after a dry run printed the diff.
+    "tools/allow_rules.py::backup": "copies a repository's .claude/settings(.local).json to <name>.pre-permdesign-<date> beside it; an existing copy is never overwritten; under pytest a path outside the test's temp tree is refused",
+    "tools/allow_rules.py::write_atomic": "a repository's .claude/settings(.local).json, through a mkstemp temp in the same directory; on failure removes only that temp; under pytest a path outside the test's temp tree is refused",
+    # PERMDESIGN-1 — the reviewed ledger and its log, in the state dir only.
+    # GEMINISETUP-1 — tools/gemini_worker.py writes the answer file its caller named, and its own run log.
+    "tools/gemini_worker.py::cmd_run": "its two files come from _create(); the one unlink removes the empty <OUT>.partial this call made a moment before, when <OUT>.stderr could not be created; the working folder is a new mkdtemp folder, filled by _copy_in() and removed by _clear()",
+    "tools/gemini_worker.py::_clear": "removes by IDENTITY, never by a path alone: a copy is unlinked through the open handle of the mkdtemp folder this run created (dir_fd), and only when its device and inode are the ones _copy_in() recorded when it wrote that copy; the rmdir runs only when the path still is that same folder (device and inode compared), and only removes an empty folder — a folder the tool moved, or a link it planted at the old path, is left and named",
+    "tools/gemini_worker.py::_create": "opens <OUT>.partial or <OUT>.stderr beside the --out path the caller named with mode xb: an existing file, or a symlink, is refused, never written",
+    "tools/gemini_worker.py::_place": "os.link gives the .partial its final name (<OUT> or <OUT>.failed) and fails rather than replace a file that is there; the unlink removes only that .partial after the link succeeded",
+    "tools/gemini_worker.py::ledger_append": "state dir; appends one row to config.state() joined to the literal gemini-runs.tsv, never rewrites it",
+    "tools/reviewed.py::log": "state dir; config.state() joined to the literal reviewed.log",
+    "tools/reviewed.py::add": "state dir; appends one row to config.state()/reviewed.tsv, never rewrites it",
     "hooks/fleet.py::record_proposals": "state dir; config.state() joined to a literal name",
     "hooks/fleet.py::due": "state dir; config.state() joined to literal names",
     "hooks/fleet.py::park": "state dir; config.state() joined to a name sanitized by safe_sid()",
     "hooks/deliver.py::_claim": "state dir; renames fleet.parked_path() (safe_sid name) to a claim beside it, same directory",
     "hooks/deliver.py::_restore": "state dir; puts its own claim files back as fleet.parked_path(), same directory",
     "hooks/deliver.py::deliver": "state dir; removes only claim files _claim() created beside fleet.parked_path()",
-    "hooks/fleet.py::read_screen": "removes only the mkstemp file this function created a moment before",
+    "hooks/fleet.py::read_screen": "removes only the hardcopy file and the mkdtemp folder this function created a moment before",
     "tools/sessions.py::cmd_launch": "state dir; its lock and a pid file named by safe_sid() of the session name",
     "tools/sessions.py::cmd_replay": "the --out file the person running the replay names on the command line, and its folder; nothing else is written",
     "hooks/compact_door.py::_record_pointer": "state dir; config.state() joined to a literal name and a "
@@ -153,6 +172,7 @@ EXEMPT = {
                                     "never raised, and the mailbox is written BEFORE it runs, so "
                                     "nothing it does can lose a message",
     "hooks/common.py::update_session_state": "state dir via session_state_path(); the sid is sanitized by safe_sid()",
+    "hooks/common.py::record_cwd": "state dir via session_state_path(); only the TIMES of this session's own record are touched (os.utime), the sid is sanitized by safe_sid()",
     "hooks/common.py::note_pre_exists": "state dir; the filename is a hash of the target, never the target itself",
     "hooks/common.py::clear_pre_exists": "state dir; the filename is a hash of the target, never the target itself",
     "hooks/common.py::was_created": "state dir; the filename is a hash of the target, never the target itself",
@@ -311,7 +331,12 @@ def test_no_exemption_is_stale():
     """An exemption for a function that no longer mutates anything is a claim nobody is checking.
     It also hides the next site that takes the same name."""
     _, used = scan(list(product_modules()))
-    stale = sorted(set(EXEMPT) - used)
+    # GEMINI-PUBLIC: a published tree leaves tools/gemini_worker.py out (rules/publish-exclude.json);
+    # its entries are not stale there, the file is absent. Where the file is, they are checked.
+    root = Path(__file__).resolve().parents[1]
+    absent = {k for k in EXEMPT if k.startswith("tools/gemini_worker.py::")
+              and not (root / "tools" / "gemini_worker.py").is_file()}
+    stale = sorted(set(EXEMPT) - used - absent)
     assert not stale, (
         "EXEMPT entries that match no mutating function any more:\n  " + "\n  ".join(stale)
         + "\n\nDelete them. A stale exemption silently pre-approves whatever is written there next.")

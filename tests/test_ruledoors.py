@@ -157,7 +157,9 @@ def w(tmp_path):
 
 
 def set_limits(w, lim):
-    w["cfg"].write_text(json.dumps({"topology": {"non_region_tops": ["Global"]}, "limits": lim}))
+    # PUBLICDOORS-1: judge_md, row_identity and marker_roster ship off; this file tests the doors
+    # themselves, so it runs under the profile that turns them on (the off side: test_publicdoors.py).
+    w["cfg"].write_text(json.dumps({"profile": "atlas", "topology": {"non_region_tops": ["Global"]}, "limits": lim}))
 
 
 def hook(w, which, tool, tool_input, cwd):

@@ -12,6 +12,73 @@ re-check.
 
 Sections used: **Added** · **Changed** · **Fixed** · **Removed** · **Known limits**.
 
+## 0.6.1 — 2026-10-02
+
+### Added
+
+- **`tools/configure.py`** shows and changes the `limits` object of `config.json` (`show`, `get`,
+  `set`, `unset`), checks the key and the value's type, and keeps a dated backup.
+- **`hooks/mergesha.py ff <branch>`** fast-forwards `main` to a branch tip and refuses when `main`
+  has moved, or is not the commit given with `--expect-main`.
+- **`tools/run_reviewed.sh <script.py>`** runs a Python script only when the SHA-256 of its bytes is
+  in the reviewed ledger (`tools/reviewed.py add` writes a row).
+- **`tools/apply-allow-rules.sh`** merges the allow and deny rules in `rules/allow-rules.json` into
+  each repository's `.claude/settings.json`; it prints the change and writes only with `--apply`.
+- **`sessions.py close --when-needed`** closes the oldest finished sessions while the machine is
+  short of memory and stops once it is not; **`close --all-finished`** closes every finished one.
+- **The close also covers a session you started by hand in its own `screen` window**, when the
+  CLI's session registry confirms its process and you have not typed into it after its first prompt.
+- **`session_close_never`** lists session names the close sweep leaves alone (as shipped: Remote
+  Control hosts).
+- **`sessions.py launch --owner-go "<words>"`** launches past the memory test only, and writes the
+  words and the readings to `owner-go.log`.
+- **The worktree sweep also lists finished copy-on-write clones older than
+  `worktree_clone_min_age_seconds` (a day)**; with `worktree_sweep_apply` on (off as shipped) it
+  moves them to `~/Downloads/To delete <date>/` and writes a ledger line with the command that moves
+  each one back; the sweep does not delete a clone.
+- **The publish check reads the wording of `README.md` and `docs/*.md`** against
+  `rules/public-tone.json` and fails on a listed phrase.
+- **`tools/release_orphan.sh` leaves out the paths listed in a tree's `rules/publish-exclude.json`**
+  unless it is run with `--with-excluded`.
+
+### Changed
+
+- **Closing a finished session is on as shipped** (`session_close_apply: true`): a session is
+  closed by quitting its own `screen`/`tmux` session, and each close goes to `close.log`. Re-check:
+  set `session_close_apply` to `false` if you want the list only.
+- **A session counts as finished by time, not by its last words**: its last turn ended
+  `session_close_idle_minutes` ago, or it wrote a done handoff or reported to the session that
+  started it and has been quiet for 30 minutes. Re-check: `session_close_exempt` and
+  `session_close_never` for sessions you want kept.
+- **`sessions.py launch` tests memory by the system's pressure level and the share of memory free**
+  (`session_launch_memory_floor`), not by a share of swap. Re-check: if you used
+  `session_swap_cap_share` to limit launches, set `session_launch_memory_floor` instead.
+- **A message to a warm session under `resume_window` is delivered when it is short
+  (`resume_short_chars`) or still fits the window**; the headroom rule (`resume_min_headroom`) now
+  applies to cold sessions only. Re-check: `resume_short_window` is no longer read.
+- **Four doors for a vault with work queues, review pages and a shared roster are off as shipped**
+  (`artifact_open_door`, `judge_md_door`, `row_identity_door`, `marker_roster_door`);
+  `"profile": "atlas"` in `config.json` turns them on. Re-check: if you used these doors, add that
+  line.
+- **The sub-agent cap counts sub-agents that have started plus calls still waiting to start**: a
+  new SubagentStart hook records each start, and a reserved slot that no sub-agent has claimed after
+  `agent_pending_seconds` is released.
+- **A row mark refused while the vault is busy is kept and applied at the next quiet Stop**;
+  `rowdone.py owed` applies it by hand.
+- **A session record without a pid stops protecting a worktree after a day**
+  (`worktree_session_stale_seconds`).
+- **Shipped defaults**: `context_reach_margin_tokens` is 20000 (was 30000) and `resume_short_chars`
+  is 1500 (was 0).
+
+### Fixed
+
+- The session close no longer keeps a finished session because a background task's report was
+  queued, because two `screen` names shared a prefix, or because its handoff was not named at launch.
+- The session close no longer closes a finished session while a child process it started is still
+  running.
+- `sessions.py close --replay <days>` replays the rule the close uses now.
+- A launch's worktree or handoff given as a relative path is read against the session's own folder.
+
 ## 0.6.0 — 2026-09-29 — parked messages delivered, a door for computed kill targets
 
 ### Added

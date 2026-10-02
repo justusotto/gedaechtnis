@@ -55,25 +55,23 @@ def test_positive_control_a_finished_session_is_closeable(iso):
     assert iso.classify(finished(), NOW, 15) == []
 
 
+# CLOSETUNE-1: idle 180 min; the fixture's last turn ended 4 h ago — finished by time, and younger
+# than the 12 h line, so an UNKNOWN (soft) fact still keeps it.
 @pytest.mark.parametrize("over, rule", [
     ({"is_self": True}, "launched"),
     ({"alive": False}, "launched"),
-    ({"handoff": False, "end": end(text="Suite green on the tip.")}, "finished"),
+    ({"end": end(text="done", ts=NOW - 60)}, "finished"),
+    ({"end": end(text="done", ts=None)}, "finished"),
     ({"scanned": False}, "transcript"),
     ({"end": None}, "idle"),
-    ({"end": end(text="done", ts=NOW - 60)}, "idle"),
-    ({"end": end(text="done", ts=None)}, "idle"),
     ({"status": "busy"}, "idle"),
     ({"status": "shell"}, "idle"),
     ({"screen": None}, "no-prompt"),
     ({"screen": "Do you want to proceed?\n❯ 1. Yes\n  2. No"}, "no-prompt"),
     ({"unsaved": None}, "no-unsaved-work"),
     ({"unsaved": ["gedaechtnis/hooks/x.py"]}, "no-unsaved-work"),
-    ({"end": end(text="HOLDING — waiting on: the seat")}, "not-waiting"),
-    ({"end": end(text="Handoff drafted. Waiting for the two suite runs.")}, "not-waiting"),
-    ({"end": end(text="Merged. Shall I also remove the worktree?")}, "not-waiting"),
-    ({"end": end(text="Done. Over to you for the push.")}, "not-waiting"),
     ({"end": end(open_bg=["b1amd7l4j"])}, "background"),
+    ({"end": end(open_bg=["b1"], open_bg_ts={"b1": NOW - 600})}, "background"),
     ({"end": end(wake_until=NOW + 600)}, "background"),
     ({"end": end(cron=1)}, "background"),
     ({"end": end(humans=2)}, "conversation"),
@@ -82,9 +80,25 @@ def test_positive_control_a_finished_session_is_closeable(iso):
     ({"exempt": True}, "exempt"),
 ])
 def test_each_broken_fact_keeps_the_session_and_names_its_rule(iso, over, rule):
-    keep = iso.classify(finished(**over), NOW, 15)
+    keep = iso.classify(finished(**over), NOW, 180)
     assert keep, over
     assert any(k.startswith(rule + ":") for k in keep), keep
+
+
+@pytest.mark.parametrize("text", [
+    "HOLDING — waiting on: the seat",
+    "Handoff drafted. Waiting for the two suite runs.",
+    "Merged. Shall I also remove the worktree?",
+    "Done. Over to you for the push.",
+    "Suite green on the tip.",
+])
+def test_last_words_never_keep_a_session_finished_by_time_they_are_a_note(iso, text):
+    """CLOSETUNE-1: FINISHED is a fact about time. The ask/wait heuristic kept 26 of 81 sessions
+    on 2026-09-30; it is printed as a note now, never obeyed."""
+    f = finished(end=end(text=text), handoff=False)
+    assert iso.classify(f, NOW, 180) == []
+    if iso.closerules.asks_or_waits(text):
+        assert any(n.startswith("its last words") for n in iso.notes(f, NOW, 180))
 
 
 def test_silence_alone_never_closes(iso):
@@ -286,46 +300,85 @@ def _ledger(iso, *rows):
         iso.append_launch(r)
 
 
-def test_sweep_proposes_and_kills_nothing_while_apply_is_off(iso):
+SAFE = lambda r: ([], 9001)                                  # noqa: E731 — every safety fact holds
+
+
+def test_sweep_proposes_and_closes_nothing_on_a_dry_run(iso, monkeypatch):
+    monkeypatch.setattr(iso, "close_one", lambda *a: pytest.fail("closed on a dry run"))
     _ledger(iso, {"name": "done-1", "pid": 4242, "pid_start": "s", "launched_at": NOW - 7200})
-    killed = []
-    items = iso.sweep(apply=False, now=NOW, gather_fn=lambda r, m, me: finished(),
-                      kill=killed.append)
-    assert killed == []
-    assert items[0]["keep"] == [] and not items[0]["closed"]
+    items = iso.sweep(apply=False, now=NOW, gather_fn=lambda r, m, me: finished(), refusals_fn=SAFE)
+    assert items[0]["keep"] == [] and items[0]["refused"] == [] and not items[0]["closed"]
     assert "proposed\tdone-1" in (iso.config.state() / "session-close.log").read_text()
 
 
 def test_sweep_with_apply_closes_the_recorded_session_after_re_reading(iso, monkeypatch):
     closed = []
-    monkeypatch.setattr(iso, "close_one", lambda r, mux, kill: closed.append(r["pid"]) or "screen quit")
+    monkeypatch.setattr(iso, "close_one",
+                        lambda r, mux, anchor: closed.append((r["pid"], anchor)) or "screen quit")
     _ledger(iso, {"name": "done-1", "pid": 4242, "pid_start": "s", "launched_at": NOW - 7200})
-    items = iso.sweep(apply=True, now=NOW, gather_fn=lambda r, m, me: finished(), kill=lambda p: None)
-    assert closed == [4242] and items[0]["closed"]
+    items = iso.sweep(apply=True, now=NOW, gather_fn=lambda r, m, me: finished(), refusals_fn=SAFE,
+                      by="test")
+    assert closed == [(4242, 9001)] and items[0]["closed"]
+    log = (iso.config.state() / "close.log").read_text()
+    assert "\tclosed\tdone-1\tpid 4242\tstart s\t" in log and log.rstrip().endswith("by test")
+
+
+def test_sweep_never_closes_a_finished_session_a_safety_fact_refuses(iso, monkeypatch):
+    monkeypatch.setattr(iso, "close_one", lambda *a: pytest.fail("closed a refused session"))
+    _ledger(iso, {"name": "done-1", "pid": 4242, "pid_start": "s", "launched_at": NOW - 7200})
+    items = iso.sweep(apply=True, now=NOW, gather_fn=lambda r, m, me: finished(),
+                      refusals_fn=lambda r: (["attended: a person is at it"], None), by="test")
+    assert items[0]["refused"] == ["attended: a person is at it"] and not items[0]["closed"]
+    assert "\trefused\tdone-1\t" in (iso.config.state() / "close.log").read_text()
+
+
+def test_sweep_logs_no_refusal_for_a_registry_only_session(iso, monkeypatch):
+    """A session the launcher did not start is refused on EVERY pass by design; logging each one
+    wrote a line per session per Stop pass. Ledger rows still log (the test above)."""
+    monkeypatch.setattr(iso, "close_one", lambda *a: pytest.fail("closed an outside session"))
+    row = {"name": "theirs-1", "pid": 4343, "pid_start": "s", "outside": True}
+    items = iso.sweep(apply=True, now=NOW, gather_fn=lambda r, m, me: finished(), rows=[row],
+                      refusals_fn=lambda r: (["ledger: not launched by `sessions.py launch`"], None),
+                      by="test")
+    assert items[0]["refused"] and not items[0]["closed"]
+    log = iso.config.state() / "close.log"
+    assert not log.exists() or "theirs-1" not in log.read_text()
+
+
+def test_sweep_re_reads_the_safety_facts_before_closing(iso, monkeypatch):
+    """Safe at the first read, attended at the second: kept."""
+    monkeypatch.setattr(iso, "close_one", lambda *a: pytest.fail("closed on a stale read"))
+    _ledger(iso, {"name": "done-1", "pid": 4242, "pid_start": "s", "launched_at": NOW - 7200})
+    reads = iter([([], 1), (["attended: set"], None)])
+    items = iso.sweep(apply=True, now=NOW, gather_fn=lambda r, m, me: finished(),
+                      refusals_fn=lambda r: next(reads), by="test")
+    assert items[0]["refused"] == ["attended: set"] and not items[0]["closed"]
 
 
 R1 = {"name": "done-1", "pid": 4242, "pid_start": "s", "mux": "screen", "mux_session": "done-1"}
 
 
-def test_close_quits_the_screen_first_and_does_not_kill_a_session_that_ended(iso):
-    calls, killed = [], []
-    how = iso.close_one(R1, "screen", killed.append, quit_fn=lambda m, n: calls.append((m, n)),
+def test_close_quits_the_screen_and_reports_how(iso):
+    calls = []
+    how = iso.close_one(R1, "screen", 77, quit_fn=lambda m, n: calls.append((m, n)),
                         alive_fn=lambda: False, wait_s=0.1)
-    assert calls == [("screen", "done-1")] and killed == [] and how == "screen quit"
+    assert calls == [("screen", "done-1")] and how == "screen quit"
 
 
-def test_close_kills_only_the_recorded_pid_when_the_quit_did_not_end_it(iso):
-    killed = []
-    how = iso.close_one(R1, "screen", killed.append, quit_fn=lambda m, n: None,
-                        alive_fn=lambda: True, wait_s=0.1)
-    assert killed == [4242] and how == "kill -9 after screen quit"
-
-
-def test_a_failed_kill_is_reported_not_counted_as_closed(iso):
-    def boom(pid):
-        raise ProcessLookupError(pid)
-    assert iso.close_one(R1, "screen", boom, quit_fn=lambda m, n: None, alive_fn=lambda: True,
+def test_close_sends_nothing_after_the_quit_and_reports_a_survivor(iso, monkeypatch):
+    """HANDLINES-1: no `kill -9` fallback. A session that outlives the quit is reported, and stays."""
+    monkeypatch.setattr(iso.os, "kill", lambda *a: pytest.fail("a signal was sent"))
+    assert iso.close_one(R1, "screen", 77, quit_fn=lambda m, n: None, alive_fn=lambda: True,
                          wait_s=0.1) is None
+
+
+def test_the_quit_names_the_exact_screen_by_its_pid(iso, monkeypatch):
+    runs = []
+    monkeypatch.setattr(iso.subprocess, "run", lambda argv, **k: runs.append(argv))
+    iso.mux_quit_exact("screen", "done-1", 5150)
+    iso.mux_quit_exact("tmux", "done-1", None)
+    assert runs == [["screen", "-S", "5150.done-1", "-X", "quit"],
+                    ["tmux", "kill-session", "-t", "=done-1"]]
 
 
 def test_swap_gate_refuses_at_its_share_and_never_on_an_unreadable_reading(iso):
@@ -344,20 +397,16 @@ def test_sweep_keeps_a_session_that_changed_between_the_two_reads(iso, monkeypat
     monkeypatch.setattr(iso, "close_one", lambda *a: pytest.fail("closed a changed session"))
     _ledger(iso, {"name": "late-1", "pid": 4343, "pid_start": "s", "launched_at": NOW - 7200})
     reads = iter([finished(), finished(end=None)])
-    killed = []
-    items = iso.sweep(apply=True, now=NOW, gather_fn=lambda r, m, me: next(reads),
-                      kill=killed.append)
-    assert killed == [] and not items[0]["closed"]
+    items = iso.sweep(apply=True, now=NOW, gather_fn=lambda r, m, me: next(reads), refusals_fn=SAFE)
+    assert not items[0]["closed"]
     assert items[0]["keep"][0].startswith("changed during the pass")
 
 
-def test_sweep_never_kills_a_session_with_one_keep_reason(iso, monkeypatch):
+def test_sweep_never_closes_a_session_with_one_keep_reason(iso, monkeypatch):
     monkeypatch.setattr(iso, "close_one", lambda *a: pytest.fail("closed a kept session"))
     _ledger(iso, {"name": "busy-1", "pid": 4444, "pid_start": "s", "launched_at": NOW - 7200})
-    killed = []
     iso.sweep(apply=True, now=NOW, gather_fn=lambda r, m, me: finished(unsaved=["x"]),
-              kill=killed.append)
-    assert killed == []
+              refusals_fn=SAFE)
 
 
 def test_the_rate_limit_lets_one_pass_through_per_interval(iso):
@@ -366,14 +415,15 @@ def test_the_rate_limit_lets_one_pass_through_per_interval(iso):
     assert iso.due(NOW + 301) is True
 
 
-def test_session_close_proposes_until_the_owner_switches_it_on(iso, tmp_path, monkeypatch):
+def test_session_close_ships_on_and_the_config_switches_it_off(iso, tmp_path, monkeypatch):
+    """HANDLINES-1: on as shipped (the owner's yes of 2026-09-29); `false` in config.json is the off-switch."""
     import limits
-    assert iso.applies() is False
+    assert iso.applies() is True
     cfg = tmp_path / "cfg.json"
-    cfg.write_text(json.dumps({"limits": {"session_close_apply": True}}))
+    cfg.write_text(json.dumps({"limits": {"session_close_apply": False}}))
     monkeypatch.setenv("GEDAECHTNIS_CONFIG", str(cfg))
     monkeypatch.setattr(limits, "_STATE", None, raising=False)
-    assert iso.applies() is True
+    assert iso.applies() is False
 
 
 # --------------------------------------------------------------------------- parked messages ----
@@ -442,10 +492,17 @@ def test_launch_refuses_a_duplicate_name_recorded_live(tmp_path):
     assert p.returncode == 3 and "duplicate" in p.stdout
 
 
-def test_close_without_the_owner_flag_only_proposes(tmp_path):
-    p = _cli(tmp_path, "close", "--apply")
-    assert p.returncode == 0
-    assert "session_close_apply is off" in p.stdout
+def test_close_proposes_only_while_the_switch_is_off(tmp_path):
+    cfg = tmp_path / "off.json"
+    cfg.write_text(json.dumps({"limits": {"session_close_apply": False}}))
+    p = _cli(tmp_path, "close", extra_env={"GEDAECHTNIS_CONFIG": str(cfg)})
+    assert p.returncode == 0 and "session_close_apply is off" in p.stdout
+
+
+def test_close_dry_run_says_so_and_closes_nothing(tmp_path):
+    p = _cli(tmp_path, "close", "--dry-run")
+    assert p.returncode == 0 and "dry run: nothing is closed." in p.stdout
+    assert not (tmp_path / "state" / "close.log").exists()
 
 
 # ------------------------------------------------------------------------- the launch door ----

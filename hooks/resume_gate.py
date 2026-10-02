@@ -12,8 +12,13 @@ any of these holds (owner rulings 2026-09-23 11:15, 11:35, 11:50):
     above `resume_cold_cap` (200,000). The lifetime is read from the target's last usage record
     that created cache: `ephemeral_1h_input_tokens` > 0 means one hour, otherwise five minutes (the
     Claude Code default). Only when no record says is `resume_cold_s` used.
-  * TOO LITTLE HEADROOM — its context is at or above `resume_window` (420,000) minus
-    `resume_min_headroom` (70,000), warm or not: less than that fits no row.
+  * COLD WITH TOO LITTLE HEADROOM — cold, and its context is at or above `resume_window`
+    (420,000) minus `resume_min_headroom` (70,000): less than that fits no row.
+  * WARM AND FULL (MSGGATE-1) — warm, and at or above `resume_window`; or warm, the message longer
+    than `resume_short_chars` (1,500), and context + the message's token estimate +
+    `context_reach_margin_tokens` (20,000) not under `resume_window`. A warm session is still
+    working, so a short message to it under its window is always delivered (owner 2026-09-30,
+    "fix that": messages to a warm orchestrator at 353-385k were parked by the headroom rule).
   * FABLE AND COLD — its model is `claude-fable-5-1` and its last record is older than its own
     cache lifetime, at any size, unless it is the SENDER'S IGNITER (below). A Fable session is
     started only on the owner's word, and waking a cold one is starting it again. A WARM Fable
@@ -38,12 +43,13 @@ WHAT PASSES, and why each case is not a refused wake:
   * a BUSY target — the message waits for its next tool round; nothing is re-read;
   * a target that is not a named live session here and not a sub-agent id ("main", a teammate
     name, a remote session) — there is no transcript on this machine to measure;
-  * a warm target below the headroom bound — the case the resume exists for; it decides itself
-    whether the next task fits before `resume_window`. A session stopped by the usage limit inside
-    its cache lifetime is this case and must still get its "continue";
+  * a warm target under `resume_window` that the message fits (above) — the case the resume
+    exists for; it decides itself whether the next task fits. A session stopped by the usage limit
+    inside its cache lifetime is this case and must still get its "continue";
   * a cold but small target — re-reading under `resume_cold_cap` costs less than a fresh boot plus
     reading the handoff.
-A pass prints one line with the target's size, headroom and wake price. A target that IS a live idle
+Every decision leads with one line — the class used (live session or sub-agent, warm or cold),
+the context, the window and DELIVERED / PARKED / REFUSED — then the size, headroom and wake price. A target that IS a live idle
 session but whose transcript cannot be read is allowed WITH a note saying it was not measured —
 never a silent pass, never a guessed 0.
 
@@ -312,16 +318,22 @@ def decide(inp: dict, now: float | None = None) -> tuple[str, str] | None:
     min_head = int(limits.get("resume_min_headroom", 70000))
     warm = age <= ttl
     cost = price(model, total, warm)
+    kind = "sub-agent" if sub else "live session"
     state = (f"last record {int(age) // 60} min old against a cache lifetime of {ttl:,} s "
              f"({ttl_src}) — {'warm' if warm else 'cold'}; context {total:,} tokens, "
              f"{window - total:,} of headroom before resume_window {window:,}")
     why = []                                   # in the docstring's order
-    if not warm and total >= cap:
-        why.append(f"it is cold and its context is at or above resume_cold_cap {cap:,}")
-    short = _short_pass(ti.get("message"), warm, total)
-    if total >= window - min_head and not short:
-        why.append(f"it has {window - total:,} tokens of headroom, under resume_min_headroom "
-                   f"{min_head:,}")
+    passed = ""                                # the warm rule that let it through, for the line
+    if warm:
+        passed, refused = _warm_rule(ti.get("message"), total, window)
+        if refused:
+            why.append(refused)
+    else:
+        if total >= cap:
+            why.append(f"it is cold and its context is at or above resume_cold_cap {cap:,}")
+        if total >= window - min_head:
+            why.append(f"it has {window - total:,} tokens of headroom, under resume_min_headroom "
+                       f"{min_head:,}")
     igniter = False
     if model == FABLE and not warm:
         sender = context_cap.locate_transcript(sid, inp.get("transcript_path"))
@@ -329,27 +341,34 @@ def decide(inp: dict, now: float | None = None) -> tuple[str, str] | None:
         if not igniter:
             why.append(f"it runs {FABLE} and is cold, and a cold Fable session is started again "
                        f"only on the owner's word")
+
+    def head(decision: str) -> str:
+        return (f"Resume check for `{to}`: {kind}, {'warm' if warm else 'cold'} — context "
+                f"{total:,}, window {window:,} — {decision}.")
+
     if not why:
         log("resume_gate", f"pass\t{'warm' if warm else 'cold-small'}\tfrom={sid}\tto={to}\t"
                            f"total={total}\tage={int(age)}\tttl={ttl}\tmodel={model}"
+                           + (f"\trule={passed.split(':', 1)[0]}" if passed else "")
                            + ("\tigniter" if igniter else ""))
-        return ("note", f"Resume check for `{to}`: {state}; {cost}."
+        return ("note", head("DELIVERED" + (f" ({passed})" if passed else ""))
+                        + f" {state[0].upper()}{state[1:]}; {cost}."
                         + (" It ignited this session, so this is the reply it is waiting for."
                            if igniter else "")
-                        + (f" Passed as a SHORT message ({short}) although the headroom is under "
-                           f"resume_min_headroom." if short and total >= window - min_head else "")
                         + " Continue if the next task fits in the headroom.")
     reason = _override_reason(ti.get("message"))
     if reason:
         log("deny", f"resume-override\tfrom={sid}\tto={to}\ttarget={tsid}\ttotal={total}\t"
                     f"age={int(age)}\tttl={ttl}\tmodel={model}\treason={reason}\t{cost}")
-        return ("note", f"Resume check overridden for `{to}` ({state}; {cost}): {reason}")
+        return ("note", head("DELIVERED (override)")
+                        + f" Resume check overridden for `{to}` ({state}; {cost}): {reason}")
     handoffs = [] if sub else common.handoff_paths(tsid)
     log("deny", f"resume{'-subagent' if sub else ''}\tfrom={sid}\tto={to}\ttarget={tsid}\t"
                 f"total={total}\tage={int(age)}\tttl={ttl}\tmodel={model}\tcap={cap}\twindow={window}\theadroom={min_head}\t{cost}")
     parked = None if sub else _park(str(target.get("name") or to), "; ".join(why), ti.get("message"),
                                     sid)
-    text = (f"Not sent: `{to}` is idle, and waking it is refused — " + "; ".join(why) + f". "
+    text = (head("PARKED" if parked else "REFUSED") + " "
+            f"Not sent: `{to}` is idle, and waking it is refused — " + "; ".join(why) + f". "
             f"({state}; {cost}.) "
             + ("Start a fresh agent from the brief instead. " if sub else
                "Start the work FRESH from its handoff instead"
@@ -365,21 +384,37 @@ def _message_chars(message) -> int:
     return len(message if isinstance(message, str) else json.dumps(message))
 
 
-def _short_pass(message, warm: bool, total: int) -> str | None:
-    """Why a SHORT message to a WARM target passes the headroom rule, or None (CONTEXTMSG-1).
+def _token_estimate(chars: int) -> int:
+    """Tokens a message of `chars` characters adds, over-estimated on purpose: 3 characters a
+    token, rounded up (English runs ~4; Cyrillic and code nearer 3)."""
+    return -(-chars // 3)
 
-    Off unless both `resume_short_chars` and `resume_short_window` are set (shipped 0 and 0). A
-    report of a few lines re-reads a warm cache for cents and costs the target a few hundred tokens
-    of room; the headroom rule exists for the next ROW, which such a message does not bring. The
-    cold rules never look at this: a cold wake writes the whole context again whatever its length."""
-    chars = int(limits.get("resume_short_chars", 0) or 0)
-    upto = int(limits.get("resume_short_window", 0) or 0)
-    if chars <= 0 or upto <= 0 or not warm or total >= upto:
-        return None
+
+def _warm_rule(message, total: int, window: int) -> tuple[str, str | None]:
+    """(why it passes, None) or ("", why it is refused) for a message to a WARM target (MSGGATE-1).
+
+    A warm session is still working: a message re-reads its cache for cents, and the headroom
+    rule (`resume_min_headroom`) exists for the next ROW, which a message does not bring. So:
+      * at or above `resume_window` — refused, whatever the message;
+      * at most `resume_short_chars` characters — delivered (0 turns this pass off);
+      * longer — delivered when context + its token estimate + `context_reach_margin_tokens` is
+        under `resume_window`, else refused with those numbers.
+    The window is `resume_window` for every target: nothing on this machine tells the gate a
+    builder from a seat. The cold rules never look at this function."""
+    if total >= window:
+        return "", f"its context is at or above resume_window {window:,}"
     n = _message_chars(message)
-    if n > chars:
-        return None
-    return f"{n:,} characters, at most resume_short_chars {chars:,}, below resume_short_window {upto:,}"
+    chars = int(limits.get("resume_short_chars", 0) or 0)
+    if chars > 0 and n <= chars:
+        return f"short: {n:,} characters, at most resume_short_chars {chars:,}", None
+    est = _token_estimate(n)
+    margin = int(limits.get("context_reach_margin_tokens", 20000) or 0)
+    need = total + est + margin
+    sums = (f"context {total:,} + message ~{est:,} tokens ({n:,} characters) + "
+            f"context_reach_margin_tokens {margin:,} = {need:,}")
+    if need >= window:
+        return "", f"{sums}, not under resume_window {window:,}"
+    return f"fits: {sums}, under resume_window {window:,}", None
 
 
 def _compacted(inp: dict, to: str, sid: str, tsid: str, target: dict, transcript: Path,

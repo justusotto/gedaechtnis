@@ -29,7 +29,8 @@ TWO LEVELS, and why they are measured differently — they answer different ques
   REACH = `resume_window` − `resume_min_headroom` − `context_reach_margin_tokens` (TERMOVERLOAD-1).
           Not a statement about work done but about REACHABILITY: at `resume_window` −
           `resume_min_headroom` (350,000 shipped) the resume gate refuses every message sent to
-          this session, so once it goes idle nobody can hand it more work. WARN sits at
+          this session once it is idle and COLD, so nobody can hand it more work (a WARM one still
+          receives messages up to `resume_window`, MSGGATE-1). WARN sits at
           floor + 400,000 — above that bound for every boot floor — so without this level a session
           became unreachable ~200,000 tokens before anything told it (specimens 2026-09-26: the seat
           at 371k needed a RESUME-OVERRIDE; WHISPERDEEP-1 at 428k was replaced from disk). Read from
@@ -350,18 +351,19 @@ def reach_bound() -> int | None:
     if window <= 0:
         return None
     bound = (window - int(limits.get("resume_min_headroom", 70000) or 0)
-             - int(limits.get("context_reach_margin_tokens", 30000) or 0))
+             - int(limits.get("context_reach_margin_tokens", 20000) or 0))
     return bound if bound > 0 else None
 
 
 def _short_clause() -> str:
-    """True with the short-message pass on or off (`resume_short_chars`, off by default)."""
+    """What still reaches a WARM session past the cold bound (MSGGATE-1): a short message up to
+    `resume_window`, when `resume_short_chars` is on (0 = off); a longer one while it fits."""
     chars = int(limits.get("resume_short_chars", 0) or 0)
-    upto = int(limits.get("resume_short_window", 0) or 0)
-    if chars <= 0 or upto <= 0:
+    window = int(limits.get("resume_window", 420000) or 0)
+    if chars <= 0:
         return ""
-    return (f" (a message of at most {chars:,} characters still passes while this session is "
-            f"warm and under {upto:,})")
+    return (f" (while this session is warm, a message of at most {chars:,} characters still passes "
+            f"up to resume_window {window:,})")
 
 
 def _compact_hint(sid: str) -> str:
@@ -408,10 +410,11 @@ def notice(sid: str, transcript_path: str | None) -> str | None:
         bound = reach_bound()
         if bound and current >= bound and not fired & {"reach", "warn", "cap"}:
             unrecorded = not _record_fired(sid, "reach")
-            gate_at = bound + int(limits.get("context_reach_margin_tokens", 30000) or 0)
+            gate_at = bound + int(limits.get("context_reach_margin_tokens", 20000) or 0)
             log("context_cap", f"reach\t{sid}\t{current}\tbound={bound}")
             return (f"CONTEXT — REACH: {current:,} tokens. From {gate_at:,} the resume gate refuses "
-                    f"messages sent to this session while it is idle{_short_clause()}, and a "
+                    f"messages sent to this session once it is idle and its cache is cold"
+                    f"{_short_clause()}, and a "
                     f"refused message waits parked until this session's next prompt or compaction. "
                     f"Bring your handoff up to date now, so a successor can start from disk; if you "
                     f"are waiting on someone, write that into the handoff.{_compact_hint(sid)} "

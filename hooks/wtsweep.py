@@ -5,7 +5,14 @@
 things that share an English word, and conflating them would point a DELETE at the wrong tree.
 `worktree.py` makes copy-on-write clones under `config.worktrees()` (`~/.claude/worktrees`) for
 isolated builds; this module sweeps real git worktrees under `<repo>/.claude/worktrees/`, which is
-where the fleet's placement rule requires them. Neither ever touches the other's root.
+where the fleet's placement rule requires them.
+
+CLONESWEEP-1 (2026-10-01): the clones are swept here too, by their OWN rule (`classify_clone`) and
+their own action. `worktree.py remove` is the only other thing that takes a clone away, and it runs
+only when the WorktreeRemove event fires; for ten clones (44 GB) it never did. A finished clone is
+MOVED to `~/Downloads/To delete YYYY-MM-DD/` with a ledger line — never deleted, never the Trash:
+the person empties that folder by hand. The git-worktree loop below never looks in the clones
+folder, and the clone loop never runs `git worktree remove`.
 
 Why it exists: COMPLETE-1 left 45 worktree folders scattered beside the repo in
 the projects directory, beside the repo, because removing one was a thing every builder had to REMEMBER after verifying
@@ -40,7 +47,7 @@ Nothing here is destructive on its own: `git worktree remove` refuses a dirty tr
 module never calls `rm`, never uses `--force`, and never removes the main worktree.
 """
 from __future__ import annotations
-import json, subprocess
+import fnmatch, hashlib, json, os, re, shlex, subprocess, time
 from pathlib import Path
 
 import common
@@ -48,6 +55,7 @@ import config
 import limits
 import procs
 import destructive
+import rootguard
 
 # Reasons a worktree was kept. The strings are the report's wording, so they live in one place and
 # the tests assert against these names rather than against prose typed twice.
@@ -62,11 +70,21 @@ KEPT_BOUND = "this pass already removed max_files_per_pass worktrees; left for t
 KEPT_CHANGED = "its HEAD moved after it was checked"
 KEPT_PROCESS = "a live process has its working directory in it"
 KEPT_PROCS_UNREAD = "the machine's process working directories could not be read"
+KEPT_YOUNG = "a clone younger than worktree_clone_min_age_seconds"
+KEPT_CLONE_GIT = "a clone whose git state could not be read"
+KEPT_CLONE_STASH = "a clone with a stash made after it was cloned"
+KEPT_CLONE_LINKED = "a clone in which a git worktree was added after it was cloned"
+MAX_CLONE_TIPS = 50                      # more tips than this to judge one by one: kept, not judged
+GENERATED = ["*.pyc", "__pycache__/*", "*/__pycache__/*", ".DS_Store", "*/.DS_Store", "node_modules",
+             "*/node_modules", "*.log", "*-log.tsv", ".claude/scheduled_tasks.lock"]
 
 
-def _git(args: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess:
+def _git(args: list[str], cwd: Path | None = None, alt: Path | None = None,
+         timeout: int = 30) -> subprocess.CompletedProcess:
+    """`alt` lets this one command also read another repository's objects, without fetching."""
+    env = {**os.environ, "GIT_ALTERNATE_OBJECT_DIRECTORIES": str(alt)} if alt else None
     return subprocess.run(["git", *args], capture_output=True, text=True,
-                          stdin=subprocess.DEVNULL, timeout=30,
+                          stdin=subprocess.DEVNULL, timeout=timeout, env=env,
                           cwd=str(cwd) if cwd else None)
 
 
@@ -110,8 +128,20 @@ def session_cwds() -> list[tuple[str, int | None, bool]]:
     session started) and its `cwd_last` (where its last Bash door saw it). The second is the one
     that matters here: every builder and reviewer in this fleet starts in the repo root and then
     works inside a worktree, so a check that knew only the starting directory would find no session
-    in any worktree and happily delete the one somebody is standing in."""
-    return common.session_locations()
+    in any worktree and happily delete the one somebody is standing in.
+
+    CLONESWEEP-1: a record with NO pid field stops counting once its file is older than
+    `worktree_session_stale_seconds`. Such a record can never be shown dead, so it protected a
+    worktree for ever (6 of 17 on 2026-10-01). The file is rewritten each time its session moves
+    directory and touched hourly while it keeps running Bash commands in one (`common.record_cwd`,
+    called by the Bash door only), so its age is time since that session's last Bash call there,
+    to the hour. `process_cwds` is a second
+    guard only while one of the session's processes has its working directory in the worktree."""
+    try:
+        stale = float(limits.get("worktree_session_stale_seconds", 86400))
+    except (TypeError, ValueError):
+        stale = 86400.0
+    return common.session_locations(stale_no_pid=stale)
 
 
 def process_cwds() -> list[tuple[str, int]] | None:
@@ -307,7 +337,251 @@ def sweep(repo: Path, apply: bool = True) -> dict:
             result["kept"].append((path, f"git refused to remove it: {(p.stderr or '').strip()[:120]}"))
     if result["removed"]:
         _git(["worktree", "prune"], cwd=repo)
+    # CLONESWEEP-1: this repo's copy-on-write clones. Counted against the same `n_max`. Nothing
+    # here may raise: the worktrees removed above are only recorded once this function returns.
+    try:
+        _sweep_clones(repo, apply, records, cwds, result, n_max)
+    except Exception as e:                           # noqa: BLE001 — see the comment above
+        result["kept"].append((str(config.worktrees()), f"the clone sweep stopped: {e!r}"[:160]))
     return result
+
+
+def _sweep_clones(repo: Path, apply: bool, records, cwds, result: dict, n_max: int) -> None:
+    for clone in clones_of(repo):
+        ok, reason = classify_clone(repo, clone, records, cwds)
+        if not ok:
+            result["kept"].append((str(clone), reason))
+        elif not apply:
+            result["proposed"].append(str(clone))
+        elif len(result["removed"]) >= n_max:
+            result["kept"].append((str(clone), KEPT_BOUND))
+        else:
+            dest, words = move_clone(clone, CLONE_WHY)
+            if dest is None:
+                result["kept"].append((str(clone), words))
+            else:
+                result["removed"].append(str(clone))
+                result["undo"].append(undo_mv(dest, clone))
+
+
+# ---------------------------------------------------------------- the clones (CLONESWEEP-1) ----
+
+def _generated(rel: str) -> bool:
+    pats = limits.get("worktree_generated", GENERATED)
+    return any(isinstance(p, str) and fnmatch.fnmatch(rel, p)
+               for p in (pats if isinstance(pats, list) else GENERATED))
+
+
+def clone_dirt(wt: Path, born: float) -> list[str] | None:
+    """Uncommitted paths that are the clone's OWN work, or None when that cannot be told.
+
+    A clone is born with the source's uncommitted files (`.gedaechtnis-clone-manifest.json` lists
+    them, each with its sha256 at birth). Its own work is a dirty path the manifest does not list,
+    a listed file whose content no longer has that sha256, a directory (a nested repository: its
+    inside is not read), or a path missing now that was there at birth. A listed path with no hash
+    (born "gone" or "unreadable") is judged by time: written or replaced after `born`, reading the
+    modification time AND the inode change time, since a copy that keeps an old modification time
+    (`cp -p`, `rsync -a`, `mv`) still moves the second.
+    Generated files (`worktree_generated`) are never work. Files git ignores are not seen."""
+    try:
+        base = json.loads((wt / ".gedaechtnis-clone-manifest.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    st = _git(["status", "--porcelain", "-z", "-uall"], cwd=wt, timeout=40)
+    if st.returncode != 0 or not isinstance(base, dict):
+        return None
+    out = []
+    for _xy, rel in common.porcelain_z(st.stdout):
+        if rel.startswith(".gedaechtnis-clone-") or _generated(rel):
+            continue
+        want = base.get(rel)
+        try:
+            s = (wt / rel).lstat()
+        except OSError:
+            changed = want != "gone"                     # absent now: the clone's act unless born so
+        else:
+            if (wt / rel).is_dir():
+                changed = True
+            elif isinstance(want, str) and len(want) == 64:
+                try:                                     # the content itself: no clock can hide it
+                    changed = hashlib.sha256((wt / rel).read_bytes()).hexdigest() != want
+                except OSError:
+                    changed = True
+            else:
+                changed = max(s.st_mtime, s.st_ctime) > born
+        if rel not in base or changed:
+            out.append(rel)
+    return out
+
+
+def clone_worktree_added(wt: Path, born: float) -> bool:
+    """Whether a git worktree was added IN the clone after its birth. A clone is born with a copy
+    of the source's `.git/worktrees/` entries; those are the source's. An entry made or changed
+    after `born` is the clone's own linked worktree, wherever its checkout lies: its uncommitted
+    files are in no status this sweep reads, so the clone is kept. Unreadable = True (kept)."""
+    try:
+        return any(max(e.lstat().st_mtime, e.lstat().st_ctime) > born
+                   for e in (wt / ".git" / "worktrees").iterdir())
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+
+
+def clone_commits_kept_elsewhere(src: Path, wt: Path, born: float = 0.0) -> bool | None:
+    """Whether every commit the clone holds is also in `src`. The clone's tips are EVERY ref it
+    has (branches, tags, anything under `refs/`), HEAD, the HEAD of every linked worktree
+    (`for-each-ref` does not list those), and every reflog entry written after `born` (a commit
+    left behind by `reset --hard` or by leaving a detached HEAD is held by the reflog alone).
+    More than `MAX_CLONE_TIPS` tips the source does not have: "not held", unjudged.
+    A commit counts as held by `src` when
+    one of its refs or reflogs reaches it, or when `git cherry` marks it patch-equivalent to a
+    commit on main. A merge commit is never patch-equivalent: one only the clone has keeps it.
+    The clone's objects are read in place (an alternate object directory); nothing is fetched.
+    None when git cannot read either side; a failing `git cherry` is "not held", never "held"."""
+    tips = _git(["for-each-ref", "--format=%(objectname)"], cwd=wt)
+    head = _git(["rev-parse", "HEAD"], cwd=wt)
+    have = _git(["for-each-ref", "--format=%(objectname)"], cwd=src)
+    linked = _git(["worktree", "list", "--porcelain"], cwd=wt)
+    logs = _git(["log", "-g", "--all", "--date=unix", "--format=%H %gd"], cwd=wt, timeout=40)
+    if (tips.returncode != 0 or head.returncode != 0 or have.returncode != 0
+            or linked.returncode != 0 or logs.returncode != 0):
+        return None
+    extra = {l[5:].strip() for l in linked.stdout.splitlines() if l.startswith("HEAD ")}
+    for line in logs.stdout.splitlines():
+        sha, _, sel = line.partition(" ")
+        m = re.search(r"@\{(\d+)\}$", sel)
+        # reflog times are whole seconds and `born` is not: an entry from the second the clone was
+        # born in counts as after it. An unreadable time counts as after birth too.
+        if m is None or float(m.group(1)) + 1 > born:
+            extra.add(sha)
+    alt = wt / ".git" / "objects"
+    mine = sorted((set(tips.stdout.split()) | {head.stdout.strip()} | extra) - set(have.stdout.split()))
+    if not mine:
+        return True
+    if len(mine) > MAX_CLONE_TIPS:
+        return False
+    only = _git(["rev-list", *mine, "--not", "--all", "--reflog"], cwd=src, alt=alt, timeout=40)
+    if only.returncode != 0:
+        return None
+    unique, same = set(only.stdout.split()), set()
+    for sha in mine if unique else []:
+        c = _git(["cherry", "main", sha], cwd=src, alt=alt, timeout=40)
+        if c.returncode != 0:
+            return False
+        same |= {l[2:].strip() for l in c.stdout.splitlines() if l.startswith("- ")}
+    return unique <= same
+
+
+def classify_clone(repo: Path, wt: Path, records, cwds, now: float | None = None) -> tuple[bool, str]:
+    """(sweepable, reason) for one copy-on-write clone of `repo`. Same order as `classify`:
+    age and occupancy first, git state last; "could not tell" keeps it."""
+    try:
+        born = (wt / ".gedaechtnis-clone-of").stat().st_mtime
+        min_age = float(limits.get("worktree_clone_min_age_seconds", 86400))
+    except (OSError, TypeError, ValueError):
+        return False, KEPT_CLONE_GIT
+    if (now if now is not None else time.time()) - born < min_age:
+        return False, KEPT_YOUNG
+    occupied = _occupied_by(wt, records)
+    if occupied:
+        return False, occupied
+    if cwds is None:
+        return False, KEPT_PROCS_UNREAD
+    if _process_in(wt, cwds):
+        return False, KEPT_PROCESS
+    try:
+        stash = _git(["stash", "list", "--format=%ct"], cwd=wt)
+        if stash.returncode != 0:
+            return False, KEPT_CLONE_GIT
+        if any(float(t) + 1 > born for t in stash.stdout.split()):   # whole seconds, as the reflog
+            return False, KEPT_CLONE_STASH
+        if clone_worktree_added(wt, born):
+            return False, KEPT_CLONE_LINKED
+        kept = clone_commits_kept_elsewhere(repo, wt, born)
+        if kept is None:
+            return False, KEPT_CLONE_GIT
+        if not kept:
+            return False, KEPT_UNMERGED
+        dirt = clone_dirt(wt, born)
+    except (subprocess.TimeoutExpired, OSError, ValueError):
+        return False, KEPT_CLONE_GIT
+    if dirt is None:
+        return False, KEPT_CLONE_GIT
+    return (False, KEPT_DIRTY) if dirt else (True, "")
+
+
+def to_delete_dir(now: float | None = None) -> Path:
+    """`~/Downloads/To delete YYYY-MM-DD/` — where a cleanup puts what it takes away (owner ruling
+    2026-10-01: never the Trash; the person moves that folder to the Trash by hand)."""
+    return config.home() / "Downloads" / time.strftime("To delete %Y-%m-%d", time.localtime(now))
+
+
+def clones_of(repo: Path) -> list[Path]:
+    """The copy-on-write clones of `repo` in the clones folder: a real directory directly in it
+    whose marker's first line names `repo`. A `kind: git-worktree` fallback is a git worktree, is
+    listed by `list_worktrees`, and is not a clone."""
+    out = []
+    try:
+        entries = sorted(config.worktrees().resolve().iterdir())
+    except OSError:
+        return out
+    for d in entries:
+        try:
+            lines = (d / ".gedaechtnis-clone-of").read_text(encoding="utf-8").splitlines()
+        except (OSError, ValueError):                    # ValueError: a marker that is not UTF-8
+            continue
+        if d.is_symlink() or not lines or not lines[0].strip() or "kind: git-worktree" in lines[1:]:
+            continue
+        try:
+            if Path(lines[0].strip()).resolve() == repo.resolve():
+                out.append(d)
+        except (OSError, ValueError):                    # ValueError: a NUL in the marker's path
+            continue
+    return out
+
+
+def move_clone(wt: Path, why: str) -> tuple[Path | None, str]:
+    """Rename `wt` into today's To-delete folder and add a ledger line. (new path, words). A plain
+    rename: same volume only, nothing copied, nothing removed; any failure leaves it in place."""
+    folder = to_delete_dir()
+    dest = folder / wt.name
+    try:
+        rootguard.permit(wt, "clone sweep: the clone")
+        rootguard.permit(dest, "clone sweep: the To-delete folder", scratch=folder)
+        folder.mkdir(parents=True, exist_ok=True)
+        if dest.exists() or dest.is_symlink():
+            return None, f"{dest} already exists"
+        readme = folder / "README-what-went-where.html"
+        if not readme.exists():
+            readme.write_text(TO_DELETE_README, encoding="utf-8")
+        os.rename(wt, dest)
+        with open(folder / "ledger.tsv", "a", encoding="utf-8") as fh:
+            fh.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')}\t{wt}\t{dest}\t{why}\t{undo_mv(dest, wt)}\n")
+    except (OSError, rootguard.OutsideRoot) as e:
+        if dest.exists() and not wt.exists():
+            return dest, f"moved; the ledger line was not written ({e})"
+        return None, f"could not be moved to {folder}: {str(e)[:120]}"
+    return dest, "moved"
+
+
+TO_DELETE_README = """<!doctype html>
+<meta charset="utf-8">
+<title>To delete: what went where</title>
+<h1>To delete: what went where</h1>
+<p>The worktree sweep moved finished build copies here. Nothing was deleted. Every commit in each
+copy is also in its source repository, and it held no uncommitted file of its own.</p>
+<p><code>ledger.tsv</code> in this folder has one line per item: when, where it came from, where it
+is now, why it was safe to move, and the <code>mv</code> command that puts it back.</p>
+<p>When you no longer need them, move this folder to the Trash yourself.</p>
+"""
+
+def undo_mv(dest: Path, wt: Path) -> str:
+    return f"mv {shlex.quote(str(dest))} {shlex.quote(str(wt))}"
+
+
+CLONE_WHY = ("copy-on-write clone; every commit is in the source repository, no stash and no "
+             "uncommitted file of its own (generated files aside)")
 
 
 def state_file() -> Path:

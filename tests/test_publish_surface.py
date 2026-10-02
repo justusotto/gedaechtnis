@@ -23,6 +23,10 @@ PLUGIN = Path(__file__).resolve().parents[1]
 # README.md and the docs/ pages it links, read as one text: the detail moved to docs/.
 README = "\n".join(q.read_text(encoding="utf-8") for q in [PLUGIN / "README.md", *sorted((PLUGIN / "docs").glob("*.md"))])
 
+# GEMINI-PUBLIC: the Gemini worker is on the leave-out list (rules/publish-exclude.json), so a
+# published tree does not carry it; its rows below apply only where the file is.
+GEMINI = (PLUGIN / "tools" / "gemini_worker.py").is_file()
+
 NETWORK = {"urllib", "http", "requests", "socket", "ftplib", "smtplib", "ssl", "asyncio",
            "aiohttp", "httpx", "websocket", "xmlrpc", "telnetlib", "poplib", "imaplib"}
 CALLS = {"run", "Popen", "check_output", "call", "check_call", "system", "popen"}
@@ -41,7 +45,11 @@ DYNAMIC_OK = {"hooks/answers.py", "hooks/boot_check.py", "hooks/maintenance.py",
               "hooks/claim.py",
               "hooks/common.py",   # PLATFORM-1: the Trash command of this machine (README "Platforms")
               # TERMOVERLOAD-1: screen or tmux, whichever this machine has (README names both)
-              "hooks/fleet.py", "tools/sessions.py"}
+              "hooks/fleet.py", "tools/sessions.py",
+              # PERMDESIGN-1: the reviewed script, in its repository's Python (README "reviewed")
+              "tools/reviewed.py",
+              # GEMINISETUP-1: `agy`, found on PATH under the name the rule file gives (README names it)
+              "tools/gemini_worker.py"}
 
 
 def shipped():
@@ -139,6 +147,9 @@ def test_every_program_started_is_one_the_readme_names():
                  "`/usr/bin/trash`", "`gio trash`", "`trash-put`", "`powershell`",
                  "`screen`", "`tmux`", "`sysctl`"):
         assert word in README, f"the README no longer says {word}"
+    if GEMINI:      # development tree only: the page that names the tool is left out with it
+        for word in ("`agy`", "with one exception that you start yourself"):
+            assert word in README, f"docs/gemini-worker.md no longer says {word}"
 
 
 def test_every_osascript_call_passes_its_path_as_an_argument():
@@ -205,11 +216,20 @@ REMOVALS = {
     ("hooks/mergewindow.py", "unlink"): 1,    # the merge-window lock it granted
     ("init.py", "unlink"): 2,                 # its own stamp and temp file
     ("hooks/worktree.py", "rmtree"): 1,       # a clone it made, holding nothing unique (README)
-    ("hooks/fleet.py", "unlink"): 1,          # the mkstemp file read_screen made a moment before
+    ("hooks/fleet.py", "unlink"): 1,          # the hardcopy file read_screen asked for a moment before
+    ("hooks/fleet.py", "rmdir"): 1,           # ... and the mkdtemp folder it made for that file (empty)
     ("hooks/deliver.py", "unlink"): 3,        # its own claim of a parked file, once read back or restored
     ("tools/sessions.py", "unlink"): 1,       # its own stale launch pid file in the state dir
     ("tools/suitelock.py", "unlink"): 2,      # its own suite-lock entry, and a dead suite's
+    ("tools/configure.py", "unlink"): 1,      # its own temp file beside config.json when a write fails
+    ("tools/allow_rules.py", "unlink"): 1,    # its own temp file beside a settings file when a write fails
+    ("tools/gemini_worker.py", "rmdir"): 1,   # the mkdtemp working folder of one run, only when empty
+    ("tools/gemini_worker.py", "unlink"): 3,  # its own .partial: after the hard link to its final name, or
+                                              # the empty one made a moment before a refusal; and its
+                                              # own input-N copy of a --file in that working folder
 }
+if not GEMINI:
+    REMOVALS = {k: v for k, v in REMOVALS.items() if k[0] != "tools/gemini_worker.py"}
 REMOVERS = {"rmtree", "remove", "unlink", "rmdir", "removedirs"}
 
 

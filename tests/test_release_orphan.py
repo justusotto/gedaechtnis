@@ -221,3 +221,138 @@ def test_a_refused_publish_check_cuts_no_tag(tmp_path):
     r = _build(src, out)
     assert r.returncode == 2, r.stdout + r.stderr
     assert _git(out, "tag", "--list").stdout.strip() == ""
+
+
+# ---- GEMINI-PUBLIC: the leave-out list ------------------------------------------------------------
+
+def _source_with_list(tmp_path, listed=("tools/dev_only.py", "rules/publish-exclude.json"), raw=None):
+    """`_source_repo` plus a development-only file and a leave-out list naming it."""
+    src = _source_repo(tmp_path)
+    plug = src / "plugin"
+    (plug / "rules").mkdir()
+    (plug / "tools" / "dev_only.py").write_text("print('development only')\n")
+    (plug / "rules" / "publish-exclude.json").write_text(
+        raw if raw is not None else '{"exclude": [%s]}\n' % ", ".join('"%s"' % p for p in listed))
+    _git(src, "add", "--", "plugin")
+    _git(src, "commit", "-q", "-m", "a development-only file and its list")
+    return src
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="a bash script")
+def test_a_listed_path_is_left_out_of_the_build_and_the_rest_is_there(tmp_path):
+    src = _source_with_list(tmp_path)
+    out = tmp_path / "build"
+    r = _build(src, out)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert not (out / "tools" / "dev_only.py").exists()
+    assert not (out / "rules" / "publish-exclude.json").exists()
+    assert (out / "tools" / "publish_check.py").is_file() and (out / "README.md").is_file()
+    assert "dev_only" not in _git(out, "ls-files").stdout
+    assert "left out      : 2 path(s)" in r.stdout
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="a bash script")
+def test_CONTROL_with_excluded_publishes_the_listed_path(tmp_path):
+    """The same source, one flag: the file is in the build, so the list is what kept it out."""
+    src = _source_with_list(tmp_path)
+    out = tmp_path / "build"
+    r = _build(src, out, extra=("--with-excluded",))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (out / "tools" / "dev_only.py").is_file()
+    assert "left out      : nothing" in r.stdout
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="a bash script")
+def test_a_tree_without_a_list_builds_as_before(tmp_path):
+    src = _source_repo(tmp_path)
+    out = tmp_path / "build"
+    r = _build(src, out)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "left out      : 0 path(s)" in r.stdout
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="a bash script")
+@pytest.mark.parametrize("raw", ['{"exclude": ["../outside.py"]}', '{"exclude": ["/etc/passwd"]}',
+                                 '{"exclude": ["a b.py"]}', '{"exclude": "tools/dev_only.py"}',
+                                 '{"skip": []}', 'not json', '{"exclude": ["tools/dev_only.py/"]}',
+                                 '{"exclude": ["tools/dev_only.py/."]}', '{"exclude": ["tools//dev_only.py"]}',
+                                 '{"exclude": ["tools/*.py"]}', '{"exclude": ["-x"]}', '{"exclude": [5]}'])
+def test_a_list_that_cannot_be_read_refuses_the_build(tmp_path, raw):
+    src = _source_with_list(tmp_path, raw=raw)
+    out = tmp_path / "build"
+    r = _build(src, out)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "publish-exclude.json could not be read" in r.stderr
+    assert not (out / ".git").exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="a bash script")
+def test_a_listed_path_that_is_not_in_the_tree_refuses_the_build(tmp_path):
+    """A name that matches nothing (a typo, a file renamed since) would leave nothing out and still
+    be counted. The control is `test_a_listed_path_is_left_out…`: the same list, spelled right."""
+    src = _source_with_list(tmp_path, listed=("tools/dev_onyl.py",))
+    out = tmp_path / "build"
+    r = _build(src, out)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "tools/dev_onyl.py is on the leave-out list" in r.stderr and "not in the tree" in r.stderr
+    assert not (out / "tools").exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="a bash script")
+@pytest.mark.parametrize("subtree", ["plugin/", "plugin//"])
+def test_a_subtree_typed_with_a_trailing_slash_still_reads_the_list_and_the_version(tmp_path, subtree):
+    src = _source_with_list(tmp_path)
+    out = tmp_path / "build"
+    env = dict(os.environ, TMPDIR=str(tmp_path))
+    r = subprocess.run(["bash", str(src / "plugin" / "tools" / "release_orphan.sh"), "--repo", str(src),
+                        "--subtree", subtree, "--sha", "HEAD", "--out", str(out)], capture_output=True, text=True, env=env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "left out      : 2 path(s)" in r.stdout
+    assert not (out / "tools" / "dev_only.py").exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="a bash script")
+def test_the_list_is_read_even_when_python_drops_its_asserts(tmp_path):
+    src = _source_with_list(tmp_path, raw='{"exclude": ["a b.py"]}')
+    out = tmp_path / "build"
+    env = dict(os.environ, TMPDIR=str(tmp_path), PYTHONOPTIMIZE="1")
+    r = subprocess.run(["bash", str(src / "plugin" / "tools" / "release_orphan.sh"), "--repo", str(src),
+                        "--subtree", "plugin", "--sha", "HEAD", "--out", str(out)], capture_output=True, text=True, env=env)
+    assert r.returncode == 1 and "publish-exclude.json could not be read" in r.stderr
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="a bash script")
+def test_a_listed_directory_is_left_out_with_everything_in_it(tmp_path):
+    src = _source_with_list(tmp_path, listed=("tools",))
+    # tools/ holds the publish check, so the build stops at "no publish_check.py": the directory is gone.
+    out = tmp_path / "build"
+    r = _build(src, out)
+    assert not (out / "tools").exists()
+    assert "carries no tools/publish_check.py" in r.stderr
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="a bash script")
+def test_the_real_cut_carries_no_gemini_file_and_its_pages_do_not_name_the_tool(tmp_path):
+    """The plugin as it stands in this checkout, cut by the real script from a throwaway commit."""
+    if not (PKG / "rules" / "publish-exclude.json").is_file():
+        pytest.skip("a published tree: it carries no leave-out list and no development-only file")
+    src = tmp_path / "src"
+    shutil.copytree(PKG, src / "plugin", ignore=shutil.ignore_patterns("__pycache__", ".pytest_cache", "*.pyc"))
+    assert (src / "plugin" / "tools" / "gemini_worker.py").is_file()      # the control: it IS in the source
+    _git(src, "init", "-q", ".")
+    _git(src, "config", "user.email", "t@local")
+    _git(src, "config", "user.name", "t")
+    _git(src, "add", "--", "plugin")
+    assert _git(src, "commit", "-q", "-m", "the tree").returncode == 0
+    out = tmp_path / "build"
+    r = _build(src, out)
+    assert r.returncode == 0, r.stdout + r.stderr
+    names = _git(out, "ls-files").stdout.split("\n")
+    assert len(names) > 100
+    assert [n for n in names if "gemini" in n.lower()] == []
+    for page in [out / "README.md", out / "CHANGELOG.md", out / "PRIVACY.md", *sorted((out / "docs").glob("*.md"))]:
+        text = page.read_text(encoding="utf-8")
+        for word in ("gemini_worker", "gemini-worker", "`agy`", "Antigravity"):
+            assert word not in text, f"{page.name} names {word}"
+    readme = (out / "README.md").read_text(encoding="utf-8")
+    assert "The plugin's own scripts make no network calls; Claude Code itself does." in readme

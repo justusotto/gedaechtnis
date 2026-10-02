@@ -294,3 +294,85 @@ def test_scope_the_launch_directory_keeps_the_cap_after_a_cd(world, tmp_path_fac
     p = subprocess.run([sys.executable, str(HOOKS / "gate.py"), "agent"], input=json.dumps(payload),
                        capture_output=True, text=True, env=world["env"], timeout=30)
     assert decision(json.loads(p.stdout)) == "deny", p.stdout
+
+
+# ------------------------------------- AGENTCAP-1: only RUNNING sub-agents count ----
+# 2026-09-30: six `Agent` calls passed this door and then failed in the permission step. Nothing
+# started, nothing stopped, and their six slots refused four later launches with nothing running.
+
+def hook(world, script: str, **payload):
+    p = subprocess.run([sys.executable, str(HOOKS / script)],
+                       input=json.dumps({"session_id": SID, "cwd": str(world["tmp"]), **payload}),
+                       capture_output=True, text=True, env=world["env"], timeout=30)
+    assert p.returncode == 0 and p.stdout.strip() == "", (p.stdout, p.stderr)
+
+
+def state_doc(world) -> dict:
+    return json.loads((world["state"] / f"session-start-{SID}.json").read_text(encoding="utf-8"))
+
+
+def seed(world, **doc):
+    world["state"].mkdir(parents=True, exist_ok=True)
+    (world["state"] / f"session-start-{SID}.json").write_text(json.dumps(doc), encoding="utf-8")
+
+
+def test_positive_reservations_that_never_started_stop_counting(world):
+    """The incident, replayed: eight slots reserved five minutes ago, no sub-agent ever started."""
+    seed(world, agent_open=[time.time() - 300] * 8, agent_start_seen=True)
+    assert decision(call(world)) is None
+    assert len(state_doc(world)["agent_open"]) == 1
+
+
+def test_negative_a_reservation_still_inside_the_wait_counts(world):
+    seed(world, agent_open=[time.time() - 30] * 8, agent_start_seen=True)
+    assert decision(call(world)) == "deny"
+
+
+def test_negative_without_a_start_event_the_six_hour_rule_stands(world):
+    """A harness that never sends SubagentStart: expiring reservations after two minutes there
+    would switch the cap off."""
+    seed(world, agent_open=[time.time() - 300] * 8)
+    assert decision(call(world)) == "deny"
+
+
+def test_a_start_turns_the_reservation_into_a_running_entry_and_stop_removes_it(world):
+    call(world)
+    hook(world, "subagent_start.py", agent_id=AID, agent_type="general-purpose")
+    doc = state_doc(world)
+    assert doc["agent_open"] == [] and list(doc["agent_running"]) == [AID]
+    assert doc["agent_start_seen"] is True
+    call(world)                                         # a second call, reserved, not yet started
+    hook(world, "subagent_stop.py", agent_id=AID)
+    doc = state_doc(world)
+    assert doc["agent_running"] == {} and len(doc["agent_open"]) == 1
+
+
+def test_negative_running_sub_agents_still_fill_the_cap_long_after_the_wait(world):
+    seed(world, agent_start_seen=True,
+         agent_running={f"a{i}": time.time() - 3600 for i in range(8)})
+    res = call(world)
+    assert decision(res) == "deny" and "8 live" in reason(res)
+
+
+def test_eight_finished_sub_agents_leave_the_count_at_zero(world):
+    for i in range(8):
+        call(world)
+        hook(world, "subagent_start.py", agent_id=f"a{i}")
+        hook(world, "subagent_stop.py", agent_id=f"a{i}")
+    doc = state_doc(world)
+    assert doc["agent_open"] == [] and doc["agent_running"] == {}
+    assert "agent_max_concurrent" not in reason(call(world))
+
+
+def test_the_start_hook_is_registered():
+    d = json.loads((HOOKS / "hooks.json").read_text(encoding="utf-8"))
+    cmds = [h["command"] for e in d["hooks"]["SubagentStart"] for h in e["hooks"]]
+    assert any(c.endswith('/hooks/subagent_start.py"') for c in cmds)
+
+
+def test_negative_a_payload_that_is_no_object_exits_0_without_a_traceback(world):
+    """Review bfbf0e48 item 11: a JSON list made `inp.get` raise and the hook exit 1."""
+    for payload in ("[1, 2]", '"text"', "{not json", ""):
+        p = subprocess.run([sys.executable, str(HOOKS / "subagent_start.py")], input=payload,
+                           capture_output=True, text=True, env=world["env"], timeout=30)
+        assert (p.returncode, p.stdout, p.stderr) == (0, "", ""), payload

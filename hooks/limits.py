@@ -65,10 +65,10 @@ DEFAULTS = {
     "resume_cold_s": 300,
     "resume_window": 420000,
     "resume_min_headroom": 70000,
-    # CONTEXTMSG-1: a message of at most `resume_short_chars` characters to a WARM target passes the
-    # headroom rule below `resume_short_window`. Both 0 = off, the shipped behaviour.
-    "resume_short_chars": 0,
-    "resume_short_window": 0,
+    # CONTEXTMSG-1, MSGGATE-1: a message of at most `resume_short_chars` characters to a WARM target
+    # under `resume_window` is delivered; 0 = off. `resume_short_window` is RETIRED (not read).
+    "resume_short_chars": 1500,
+    "resume_short_window": 400000,
     "split_min_entries": 8,
     "split_min_remaining_entries": 4,
     "split_min_remaining_share": 0.0,
@@ -84,6 +84,7 @@ DEFAULTS = {
     # measurement is folded into `_lesson_push_enabled`, where both designs' gates are recorded.
     "agent_max_concurrent": 8,
     "agent_open_stale_seconds": 21600,
+    "agent_pending_seconds": 120,
     "lesson_push_max_per_fire": 2,
     "lesson_push_max_per_session": 10,
     # LESSONPUSH-3, the BOOT arm. A separate switch from `lesson_push_enabled` on purpose: the
@@ -92,6 +93,11 @@ DEFAULTS = {
     "lesson_push_boot_enabled": False,
     "lesson_push_boot_max_lines": 5,
     "worktree_sweep": True,
+    "worktree_session_stale_seconds": 86400,
+    "worktree_clone_min_age_seconds": 86400,
+    "worktree_generated": ["*.pyc", "__pycache__/*", "*/__pycache__/*", ".DS_Store", "*/.DS_Store",
+                           "node_modules", "*/node_modules", "*.log", "*-log.tsv",
+                           ".claude/scheduled_tasks.lock"],
     # DESTRUCTIVEGATE-1: every automatic chore that moves or removes a user file proposes until
     # the vault switches it on, and is bounded per pass. See hooks/destructive.py.
     "compaction_apply": False,
@@ -120,11 +126,14 @@ DEFAULTS = {
     "html_head_deny_from": "",
     "launch_pin_door": True,
     "launch_pin_deny_from": "",
-    "judge_md_door": True,
+    # PUBLICDOORS-1: the four doors written for one working style ship OFF; `"profile": "atlas"`
+    # in config.json turns them on (PROFILES below), and so does each key set to true.
+    "judge_md_door": False,
     "judge_md_deny_from": "",
-    "row_identity_door": True,
+    "row_identity_door": False,
     "row_identity_deny_from": "",
-    "marker_roster_door": True,
+    "marker_roster_door": False,
+    "artifact_open_door": False,
     # KILLDOOR-1: a kill whose target the shell computes (hooks/killdoor.py).
     "kill_door": True,
     "kill_deny_from": "",
@@ -132,13 +141,19 @@ DEFAULTS = {
     "facts_max_bytes": 0,
     "facts_inline_limit_chars": 10000,
     # TERMOVERLOAD-1: the REACH notice, the launch cap, the session-close sweep and its door.
-    "context_reach_margin_tokens": 30000,
+    "context_reach_margin_tokens": 20000,
     "session_cap": 0,
-    "session_swap_cap_share": 0,
-    "session_close_apply": False,
+    "session_swap_cap_share": 0.0,
+    # LAUNCHGATE-1: the launch memory test reads the kernel's pressure level, not a swap share.
+    "session_launch_memory_floor": 20,
+    "session_launch_swap_free_mb": 512,
+    "session_close_apply": True,
     "session_close_idle_minutes": 180,
     "session_close_every_s": 300,
+    "session_close_swap_used_mb": 4096,
+    "session_close_memory_floor": 30,
     "session_close_exempt": [],
+    "session_close_never": ["* host", "*-host", "rc-host*"],
     "session_cap_per_seat": 0,
     "session_launch_door": "warn",
 }
@@ -150,6 +165,50 @@ DEFAULTS = {
 # wrong" for a vault that had configured plenty. Three facts produced by one read belong in one
 # value; there is no longer a state in which some of them are set.
 _STATE: tuple | None = None
+
+# PUBLICDOORS-1: a profile is a named set of limit values, applied over the shipped file and under
+# the vault's own `limits` object, so one key set by hand still wins either way. `public` is the
+# default and changes nothing. `atlas` turns on the four doors written for a vault with work
+# queues, review pages and a lane roster.
+PROFILE_DOORS = ("artifact_open_door", "judge_md_door", "row_identity_door", "marker_roster_door")
+PROFILES = {"public": {}, "atlas": {k: True for k in PROFILE_DOORS}}
+
+
+def _profile() -> tuple[str, list]:
+    """(the profile in force, problems). An unknown name is `public`, and is named."""
+    try:
+        import config                                   # noqa: PLC0415 — as in _vault_overrides
+        raw = config.profile_raw()
+    except Exception:
+        return "public", []
+    if raw in PROFILES:
+        return raw, []
+    return "public", [f"`profile` is {raw!r}, not one of {', '.join(sorted(PROFILES))} — the "
+                      "`public` profile is in force"]
+
+
+def profile() -> str:
+    _load()
+    return _STATE[3] if _STATE and len(_STATE) > 3 else "public"
+
+
+def _dated_but_off(merged: dict, overrides: dict, name: str) -> list:
+    """A profile door that has a DENY date in config.json and is off: the date does nothing, so say
+    so, with the reason it is off and the change that turns it on."""
+    out = []
+    for key in PROFILE_DOORS:
+        date = overrides.get(key[:-len("_door")] + "_deny_from")
+        if not (isinstance(date, str) and date.strip()) or merged.get(key):
+            continue
+        head = f"`{key[:-len('_door')]}_deny_from` is set in config.json, but that door is off"
+        if overrides.get(key) is False:
+            how = "remove that key or set it to true" if PROFILES[name].get(key) else "set it to true"
+            out.append(f"{head} (`{key}` is false in the `limits` object), so nothing is checked — {how}")
+        else:
+            out.append(f"{head} under the `{name}` profile, so nothing is checked — set the profile to "
+                       f"`atlas` (`\"profile\": \"atlas\"` in config.json; GEDAECHTNIS_PROFILE wins over "
+                       f"the file), or add `\"{key}\": true` to the `limits` object")
+    return out
 
 
 def _vault_overrides() -> tuple[dict, list]:
@@ -245,6 +304,10 @@ def _vault_overrides() -> tuple[dict, list]:
         if not isinstance(v, want if want is not float else (int, float)):
             problems.append(f"{where}: `{k}` is a {type(v).__name__}, not a "
                             f"{want.__name__} — not applied")
+            continue
+        if want is float and k.endswith("_share") and not (0 <= v <= 1):
+            # a share is a fraction of a whole: 1.5 (or NaN) is a typo, never a threshold (SWAPCAP)
+            problems.append(f"{where}: `{k}` is {v!r}, not a share between 0 and 1 — not applied")
             continue
         if want is dict:
             # ★ A DICT LIMIT IS MERGED PER SUB-KEY, NEVER REPLACED. `role_soft_limits_lines` is a
@@ -355,16 +418,20 @@ def _file_layer() -> dict:
 
 
 def _load() -> dict:
-    """The defaults, then the file's keys, then the vault's `limits` object. Each layer over the
+    """The defaults, then the file's keys, then the profile's, then the vault's `limits` object. Each layer over the
     last; an unreadable or non-object file or config layer leaves the layers below it standing."""
     global _STATE
     if _STATE is not None:
         return _STATE[0]
     merged = _file_layer()
+    name, profile_problems = _profile()
+    for k, v in PROFILES[name].items():
+        _apply(merged, k, v)
     overrides, problems = _vault_overrides()
     for k, v in overrides.items():
         _apply(merged, k, v)
-    _STATE = (merged, problems, overrides)
+    problems = profile_problems + problems + _dated_but_off(merged, overrides, name)
+    _STATE = (merged, problems, overrides, name)
     return merged
 
 

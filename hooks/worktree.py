@@ -54,11 +54,8 @@ def repo_root(cwd: str) -> Path | None:
 def dirt_manifest(repo: Path) -> dict:
     """sha256 of every dirty or untracked file (-uall) at this moment — the clone's own baseline."""
     out = {}
-    st = sh(["git", "-C", str(repo), "status", "--porcelain", "-uall"])
-    for l in st.stdout.splitlines():
-        if len(l) <= 3:
-            continue
-        rel = l[3:].strip().strip('"')
+    st = sh(["git", "-C", str(repo), "status", "--porcelain", "-z", "-uall"])
+    for _xy, rel in common.porcelain_z(st.stdout):
         if rel.startswith(".gedaechtnis-clone-"):
             continue
         p = repo / rel

@@ -274,7 +274,7 @@ def notify(sid: str, cwd: str | None, transcript_path: str | None, opener=None,
     if config.session_name_pattern() is None:
         return None
     if name is None:
-        name = procs.session_name(procs.claude_pid())
+        name = procs.session_name(procs.own_pid())     # never a host's name (PROCSHOST-1)
     groups = match_name(name)
     if groups is None:
         return None
@@ -345,7 +345,7 @@ def facts_line(name: str | None = None) -> str | None:
     if config.session_name_pattern() is None:
         return None
     if name is None:
-        name = procs.session_name(procs.claude_pid())
+        name = procs.session_name(procs.own_pid())     # never a host's name (PROCSHOST-1)
     if not name:
         return None
     rows = unread(name)

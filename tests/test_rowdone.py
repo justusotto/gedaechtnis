@@ -6,7 +6,7 @@ rows. The vault, repository, roster and lane marker are scratch copies under tmp
 redirected through the environment, which this package re-reads on every call.
 """
 from __future__ import annotations
-import json, os, subprocess, sys
+import json, os, subprocess, sys, time
 from pathlib import Path
 import pytest
 
@@ -400,3 +400,129 @@ def test_vault_sha_through_the_cli(w, monkeypatch, capsys):
     assert rowdone.main(["flip", "q:ME-1", "--vault-sha", "deadbeef", "--by", "b"]) == rowdone.NOT_ON_MAIN
     assert rowdone.main(["flip", "q:ME-1", "--vault-sha", vsha, "--by", "b", "--repo", str(w["repo"])]) == rowdone.OK
     assert f"  - done: {vsha} " in own(w)
+
+
+# ---- ROWDONEQ-1: a busy vault owes the mark instead of losing it -----------------------------------
+
+ME_PATHS = ["Queues", "Channels/ME"]
+
+
+def owed(w):
+    p = Path(os.environ["GEDAECHTNIS_STATE_DIR"]) / rowdone.OWED_FILE
+    return json.loads(p.read_text()) if p.exists() else []
+
+
+@pytest.fixture
+def busy(w, monkeypatch):
+    """The suite lock held by a live foreign pid; `busy()` lets go of it."""
+    monkeypatch.setenv("GEDAECHTNIS_SUITE_WAIT_S", "0")
+    d = rowdone.suitelock.lock_dir()
+    rowdone.suitelock.acquire(d, 1)
+    return lambda: rowdone.suitelock.release(d, 1)
+
+
+def test_a_refusal_at_a_busy_vault_is_OWED_and_applied_at_the_first_quiet_check(w, busy):
+    code, line = run(w, [("ME-1", w["merged"])])[0]
+    assert code == rowdone.PYTEST and "owed" in line
+    run(w, [("ME-1", w["merged"])])                                  # refused twice: one entry
+    [e] = owed(w)
+    assert (e["qid"], e["sha"], e["lane"], e["by"]) == ("ME-1", w["merged"], "ME", "builder-9")
+    assert e["handoff"].endswith("HANDOFF-x.md") and e["repo"] == str(w["repo"])
+    # still busy: kept, nothing written
+    assert [c for c, _l in rowdone.apply_owed("ME", ME_PATHS)] == [rowdone.PYTEST]
+    assert len(owed(w)) == 1 and "- [ ] `q:ME-1`" in own(w)
+    busy()
+    [(code, line)] = rowdone.apply_owed("ME", ME_PATHS)
+    assert code == rowdone.OK and line.startswith("owed, closed: ")
+    assert "- [x] `q:ME-1`" in own(w) and f"  - done: {w['merged']} " in own(w)
+    assert owed(w) == [] and head_files(w) == ["Queues/regions/own.md"]
+
+
+def test_a_quiet_flip_owes_nothing_and_another_lane_never_applies_our_entry(w, busy):
+    run(w, [("ME-1", w["merged"])])
+    busy()
+    assert rowdone.apply_owed("THEM", ["Queues/regions/theirs.md"]) == []
+    assert len(owed(w)) == 1 and "- [ ] `q:ME-1`" in own(w)
+    assert run(w, [("ME-2", w["merged"])])[0][0] == rowdone.OK        # quiet: flipped directly
+    assert [e["qid"] for e in owed(w)] == ["ME-1"]
+
+
+def test_an_owed_sha_not_on_main_waits_then_is_dropped_after_OWED_DAYS(w, busy):
+    run(w, [("ME-1", w["unmerged"])])
+    busy()
+    assert [c for c, _l in rowdone.apply_owed("ME", ME_PATHS)] == [rowdone.NOT_ON_MAIN]
+    assert len(owed(w)) == 1
+    late = time.time() + (rowdone.OWED_DAYS + 1) * 86400
+    [(code, line)] = rowdone.apply_owed("ME", ME_PATHS, now=late)
+    assert code == rowdone.NOT_ON_MAIN and line.startswith("owed, closed: ")
+    assert owed(w) == [] and "- [ ] `q:ME-1`" in own(w)
+
+
+def test_a_final_refusal_closes_the_entry_at_once(w, busy):
+    run(w, [("NOPE-9", w["merged"])])
+    busy()
+    assert [c for c, _l in rowdone.apply_owed("ME", ME_PATHS)] == [rowdone.ABSENT]
+    assert owed(w) == []
+
+
+def test_the_stop_door_applies_owed_marks_and_the_boot_line_names_them(w, busy):
+    run(w, [("ME-1", w["merged"])])
+    [line] = rowdone.owed_line("ME")
+    assert "q:ME-1" in line and rowdone.owed_line("THEM") == []
+    busy()
+    res = rowdone.at_stop("sid-with-no-handoff", str(w["repo"]))
+    assert [c for c, _l in res] == [rowdone.OK] and "- [x] `q:ME-1`" in own(w)
+    assert rowdone.owed_line("ME") == []
+
+
+def test_negative_a_string_that_is_no_sha_is_never_owed(w, busy):
+    """Review bfbf0e48 item 12. Control: the valid sha in the same busy state IS owed."""
+    code, line = _flip(w, "not-a-sha", False)
+    assert code == rowdone.NOT_ON_MAIN and "owed" not in line and owed(w) == []
+    code, line = _flip(w, w["merged"], False)
+    assert code == rowdone.PYTEST and "owed" in line and len(owed(w)) == 1
+
+
+def test_two_lanes_owing_the_same_row_each_keep_and_close_their_own_entry(w, busy):
+    """Item 13: with one entry per (row, sha) the second lane was told "owed" and held nothing."""
+    args = ("ME-1", w["merged"], "b", w["repo"])
+    assert rowdone.owe(*args, "THEM", False, None) and rowdone.owe(*args, "ME", False, None)
+    rowdone.owe(*args, "ME", False, None)                            # again: still one each
+    assert sorted(e["lane"] for e in owed(w)) == ["ME", "THEM"]
+    busy()
+    [(code, _l)] = rowdone.apply_owed("ME", ME_PATHS)
+    assert code == rowdone.OK and [e["lane"] for e in owed(w)] == ["THEM"]   # THEM's entry is not ME's to close
+
+
+def test_applying_owed_marks_leaves_the_wait_budget_of_the_process_as_it_was(w, busy, monkeypatch):
+    """Item 14: `apply_owed` set the deadline to "now" for good, so the subject scan after it in
+    the same Stop never waited. Control: inside `apply_owed` the budget IS spent (cap 0)."""
+    run(w, [("ME-1", w["merged"])])
+    seen = []
+    real = rowdone.suitelock.writer_gate
+    monkeypatch.setattr(rowdone.suitelock, "writer_gate",
+                        lambda ps_lines=None, cap_s=0.0: seen.append(cap_s) or real(ps_lines=ps_lines, cap_s=0.0))
+    for start in (None, time.monotonic() + 500):
+        monkeypatch.setattr(rowdone, "_WAIT_DEADLINE", start)
+        seen.clear()
+        rowdone.apply_owed("ME", ME_PATHS)
+        assert seen == [0.0] and rowdone._WAIT_DEADLINE == start
+    monkeypatch.setattr(rowdone, "_WAIT_DEADLINE", None)
+    monkeypatch.setenv("GEDAECHTNIS_SUITE_WAIT_S", "7")
+    seen.clear(); rowdone.suite_busy()
+    assert 6.0 < seen[0] <= 7.0                                      # a fresh budget, not zero
+
+
+def test_negative_an_owed_list_outside_the_packages_roots_is_refused_and_nothing_raises(w, busy, monkeypatch):
+    """The owed list is written under `rootguard.permit`: a state dir the guard does not accept
+    writes nothing and logs, instead of raising into a Stop hook. Control: the fixture's own
+    state dir takes the entry."""
+    assert rowdone.owe("ME-1", w["merged"], "b", w["repo"], "ME", False, None) and len(owed(w)) == 1
+
+    def refuse(path, why="", scratch=None):
+        raise rowdone.rootguard.OutsideRoot(f"{path} is outside every root")
+    with monkeypatch.context() as m:
+        m.setattr(rowdone.rootguard, "permit", refuse)
+        rowdone.owe("ME-2", w["merged"], "b", w["repo"], "ME", False, None)
+        assert rowdone.apply_owed("ME", ME_PATHS) == []
+    assert [e["qid"] for e in owed(w)] == ["ME-1"]

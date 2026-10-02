@@ -24,6 +24,8 @@ share one mode rule, one log and one scope rule.
 WARN, THEN DENY — the flip is a DATE, per door, in the `limits` object of config.json:
 `<door>_deny_from: "YYYY-MM-DD"`. Before that day, or with the key empty or malformed, the tool
 call runs and the model is told what the door would have said. `<door>_door: false` turns one off.
+`judge_md`, `row_identity` and `marker_roster` ship OFF (PUBLICDOORS-1): they suit one working style,
+and `"profile": "atlas"` in config.json, or `<door>_door: true`, turns them on.
 `marker_roster` is WARN-ONLY by design and has no DENY date: a two-places change is two writes,
 and refusing the first would make the rule impossible to follow.
 
@@ -75,7 +77,7 @@ WRITE_DOORS = ("secret", "html_head", "judge_md", "row_identity", "marker_roster
 # ---- mode ----------------------------------------------------------------------------------------
 
 def enabled(door: str) -> bool:
-    return bool(limits.get(f"{door}_door", True))
+    return bool(limits.get(f"{door}_door", f"{door}_door" not in limits.PROFILE_DOORS))
 
 
 def deny_from(door: str) -> str:
@@ -121,7 +123,9 @@ def facts_line() -> str:
         parts.append("WARN " + ", ".join(warn))
     if off:
         parts.append("off " + ", ".join(off))
-    return "- Rule doors (DOORS-2): " + " · ".join(parts) + "."
+    art = "on" if limits.get("artifact_open_door", False) else "off"
+    return ("- Rule doors (DOORS-2): " + " · ".join(parts) + f". Profile `{limits.profile()}`; "
+            f"artifact-open door {art}.")
 
 
 # ---- shared text helpers -------------------------------------------------------------------------

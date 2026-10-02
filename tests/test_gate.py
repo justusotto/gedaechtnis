@@ -180,6 +180,7 @@ def test_benign_allowed(world, cmd):
 
 # --------------------------------------------------------- artifact page, not file:// ----
 def test_open_answer_store_page_denied_plain_html_allowed(world, tmp_path):
+    world["env"]["GEDAECHTNIS_PROFILE"] = "atlas"      # PUBLICDOORS-1: this door ships off (test_publicdoors.py)
     page = tmp_path / "judge.html"; page.write_text('<title>x</title><script>const db=await claude.use("db")</script>')
     plain = tmp_path / "plain.html"; plain.write_text("<title>x</title><p>hi</p>")
     assert decision(bash(world, f"open {page}")) == "deny"

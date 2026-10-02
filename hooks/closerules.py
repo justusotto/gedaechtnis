@@ -66,7 +66,23 @@ BG_TOOLS = ("Agent", "Task", "Monitor", "Workflow")
 _BG_ID = re.compile(r"with ID: (\w+)|agentId: (\w+)|Monitor started \(task (\w+)|\btask[_ ]id[\"':\s]+(\w+)")
 _TN_ID = re.compile(r"<task-id>\s*(\w+)\s*</task-id>")
 _TN_END = re.compile(r"<status>\s*(completed|failed|killed|stopped|cancelled|expired)\s*</status>")
+END_PAIR_S = 60.0                    # two `end_turn` records this close are one message's parts
 TAIL_TEXT = 700                      # the "last words" are this many characters of the final text
+
+
+def _reported(body, open_bg: dict, queued: bool = False) -> bool:
+    """Whether `body` is a task notification; one with a final status takes its task off `open_bg`.
+    `queued`: the text of a queue or attachment record, which must BEGIN with the notification —
+    a prompt or a peer's message that quotes one is somebody's words, not a report."""
+    if not isinstance(body, str) or "<task-notification>" not in body[:200]:
+        return False
+    if queued and not body.lstrip().startswith("<task-notification>"):
+        return False
+    for block in body.split("<task-notification>")[1:]:     # id and status are paired per block
+        tid, end = _TN_ID.search(block), _TN_END.search(block)
+        if tid and end:
+            open_bg.pop(tid.group(1), None)
+    return True
 
 
 def _ts(s) -> float | None:
@@ -116,7 +132,9 @@ def scan(path: Path, lines=None) -> dict:
     """One pass over a transcript. Returns {name, sid, cwd, ends, activity, pending, last}.
 
     ends: one snapshot per main-chain turn that ENDED (assistant end_turn, no tool call left
-          without its result): {ts, text, open_bg, wake_until, cron, writes, reports, humans}.
+          without its result): {ts, text, open_bg, open_bg_ts (id -> when it was started), began
+          (when the turn began: the last prompt, message or notification), sent (the messages the
+          turn sent with SendMessage, [{to, ts}]), wake_until, cron, writes, reports, humans}.
     activity: timestamps of every record that means the session was USED — a user record of any
           origin (typed, a peer's message, a task notification), a queued prompt, an assistant record.
     last: the snapshot of the final end if the transcript's last conversation record IS that end,
@@ -130,7 +148,9 @@ def scan(path: Path, lines=None) -> dict:
     name = sid = cwd = None
     uses: dict[str, tuple[str, dict]] = {}
     open_calls: set[str] = set()
-    open_bg: set[str] = set()
+    open_bg: dict[str, float | None] = {}              # task id -> when it was started (CLOSETUNE-1)
+    sent: list[dict] = []                              # messages it sent in the current turn
+    began = None                                       # when the current turn began
     writes: dict[str, float] = {}
     reports: list[str] = []
     wake_until = 0.0
@@ -140,6 +160,7 @@ def scan(path: Path, lines=None) -> dict:
     ends: list[dict] = []
     activity: list[float] = []
     last_is_end = False
+    end_at = end_mid = None                            # the last end record's time and message id
     for line in lines:
         try:
             rec = json.loads(line)
@@ -157,8 +178,18 @@ def scan(path: Path, lines=None) -> dict:
         sid = sid or rec.get("sessionId")
         cwd = cwd or rec.get("cwd")
         if typ == "queue-operation":
-            if rec.get("operation") == "enqueue" and ts:
-                activity.append(ts)
+            if rec.get("operation") == "enqueue":
+                if ts:
+                    activity.append(ts)
+                # CLOSETUNE-2 (2026-10-02): a task that reports while the session is WORKING is
+                # queued and handed over as an attachment, never as a user record. Not reading
+                # these left every such task "never reported back" (15 finished sessions kept).
+                _reported(rec.get("content"), open_bg, queued=True)
+            continue
+        if typ == "attachment":
+            att = rec.get("attachment")
+            if isinstance(att, dict) and att.get("type") == "queued_command":
+                _reported(att.get("prompt"), open_bg, queued=True)
             continue
         if typ not in ("user", "assistant"):
             continue
@@ -177,16 +208,19 @@ def scan(path: Path, lines=None) -> dict:
                 if tool in BG_TOOLS or inp.get("run_in_background"):
                     body = _text_of([b])
                     for m in _BG_ID.finditer(body[:2000]):
-                        open_bg.add(next(g for g in m.groups() if g))
+                        open_bg.setdefault(next(g for g in m.groups() if g), ts)   # None: unknown
+                elif tool == "SendMessage" and not b.get("is_error"):
+                    to = inp.get("to") or inp.get("recipient")
+                    if isinstance(to, str) and to:
+                        sent.append({"to": to, "ts": ts or 0.0})
             if not results:
                 body = _text_of(content)
-                if "<task-notification>" in body[:200]:
-                    tid, end = _TN_ID.search(body), _TN_END.search(body)
-                    if tid and end:
-                        open_bg.discard(tid.group(1))
+                if _reported(body, open_bg):
+                    pass
                 elif not rec.get("isMeta") and (rec.get("origin") or {}).get("kind") in (None, "human"):
                     humans += 1
                 turn_text = ""
+                began, sent = ts, []
             continue
         # assistant
         for b in blocks:
@@ -220,9 +254,22 @@ def scan(path: Path, lines=None) -> dict:
         # stop_reason "tool_use", never "end_turn" (reviewer, 2026-09-27) — so today it never fires.
         # Keep it: a turn with a call awaiting its result or a prompt is the one thing never closed.
         ended = msg.get("stop_reason") == "end_turn" and not open_calls
+        # One final message can arrive as two records (its thinking, then its text), each marked
+        # `end_turn`: that is ONE turn end, and the later record replaces the earlier snapshot
+        # (CLOSETUNE-2: the replay read the second record as a turn the session did on its own).
+        # Only records of the SAME message (its id, or END_PAIR_S apart: measured 6 ms and 1 s) —
+        # a reply hours later with nothing recorded in between is a turn of its own.
+        mid = msg.get("id")
+        if ended and last_is_end and ends and (
+                (mid and mid == end_mid) or
+                (not (mid and end_mid) and ts is not None and end_at is not None
+                 and 0 <= ts - end_at <= END_PAIR_S)):
+            ends.pop()
         last_is_end = ended
         if ended:
+            end_at, end_mid = ts, mid
             ends.append({"ts": ts, "text": turn_text, "open_bg": sorted(open_bg),
+                         "open_bg_ts": dict(open_bg), "began": began, "sent": list(sent),
                          "wake_until": wake_until, "cron": cron, "writes": dict(writes),
                          "reports": list(reports), "humans": humans})
     return {"name": name, "sid": sid, "cwd": cwd, "ends": ends, "activity": activity,
@@ -263,12 +310,107 @@ def verdict(end: dict | None, now: float, idle_min: float, handoff: bool = False
     return keep
 
 
+UNKNOWN_FACTOR = 4          # an UNKNOWN keeps only while the session is younger than idle × this
+REPORT_IDLE_MIN = 30        # minutes of quiet after a done handoff or a report to its seat
+
+
+def finished(end: dict | None, now: float, idle_min: float, handoff_done: float | None = None,
+             seat: str | None = None, slack_s: float = 300, nothing_runs: bool = False) -> dict:
+    """CLOSETUNE-1: whether a session is FINISHED, from facts about time, never from its words. Pure.
+
+    Finished when its last turn ENDED (no tool call without its result at the tail) and ONE of:
+      (time)    its last assistant turn is at least `idle_min` minutes old;
+      (handoff) `handoff_done` — the author time of the last commit of its handoff whose State
+                says DONE / LANDED / STOPPED — falls INSIDE the final turn (from when it began to
+                `slack_s` after it ended): the session committed it as its last act — and the
+                turn ended at least REPORT_IDLE_MIN minutes ago (CLOSETUNE-2: the replay of
+                2026-09-29..10-02 found three such sessions messaged by their seat 2, 13 and 16
+                minutes after the handoff; none after 30);
+      (report)  the final turn sent a message to `seat` (SendMessage `to`, no error) and ended at
+                least REPORT_IDLE_MIN minutes ago.
+    Returns {how, age_s, hard, soft, notes}: `how` = which criterion held (None = not finished);
+    `hard` keeps whatever the age; `soft` keeps only while age < idle × UNKNOWN_FACTOR (the caller
+    adds its own soft facts: git unknown or dirt, an unreadable screen); `notes` never keep — the
+    last words that ask or wait, and the old evidence rule, are printed, not obeyed.
+    `nothing_runs` (CLOSETUNE-2): the caller READ that nothing of this session's runs — its registry
+    status is idle and it has no live process of its own. An OLD task that never reported is then
+    a note, not a doubt. A young one keeps either way."""
+    out = {"how": None, "age_s": None, "hard": [], "soft": [], "notes": []}
+    if end is None:
+        out["hard"].append("idle: its last turn has not ended (working, or a tool call waiting on a prompt)")
+        return out
+    ts = end.get("ts")
+    age = (now - ts) if ts is not None else None
+    out["age_s"] = age
+    if age is not None and age >= idle_min * 60:
+        out["how"] = f"its last turn ended {age / 3600:.1f} h ago (≥ {idle_min / 60:g} h)"
+    elif (handoff_done is not None and end.get("began") is not None and ts is not None
+          and end["began"] <= handoff_done <= ts + slack_s and age >= REPORT_IDLE_MIN * 60):
+        out["how"] = (f"its handoff's State line says done/landed/stopped, no turn began after its "
+                      f"commit, and it has been quiet {age / 60:.0f} min (≥ {REPORT_IDLE_MIN})")
+    elif (seat and age is not None and age >= REPORT_IDLE_MIN * 60
+          and any(s.get("to") == seat for s in end.get("sent") or [])):
+        out["how"] = (f"it sent its report to its seat {seat} and has been quiet "
+                      f"{age / 60:.0f} min (≥ {REPORT_IDLE_MIN})")
+    if out["how"] is None:
+        out["hard"].append(
+            f"finished: its last turn ended {'at an unknown time' if age is None else f'{max(age, 0) / 60:.0f} min ago'}"
+            f" (< {idle_min:g}), and no done/landed/stopped handoff or report to its seat says otherwise")
+    how = asks_or_waits(end.get("text") or "")
+    if how:
+        out["notes"].append(f"its last words {how} ({last_words(end.get('text') or '')[-90:]!r})")
+    limit = now - idle_min * 60
+    # A task whose start time was not recorded is YOUNG (a hard keep); a snapshot from before
+    # CLOSETUNE-1 carries no start times at all, and its tasks count as old.
+    bg_ts = end.get("open_bg_ts")
+    if bg_ts is None:
+        bg_ts = {t: float("-inf") for t in end.get("open_bg") or []}
+    young = sorted(t for t, st in bg_ts.items() if st is None or st > limit)
+    old = sorted(t for t in bg_ts if t not in young)
+    if young:
+        out["hard"].append(f"background: {len(young)} task(s) it started less than {idle_min:g} min "
+                           f"ago have not reported back (e.g. {young[0]})")
+    if old and nothing_runs:
+        out["notes"].append(f"{len(old)} older task(s) it started never reported back (e.g. {old[0]}); "
+                            f"its registry status is idle and no process of its own is running")
+    elif old:
+        out["soft"].append(f"background: {len(old)} older task(s) it started never reported back, and "
+                           f"whether they still run cannot be told (e.g. {old[0]})")
+    if (end.get("wake_until") or 0) > now:
+        out["hard"].append("background: it scheduled a wake-up that is not due yet")
+    if end.get("cron"):
+        out["hard"].append("background: it created a recurring job it has not deleted")
+    if (end.get("humans") or 0) > 1:
+        out["soft"].append("conversation: the owner has typed into it since its first prompt")
+    return out
+
+
 def close_moment(end: dict, idle_min: float, handoff: bool = False) -> float | None:
     """The earliest time `verdict()` would pass for this end, or None if it never would."""
     if end.get("ts") is None:
         return None
     t = max(end["ts"] + idle_min * 60, (end.get("wake_until") or 0) + 1)
     return t if not verdict(end, t, idle_min, handoff) else None
+
+
+def live_moment(end: dict, idle_min: float, handoff_done: float | None = None,
+                seat: str | None = None, nothing_runs: bool = False) -> float | None:
+    """The earliest time the LIVE rule (`finished`, as `fleet.classify` applies it: no hard keep,
+    and a soft keep only up to idle × UNKNOWN_FACTOR) would close a session whose last turn is
+    `end`, or None if it never would. Pure: `finished` asked at each moment its answer can change."""
+    ts = end.get("ts")
+    if ts is None:
+        return None
+    line = idle_min * 60 * UNKNOWN_FACTOR
+    starts = [st for st in (end.get("open_bg_ts") or {}).values() if st]
+    for t in sorted({ts, ts + REPORT_IDLE_MIN * 60, ts + idle_min * 60, ts + line,
+                     (end.get("wake_until") or 0) + 1, *(st + idle_min * 60 for st in starts)}):
+        if t < ts:
+            continue
+        v = finished(end, t, idle_min, handoff_done, seat, nothing_runs=nothing_runs)
+        if v["how"] and not v["hard"] and (not v["soft"] or t - ts >= line):
+            return t
+    return None
 
 
 # ------------------------------------------------------------------------------------ replay ----
@@ -288,15 +430,33 @@ def transcripts(root: Path, since: float) -> list[Path]:
     return sorted(out)
 
 
-def replay(files: list[Path], now: float, since: float, idle_min: float) -> list[dict]:
-    """Per session (transcripts grouped by session name; an unnamed one stands alone): the first
-    moment the transcript rules would have closed it at or after `since`, and what happened after.
+# What may follow a close without the close having been WRONG: somebody else's act. Everything
+# else that follows a close — a task of its own reporting, a reply nobody prompted, a record this
+# list does not know — is counted as the session's own turn (review MF3: the allow-list is this
+# side, so an unrecognised record can never hide a wrong close).
+SOMEONE = ("the owner typed", "a message from another session", "a prompt was queued")
+OWN_TURN = ("a background task reported", "it wrote a reply")
+OTHER_TRANSCRIPT = "another transcript under its name began (a new launch or a resume)"
 
-    Row: {name, files, closed_at, end_text, after, after_kind, wrong, reason}. `wrong` is True when
-    any activity — in the same transcript or a later one under the same name (a resume) — came
-    AFTER `closed_at`: the session was messaged, resumed, or wrote. The live-only rules (screen,
-    unsaved work, the process being alive) are NOT replayed; leaving them out can only ADD closes,
-    so a zero here is a bound the live sweep stays under, not a coincidence of missing facts."""
+
+def replay(files: list[Path], now: float, since: float, idle_min: float, facts_fn=None,
+           nothing_runs: bool = False) -> list[dict]:
+    """Per session (transcripts grouped by session name; an unnamed one stands alone): the first
+    moment the LIVE rule (`live_moment`) would have closed it at or after `since`, and what happened
+    after. `facts_fn(scan, end)` -> (handoff_done, seat) supplies what the transcript does not hold.
+
+    Row: {name, files, closed_at, end_text, after, after_kind, wrong, reused, reason}. Activity
+    AFTER `closed_at`, in the same transcript or a later one under the same name, is one of two
+    things. `reused`: someone messaged or resumed it (SOMEONE, or another transcript beginning with
+    anything but the session's own turn) — the close costs the one `claude -r` line the close log
+    prints. `wrong`: anything else — the session did another turn ON ITS OWN, and the close would
+    have cut work off. A reused close is not the end of the walk: the session lived on, so its
+    later turn ends are judged too, and one wrong close among them makes the row wrong (review
+    MF1). The live-only facts (screen, unsaved work, the registry status) are NOT replayed; they
+    can only keep a session. `nothing_runs`: the replay cannot read yesterday's process table.
+    False (the default) is what the live rule does when it cannot read it: an old unreported task
+    stays a doubt for 12 h. True drops every such doubt — the upper bound, and the gap the live
+    read of the registry and the process table has to cover."""
     groups: dict[str, list[dict]] = {}
     for f in files:
         s = scan(f)
@@ -309,24 +469,41 @@ def replay(files: list[Path], now: float, since: float, idle_min: float) -> list
         acts = sorted(t for s in scans for t in s["activity"])
         ends = sorted((e for s in scans for e in s["ends"] if e.get("ts")), key=lambda e: e["ts"])
         row = {"name": key, "files": len(scans), "closed_at": None, "end_text": "", "after": None,
-               "after_kind": "", "wrong": False, "reason": "", "ends": len(ends)}
+               "after_kind": "", "wrong": False, "reused": False, "reason": "", "ends": len(ends)}
+        owner = {id(e): s for s in scans for e in s["ends"]}
         for e in ends:
-            t = close_moment(e, idle_min)
+            done, seat = facts_fn(owner[id(e)], e) if facts_fn else (None, None)
+            t = live_moment(e, idle_min, done, seat, nothing_runs)
             if t is None or t < since:
                 continue
             nxt = next((a for a in acts if a > e["ts"] + 0.5), None)
             if nxt is not None and nxt <= t:
                 continue                                        # used again before the rules fired
             if t > now:
-                row["reason"] = "rules would fire later (still inside the idle window)"
+                if row["closed_at"] is None:
+                    row["reason"] = "rules would fire later (still inside the idle window)"
                 break
-            row["closed_at"], row["end_text"] = t, last_words(e.get("text") or "")[-160:]
+            this = {"closed_at": t, "end_text": last_words(e.get("text") or "")[-160:], "after": nxt,
+                    "after_kind": "", "wrong": False, "reused": False}
             if nxt is not None:
-                row.update(after=nxt, wrong=True, after_kind=_kind_after(scans, nxt))
-            break
+                kind = _kind_after(scans, nxt)
+                elsewhere = nxt not in owner[id(e)]["activity"]
+                this["reused"] = kind in SOMEONE or (elsewhere and kind not in OWN_TURN)
+                this["wrong"] = not this["reused"]
+                this["after_kind"] = OTHER_TRANSCRIPT if elsewhere and this["reused"] else kind
+                if elsewhere:                 # its OWN transcript went on as well: judge that too
+                    own = next((a for a in sorted(owner[id(e)]["activity"]) if a > e["ts"] + 0.5), None)
+                    k2 = _kind_after([owner[id(e)]], own) if own is not None else None
+                    if k2 is not None and k2 not in SOMEONE:      # (fix review MF2)
+                        this.update(after=own, after_kind=k2, wrong=True, reused=False)
+            if row["closed_at"] is None or this["wrong"]:
+                row.update(this)
+            if this["wrong"] or nxt is None:
+                break
         if row["closed_at"] is None and not row["reason"]:
-            last = verdict(ends[-1], now, idle_min) if ends else ["no turn ever ended"]
-            row["reason"] = "kept: " + (last[0] if last else "?")
+            v = finished(ends[-1], now, idle_min, nothing_runs=nothing_runs) if ends else None
+            why = (v["hard"] + v["soft"]) if v else ["no turn ever ended"]
+            row["reason"] = "kept: " + (why[0] if why else "used again before the rule fired")
         rows.append(row)
     return rows
 
@@ -365,13 +542,21 @@ def _kind_after(scans: list[dict], t: float) -> str:
                 continue
             if not isinstance(rec, dict) or rec.get("isSidechain") or _ts(rec.get("timestamp")) != t:
                 continue
-            if rec.get("type") == "queue-operation":
-                return "a prompt was queued"
-            if rec.get("type") == "assistant":
-                return "it wrote a reply"
+            typ = rec.get("type")
+            if typ not in ("user", "assistant", "queue-operation") or (
+                    typ == "queue-operation" and rec.get("operation") != "enqueue"):
+                continue                      # not a record `scan` counts as activity (fix review MF1)
             origin = (rec.get("origin") or {}).get("kind")
+            if typ == "queue-operation":
+                text = rec.get("content")
+                if origin == "task-notification" or "<task-notification>" in str(text):
+                    return "a background task reported"
+                return ("a prompt was queued" if isinstance(text, str) and text.strip()
+                        else "a queue record without text")
+            if typ == "assistant":
+                return "it wrote a reply"
             body = _text_of((rec.get("message") or {}).get("content"))
-            if "<task-notification>" in body[:200]:
+            if origin == "task-notification" or "<task-notification>" in body[:200]:
                 return "a background task reported"
             if origin == "peer" or "Another Claude" in body[:80] or "Cross-session" in body[:40]:
                 return "a message from another session"

@@ -33,7 +33,9 @@ import rootguard
 REGISTRY = {
     "compaction": ("compaction_apply", "files named for a memory role"),
     "boot-roll": ("boot_roll_apply", "Boot files that declare a window"),
-    "worktree-sweep": ("worktree_sweep_apply", "worktrees under the repository's .claude/worktrees/"),
+    "worktree-sweep": ("worktree_sweep_apply", "worktrees under the repository's .claude/worktrees/ "
+                                               "(removed), and this repository's copy-on-write "
+                                               "clones in worktrees_dir (moved to a To-delete folder)"),
     "cleanup": ("cleanup_apply", "memory role files: an entry repeated byte for byte in one file, "
                                  "and files over their line limit"),
 }

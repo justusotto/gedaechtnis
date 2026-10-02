@@ -30,10 +30,21 @@ live payload dump this package already records in `common.py` and `subagent_stop
     marker, used when a payload arrives without `agent_id`: either marker alone is enough, because
     a rule that needs both fails open the moment the harness renames one field.
 
-LIVE COUNT. There is no SubagentStart event, so the count is kept by this module: the gate records
-one entry when it lets an `Agent` call through, and `subagent_stop.py` removes one when a sub-agent
-ends. An entry older than `agent_open_stale_seconds` is dropped on read — a crashed sub-agent whose
-Stop never fired must not wedge the door shut for the rest of the day.
+LIVE COUNT. The gate RESERVES a slot when it lets an `Agent` call through (`agent_open`, a
+timestamp: the agent id does not exist yet). `subagent_start.py` turns the oldest reservation into
+a RUNNING entry under the agent's id (`agent_running`), and `subagent_stop.py` removes that entry.
+The count is reservations plus running entries. A running entry older than
+`agent_open_stale_seconds` is dropped on read — a crashed sub-agent whose Stop never fired must not
+wedge the door shut for the rest of the day.
+
+AGENTCAP-1 (2026-10-01). A call can pass this door and still never start: on 2026-09-30 six
+`Agent` calls were allowed here and then failed in the permission step. No sub-agent started, no
+Stop fired, the six reservations stayed for six hours, and four later launches were refused with
+nothing running. So a reservation that no SubagentStart has claimed within
+`agent_pending_seconds` is dropped. That short expiry applies only once this session has seen a
+SubagentStart (`agent_start_seen`): where the harness does not send the event (verified sent,
+with the parent's `session_id` and the `agent_id`, on Claude Code 2.1.284), reservations keep the
+old six-hour rule and the Stop hook releases the oldest, as before.
 
 Nothing here raises: every failure path returns "allowed". A cost door that takes a session down
 costs more than the fan-out it prevents.
@@ -144,11 +155,22 @@ def _stale_seconds() -> float:
         return 21600.0
 
 
+def _pending_seconds() -> float:
+    try:
+        return float(limits.get("agent_pending_seconds", 120))
+    except (TypeError, ValueError):
+        return 120.0
+
+
 def _prune(doc: dict, now: float) -> list:
+    """Drop what no longer counts; return the reservations (`doc["agent_running"]` is pruned too)."""
     open_ = doc.get("agent_open")
     if not isinstance(open_, list):
         open_ = []
-    cutoff = now - _stale_seconds()
+    running = doc.get("agent_running")
+    doc["agent_running"] = {k: v for k, v in (running if isinstance(running, dict) else {}).items()
+                            if isinstance(v, (int, float)) and v >= now - _stale_seconds()}
+    cutoff = now - (_pending_seconds() if doc.get("agent_start_seen") is True else _stale_seconds())
     kept = []
     for v in open_:
         try:
@@ -167,7 +189,7 @@ def live_count(sid: str, now: float | None = None) -> int:
     out = {"n": 0}
 
     def mutate(doc: dict) -> None:
-        out["n"] = len(_prune(doc, now))
+        out["n"] = len(_prune(doc, now)) + len(doc["agent_running"])
 
     common.update_session_state(sid, mutate)
     return out["n"]
@@ -187,27 +209,48 @@ def try_reserve(sid: str, cap: int, now: float | None = None) -> tuple[bool, int
 
     def mutate(doc: dict) -> None:
         kept = _prune(doc, now)
-        if len(kept) >= cap:
-            out["ok"], out["n"] = False, len(kept)
+        n = len(kept) + len(doc["agent_running"])
+        if n >= cap:
+            out["ok"], out["n"] = False, n
             return
         kept.append(now)
-        out["ok"], out["n"] = True, len(kept)
+        out["ok"], out["n"] = True, n + 1
 
     common.update_session_state(sid, mutate)
     return out["ok"], out["n"]
 
 
-def record_closed(sid: str, now: float | None = None) -> int:
-    """One sub-agent ended: drop the OLDEST open entry. Oldest, because the entries carry no agent
-    id — the id does not exist yet at the moment the gate records the start."""
+def record_started(sid: str, agent_id: str, now: float | None = None) -> int:
+    """A sub-agent started: its reservation (the oldest) becomes a running entry under its id.
+    An id that is already running (an agent that was sent a message and runs again) takes none."""
     now = time.time() if now is None else now
     out = {"n": 0}
 
     def mutate(doc: dict) -> None:
         kept = _prune(doc, now)
-        if kept:
+        if agent_id not in doc["agent_running"] and kept:
             kept.pop(0)
-        out["n"] = len(kept)
+        doc["agent_running"][agent_id] = now
+        doc["agent_start_seen"] = True
+        out["n"] = len(kept) + len(doc["agent_running"])
+
+    common.update_session_state(sid, mutate)
+    return out["n"]
+
+
+def record_closed(sid: str, agent_id: str | None = None, now: float | None = None) -> int:
+    """One sub-agent ended: drop its running entry. With no id, or an id no SubagentStart recorded,
+    drop the OLDEST reservation instead (the rule from before the start event was read)."""
+    now = time.time() if now is None else now
+    out = {"n": 0}
+
+    def mutate(doc: dict) -> None:
+        kept = _prune(doc, now)
+        if agent_id and agent_id in doc["agent_running"]:
+            del doc["agent_running"][agent_id]
+        elif kept:
+            kept.pop(0)
+        out["n"] = len(kept) + len(doc["agent_running"])
 
     common.update_session_state(sid, mutate)
     return out["n"]

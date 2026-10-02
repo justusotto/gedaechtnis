@@ -88,6 +88,9 @@ Recognised JSON keys, all optional:
                       key is absent by default and the rule built on it is then simply OFF; a key
                       that is present and unusable is named by `topology_problems()`. See the
                       TOPOLOGY section at the foot of this file.
+  profile             `public` (default) or `atlas`: a named set of limit values (hooks/limits.py
+                      PROFILES). `atlas` turns on the four doors written for a vault with work
+                      queues, review pages and a lane roster. env GEDAECHTNIS_PROFILE.
   limits              an object of THIS VAULT's threshold overrides, merged over rules/limits.json
                       by hooks/limits.py — e.g. {"boot_budget_bytes": 100000} for a vault whose
                       ruled boot chain is larger than the package default. Only names the package
@@ -561,6 +564,20 @@ def big_read_kb() -> int:
         return int(v) if v is not None else 24
     except (TypeError, ValueError):
         return 24
+
+
+def profile_raw() -> str:
+    """The `profile` named in config.json (GEDAECHTNIS_PROFILE wins), lower-cased; `public` when
+    no `profile` key is there. `hooks/limits.py` decides whether the name is one it knows (PUBLICDOORS-1)."""
+    env = os.environ.get("GEDAECHTNIS_PROFILE")
+    if env and env.strip():
+        return env.strip().lower()
+    cfg = _load()
+    if "profile" not in cfg:
+        return "public"
+    v = cfg["profile"]
+    # A key that is there and unusable (0, false, [], "") is returned as written, so limits.py names it.
+    return v.strip().lower() if isinstance(v, str) and v.strip() else json.dumps(v)
 
 
 def language() -> str:

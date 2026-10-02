@@ -186,7 +186,9 @@ def main() -> None:
     # below doubled a `ps` walk per session for a value that cannot have changed between the two
     # lines — and the second call could legitimately answer differently, which would have put a pid
     # and a name from two different processes in one record.
-    claude_pid = procs.claude_pid()
+    # PROCSHOST-1: `own_pid`, the session's own process. A host's pid here kept every thread's
+    # record alive for as long as the host ran, and gave every thread the host's `--name`.
+    claude_pid = procs.own_pid()
     payload = json.dumps({
         "session_id": sid, "cwd": cwd, "lane": lane, "marker": str(marker) if marker else None,
         "pid": claude_pid,

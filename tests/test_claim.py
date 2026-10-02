@@ -504,6 +504,12 @@ def test_a_hook_directly_under_a_host_claims_nothing(world):
 @pytest.mark.parametrize("host", [
     "claude --permission-mode auto remote-control --name h",
     "/opt/x/bin/claude.exe remote-control --name h",
+    # a flag whose value has spaces, before the subcommand (`ps` prints no quotes)
+    "claude --name Atlas host remote-control",
+    "claude --debug-file /data/My Logs/h.log remote-control",
+    'claude --settings {"a": 1, "b": 2} remote-control',
+    "claude --add-dir /a /b remote-control --spawn same-dir",
+    "claude --name=Atlas host remote-control",
 ])
 def test_a_host_spelled_otherwise_is_still_never_a_holder(world, host):
     """Review finding 1: a flag with a value before the subcommand, and a `claude.exe` host, were
@@ -513,6 +519,40 @@ def test_a_host_spelled_otherwise_is_still_never_a_holder(world, host):
     env = _tree(w, {8000: (1, "claude --model m"), 9000: (8000, host)}, 9000)
     _run(w, _payload(w, "SessionStart"), env)
     assert calls(w) == [] and claims(w) is None
+    # the prompt path too (CLAIMHOST-2): a hook right under such a host takes nothing and says so
+    p = _run(w, _payload(w, "UserPromptSubmit"), env)
+    assert calls(w) == [] and claims(w) is None
+    assert "NOT taken" in p.stdout
+
+
+@pytest.mark.parametrize("plain", [
+    "claude fix the remote-control bug",                  # a prompt that mentions the word
+    "claude --name remote-control",                       # a session NAMED remote-control
+    "claude --model m --name remote-control --resume x",
+    "/opt/x/bin/claude.exe --verbose look at remote-control hosts",
+])
+def test_a_plain_session_that_only_mentions_remote_control_claims(world, plain):
+    """CLAIMHOST-2 positive: these were read as hosts and never claimed. Negative control is the
+    test above: a real host, spelled either way, still takes nothing at start-up or at a prompt."""
+    w = world
+    env = _tree(w, {9001: (1, plain)}, 9001)
+    p = _run(w, _payload(w, "UserPromptSubmit"), env)
+    assert calls(w) == ["claim-interactive Studio/Cards 9001"]
+    assert "NOT taken" not in p.stdout and "Remote Control host" not in p.stdout
+
+
+@pytest.mark.parametrize("oneshot", [
+    "claude --print=json remote-control",
+    "claude remote-control --print=text",
+    "claude -p=x remote-control",
+])
+def test_a_print_run_spelled_with_an_equals_sign_is_no_host(oneshot):
+    """CLAIMHOST-2: `--print=…` counts like `--print`. Negative control: without it, a host."""
+    sys.path.insert(0, str(HOOKS))
+    import procs
+    assert not procs.is_host(oneshot)
+    assert procs.is_host("claude remote-control --name h")
+    assert procs.is_host("claude --printer x remote-control")      # no print flag by prefix alone
 
 
 def test_a_plain_claude_session_claims_at_start_up_as_before(world):
@@ -549,6 +589,29 @@ def test_what_counts_as_a_thread_and_as_a_host():
     assert not procs.is_host("claude -p fix the remote-control host")    # a one-shot run is no host
     assert procs.is_host("claude --permission-mode auto remote-control")
     assert not procs.is_host(THREAD.format("A"))
+    # CLAIMHOST-2: the subcommand is the first argument that is no flag and no flag's value
+    assert not procs.is_host("claude fix the remote-control bug")
+    assert not procs.is_host("claude --name remote-control")
+    assert not procs.is_host("claude --name=remote-control --model m")
+    assert not procs.is_host("claude --verbose fix the remote-control bug")
+    assert procs.is_host("claude --name remote-control remote-control")       # named so, AND a host
+    assert procs.is_host("claude --model m --permission-mode auto remote-control --name h")
+    assert procs.is_host("claude --some-new-flag remote-control")             # unknown flag: host side
+    assert procs.is_host("claude -- remote-control")
+    assert not procs.is_host("claude --debug-file /tmp/remote-control")
+    # a value with spaces: its first token is the value, the rest runs to the next flag
+    assert procs._SPACED_VALUE_FLAGS <= procs._VALUED_FLAGS
+    assert procs.is_host("claude --name Atlas host remote-control")
+    assert procs.is_host("claude --name=Atlas host remote-control")           # the `=` spelling too
+    assert not procs.is_host("claude --name=remote-control")
+    assert not procs.is_host("claude --model=m x remote-control")             # `=` on a one-word flag
+    assert procs.is_host("claude --model m --add-dir /a /b remote-control --name h")
+    assert not procs.is_host("claude --name remote-control --model m")        # the value itself
+    assert not procs.is_host("claude --name Atlas host --model m fix the remote-control bug")
+    assert not procs.is_host("claude --name Atlas host")
+    assert not procs.is_host("claude --name Atlas host -p remote-control")
+    assert not procs.is_host("claude --model m x remote-control")             # one-word value: no tail
+    assert procs.is_host("claude --name x fix the remote-control bug")        # the named cost
 
 
 # ---- CONTEXTMSG-1: the claim line at a prompt is printed only when it changes ----------------

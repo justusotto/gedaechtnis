@@ -431,12 +431,17 @@ def test_reach_has_no_compact_point_command_when_the_ritual_is_off(world):
 
 def test_reach_text_names_the_short_pass_only_when_it_is_on(world):
     _reach_world(world)
+    d = json.loads(world["limits"].read_text())
+    d.update(resume_short_chars=0)                  # shipped ON since HANDLINES-1: switch it off
+    world["limits"].write_text(json.dumps(d))
     t = transcript(world["tmp"] / "q.jsonl", [rec("m1", read=100), rec("m2", read=700)])
     assert "characters still passes" not in text_of(run(world, payload("s-off", t)))
     d = json.loads(world["limits"].read_text())
     d.update(resume_short_chars=1500, resume_short_window=900)
     world["limits"].write_text(json.dumps(d))
-    assert "1,500 characters still passes" in text_of(run(world, payload("s-on", t)))
+    text = text_of(run(world, payload("s-on", t)))
+    assert "1,500 characters still passes up to resume_window 1,000" in text, text
+    assert "once it is idle and its cache is cold" in text, text      # MSGGATE-1
 
 
 @pytest.mark.parametrize("source,cleared", [("compact", True), ("resume", False)])

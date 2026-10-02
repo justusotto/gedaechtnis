@@ -12,7 +12,10 @@ itself. Every excerpt is redacted. A walk that finds zero files prints `UNCHECKE
 non-zero, because "we found nothing" and "we never looked" must not read the same. `--root DIR` runs
 the identical sweep over any repository (2026-09-18). There it also looks for phone-number and IBAN
 shapes, any `.env`-style file (flagged by existing, not only by its contents) and, in a git working
-tree, any file `.gitignore` covers that is tracked anyway.
+tree, any file `.gitignore` covers that is tracked anyway. For this plugin it also reads the
+wording of `README.md` and the pages under `docs/` against `rules/public-tone.json`: a listed
+phrase (an absolute claim, a superlative) is a finding, a sentence about network calls must also
+name Claude Code, and one listed word has a ceiling per page, so a page may use it less but not more.
 
 **Never `git push --tags` and never `git push --follow-tags`.** A clone made from a private
 repository inherits that repository's tags, and each points at a private commit. Pushing them
@@ -28,7 +31,9 @@ bash tools/release_orphan.sh --sha <the commit you are publishing>
 
 It extracts the tree at that commit out of git, builds it in a temporary repository as a single commit
 with no ancestry, runs `publish_check.py` over it as a git root, refuses on any finding, pushes
-nothing, and prints the two commands for a person to run.
+nothing, and prints the two commands for a person to run. Paths listed in
+`rules/publish-exclude.json` (development-only files) are left out of the build;
+`--with-excluded` publishes them too.
 
 **Versions.** A release's tag is always `v` plus the `version` in `.claude-plugin/plugin.json`
 (0.5.0 → `v0.5.0`). A patch is fixes and polish, a minor version a capability a user notices, and a
@@ -53,9 +58,10 @@ killed is removed the next time a writer looks. `python3 tools/suitelock.py stat
 Run the suite the usual way, `python3 -m pytest tests -q`, and it takes the lock itself.
 
 **Design rules**, for anyone changing this. Every refusal cites its reason. Defaults never delete:
-cleanup moves files into one documented bundle and at most to the Trash, and nothing calls `rm` on
+cleanup moves files into one documented bundle, at most to the Trash or a dated folder in `~/Downloads`, and nothing calls `rm` on
 a file you wrote. The plugin does delete its own bookkeeping: temporary files, the claim files of a parked-message delivery, and the lock and
-marker files it keeps in its state directory. One exception: when a worktree clone the plugin made
+marker files it keeps in its state directory (and `tools/configure.py` removes the temporary file it
+wrote beside `config.json` when that write fails, as `tools/allow_rules.py` does beside a settings file). One exception: when a worktree clone the plugin made
 itself is removed and holds nothing unique (every commit fetched back into the source repository,
 no uncommitted or stashed work), the clone directory is deleted rather than sent to the Trash. A
 clone that does hold something goes to the Trash. A file no rule names is kept until someone

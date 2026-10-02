@@ -13,6 +13,7 @@
 #
 #   bash tools/release_orphan.sh --sha <commit> [--repo DIR] [--subtree PATH]
 #                                [--branch NAME] [--out DIR] [--remote URL] [--tag NAME]
+#                                [--with-excluded]
 #
 #   --sha      REQUIRED. The commit in the development repository whose tree is published.
 #   --repo     the development repository (default: the one this script lives in).
@@ -22,6 +23,9 @@
 #   --out      where to build (default: a fresh directory under the system temp dir). Must not
 #              exist, or must be empty.
 #   --remote   printed in the push command instead of the placeholder. Never contacted.
+#   --with-excluded  publish the development-only files too. By default every path listed in the
+#              tree's `rules/publish-exclude.json` is left out of the build, and the build is
+#              refused if one of them is found in it afterwards.
 #   --tag      the tag you mean to publish. Optional: the tag is ALWAYS `v` + the `version` in the
 #              tree's `.claude-plugin/plugin.json`, and a --tag that differs is refused before
 #              anything is built. Bump the version (and give CHANGELOG.md its heading) instead.
@@ -40,7 +44,7 @@ die() { printf 'release_orphan: %s\n' "$*" >&2; exit 1; }
 here="$(cd -- "$(dirname -- "$0")" && pwd)"
 plugin_dir="$(cd -- "$here/.." && pwd)"
 
-sha=""; repo=""; subtree=""; branch=""; out=""; tag=""; remote="<the repository's URL>"
+sha=""; repo=""; subtree=""; branch=""; out=""; tag=""; remote="<the repository's URL>"; with_excluded=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --sha)     sha="${2:-}"; shift 2 || die "--sha needs a value" ;;
@@ -50,7 +54,8 @@ while [ $# -gt 0 ]; do
     --out)     out="${2:-}"; shift 2 || die "--out needs a value" ;;
     --remote)  remote="${2:-}"; shift 2 || die "--remote needs a value" ;;
     --tag)     tag="${2:-}"; shift 2 || die "--tag needs a value" ;;
-    -h|--help) sed -n '2,35p' "$0"; exit 0 ;;
+    --with-excluded) with_excluded=1; shift ;;
+    -h|--help) sed -n '2,39p' "$0"; exit 0 ;;
     *) die "unknown argument: $1" ;;
   esac
 done
@@ -72,6 +77,12 @@ if [ -z "$subtree" ]; then
     *) die "$plugin_dir is not inside $repo — pass --subtree" ;;
   esac
 fi
+
+# `--subtree plugin/` (what tab completion gives) names the same tree as `plugin`. Left as typed,
+# every path built from it carried `//`, git found none of them, and the build came out
+# unversioned with nothing left out.
+while [ "$subtree" != "." ] && [ "$subtree" != "${subtree%/}" ]; do subtree="${subtree%/}"; done
+[ -n "$subtree" ] || die "--subtree is empty"
 
 full_sha="$(git -C "$repo" rev-parse --verify "${sha}^{commit}" 2>/dev/null)" \
   || die "$sha is not a commit in $repo"
@@ -134,10 +145,63 @@ printf '  source commit : %s\n' "$full_sha"
 printf '  source subtree: %s\n' "$subtree"
 printf '  build dir     : %s\n' "$out"
 
+# THE LEAVE-OUT LIST, read out of the COMMIT like the version. One path per line; a list that
+# cannot be read, or a path that is absolute, climbs with `..`, or holds anything but letters,
+# digits, `.`, `_`, `-` and `/`, refuses the build: a list that is half understood leaves out half.
+excluded=""
+if [ "$with_excluded" -eq 0 ]; then
+  if git -C "$repo" cat-file -e "$full_sha:${vpath}rules/publish-exclude.json" 2>/dev/null; then
+    excluded="$(git -C "$repo" show "$full_sha:${vpath}rules/publish-exclude.json" | python3 -c '
+import json, re, sys
+try:
+    paths = json.load(sys.stdin)["exclude"]
+except Exception:
+    sys.exit(1)
+if not isinstance(paths, list):
+    sys.exit(1)
+for p in paths:
+    # `if`, not `assert`: PYTHONOPTIMIZE strips an assert, and this is the check.
+    if not isinstance(p, str) or not re.fullmatch(r"[A-Za-z0-9._/-]+", p) or p.startswith("-"):
+        sys.exit(1)
+    if any(seg in ("", ".", "..") for seg in p.split("/")):     # absolute, trailing slash, x//y, climbs
+        sys.exit(1)
+for p in paths:
+    print(p)
+')" || die "REFUSED: rules/publish-exclude.json could not be read as {\"exclude\": [paths]}"
+  fi
+fi
+
+# A listed path that is not in the tree is refused: a name that matches nothing (a typo, a file
+# renamed since) would leave nothing out and still be counted as left out.
+old_ifs="$IFS"; IFS="$nl"
+for p in $excluded; do
+  git -C "$repo" cat-file -e "$full_sha:${vpath}$p" 2>/dev/null \
+    || die "REFUSED: $p is on the leave-out list (rules/publish-exclude.json) and is not in the tree at $full_sha — correct the list"
+done
+IFS="$old_ifs"
+
 # The tree comes out of git, not out of the working copy: whatever is untracked, ignored or
 # half-edited on this machine is not part of a release by construction.
-git -C "$repo" archive --format=tar "$spec" | (cd -- "$out" && tar -xf -) \
+set -- .
+old_ifs="$IFS"; IFS="$nl"
+for p in $excluded; do set -- "$@" ":(exclude)$p"; done
+IFS="$old_ifs"
+git -C "$repo" archive --format=tar "$spec" -- "$@" | (cd -- "$out" && tar -xf -) \
   || die "could not extract $spec"
+
+# Checked on the result, not assumed from the command: a listed path found in the build refuses it.
+left_out=0
+old_ifs="$IFS"; IFS="$nl"
+for p in $excluded; do
+  [ ! -e "$out/$p" ] || die "REFUSED: $p is on the leave-out list and is in the build"
+  left_out=$((left_out + 1))
+done
+IFS="$old_ifs"
+if [ "$with_excluded" -eq 1 ]; then
+  printf '  left out      : nothing (--with-excluded)\n'
+else
+  printf '  left out      : %s path(s) named in rules/publish-exclude.json\n' "$left_out"
+fi
 
 [ -n "$(ls -A -- "$out")" ] || die "the extracted tree is empty"
 
