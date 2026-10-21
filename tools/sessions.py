@@ -7,6 +7,8 @@
     python3 tools/sessions.py projects [--ids FILE | --ids-text 'cse_… cse_…']
     python3 tools/sessions.py close [--dry-run] [--when-needed | --all-finished]
     python3 tools/sessions.py close --replay DAYS [--out FILE.md]
+    python3 tools/sessions.py close --cloud NAME [--dry-run]
+    python3 tools/sessions.py continue [--dry-run]
 
 THE LAUNCH RULE (TERMOVERLOAD-1). One session = one detached `screen` (or `tmux`) session, never a
 Terminal window: a GUI that hangs at ~90 windows queues launches and replays them later as
@@ -36,6 +38,15 @@ is shown as HOST, a session it spawned as THREAD of that host, a daemon backgrou
 as FORK with the session it was copied from, and a session resumed by hand by its record. Every
 such line leads with the SESSION ID — a host restarts an idle thread under a new name.
 
+A LAUNCHER THAT PASSES `--cloud` (CLOUDBRIDGE-1) is written to the ledger with what the dispatch
+printed (session id, address), its repo and row, and a `kind` that is `cloud` ONLY on evidence
+(`hooks/cloudsess.py`): `local-host` when a live thread of a Remote Control host on this machine
+carries its id or name — `launch` and `ls` then print one loud line, because that session uses this
+Mac and the plan's usage, not a cloud VM — and `cloud-unconfirmed` when nothing says where it ran.
+`ls` shows it on its own line by that kind, never as "status unknown" and never as a host's thread.
+`close --cloud NAME` ends only the local launcher screen and says that the cloud session itself is
+ended on claude.ai; no other close pass ends a cloud session.
+
 `projects` answers which live THREADs are real Project threads (PROJECTDESK-1): a thread whose
 remote id (`bridgeSessionId` `session_01X…`, or `--session-id` / `--sdk-url` `cse_01X…` on its
 command line — same suffix) is in the Project's thread list is PROJECT; one that started within
@@ -58,13 +69,38 @@ Remote Control host, not attended (`CLAUDE_CODE_SESSION_ATTENDED`), no name on
 
 FINISHED is a fact about time (CLOSETUNE-1, `fleet.classify`): the last turn ended and is
 `session_close_idle_minutes` old (or its handoff says done/landed/stopped with no turn since its
-commit, or it reported to its seat 30 minutes ago); its last words are printed, never obeyed.
+commit, or it reported to its seat — either one and `session_close_report_minutes` of quiet);
+its last words are printed, never obeyed. A session that reported and whose last turn is
+`session_close_stale_shell_minutes` old is not kept by wait loops it started before that report (a
+shell loop whose whole body is `sleep N`); a tracked file it wrote counts as saved when it was
+committed after the write and changed on disk only after the session's last turn ended.
 What cannot be told (git, its screen, an old background task) keeps it only up to 4 × that age.
-`close --when-needed` is what the Remote Control hosts' 5-minute login item runs: while the machine
-is over its memory line (swap in use ≥ `session_close_swap_used_mb` MB, or the memory-pressure level
-< `session_close_memory_floor`) it closes the oldest finished sessions one by one, re-reading both
+`close --tick` is what the Remote Control hosts' 5-minute login item runs (SESSCLOSE-3): over the
+memory line it is the `--when-needed` pass; under it, at most once per `session_close_every_s`, one
+`--all-finished` pass; under the line with nothing closed it prints one line the login item does
+not log (over the line it prints a line every tick, and one more per session closed). `close --when-needed`: while the
+machine is over its memory line (swap in use ≥ `session_close_swap_used_mb` MB, or the memory-pressure
+level < `session_close_memory_floor`, or the launch memory test would refuse a launch — ONE signal for
+the closer and the launch guard) it closes the oldest finished sessions one by one, re-reading both
 figures after each, and stops as soon as the machine is under; under the line it reads the two
-figures and nothing else. `close --all-finished` closes every finished one, oldest first.
+figures and the launch test and nothing else. `close --all-finished` closes every finished one,
+oldest first.
+
+A `launch` the memory test refuses (no `--owner-go`) runs that closer once first and, if it closed a
+session, re-reads the test every 3 s for up to `session_launch_wait_s` before it launches or refuses.
+A launch into a folder the CLI records as not trusted is refused (exit 2; `--untrusted-ok` overrides):
+it would sit at the trust question. `ls` prints `PROMPT <n> min — FLAGGED` for a session whose screen
+has shown a prompt for `session_prompt_flag_minutes` (first sight kept in `prompt-seen.json`).
+
+A pass has a time budget (CLOSEBUDGET-1): 35 s from its start at a session's Stop; 240 s, counted
+from the first session it judges, for `close` by hand and the login item. A pass that runs out
+writes ONE `deferred` line with a count to `session-close.log`. The Stop pass and `close
+--when-needed` / `--all-finished` judge the oldest launch first, remember the last session judged
+(`session-close.cursor`, `session-close-needed.cursor`), and the next pass of that kind begins
+after it; a dry run moves that place too. Plain `close` judges in ledger order and remembers
+nothing. Over the memory line `close --when-needed` does not stop on its budget before it has found
+one session to close (up to three budgets), and when it may close it writes one `pass` line saying
+how many it judged, closed and left.
 
 `close --replay DAYS` is the pilot (SESSCLOSE-2; the live rule since CLOSETUNE-2 of 2026-10-02): it
 runs the close rule's transcript half over the last DAYS of real transcripts and prints, per
@@ -76,12 +112,13 @@ keeps the doubt about an old unreported task (as the live rule does when it cann
 table); one sentence states the bound with that doubt dropped, which the exit code ignores.
 """
 from __future__ import annotations
-import argparse, os, re, shlex, subprocess, sys, time
+import argparse, hashlib, os, re, shlex, subprocess, sys, time
 from pathlib import Path
 
 PLUGIN = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PLUGIN / "hooks"))
 import closerules                  # noqa: E402
+import cloudsess                   # noqa: E402
 import common                      # noqa: E402
 import config                      # noqa: E402
 import context_cap                 # noqa: E402
@@ -90,6 +127,121 @@ import limits                      # noqa: E402
 
 EXEC_CLAUDE = re.compile(r"^\s*exec\s+(?:\S*/)?claude\b", re.M)
 PID_WAIT_S = 10.0
+CLOUD_READ_TRIES = 6               # looks at a --cloud launcher's screen for the id it printed
+CLOUD_LS_DAYS = 7                  # a --cloud launch stays on the `ls` page this long, unless closed
+
+
+def _is_cloud_launcher(launcher: Path) -> bool:
+    try:
+        return cloudsess.is_cloud_launcher(launcher.read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        return False
+
+
+def _mark(path: str | None) -> tuple[int, str]:
+    """(size, sha1) of a debug file as it is BEFORE the launch; (0, "") when there is none."""
+    try:
+        data = Path(path).read_bytes() if path else b""
+    except OSError:
+        data = b""
+    return len(data), hashlib.sha1(data).hexdigest() if data else ""
+
+
+def _read_text(path: str | None, mark: tuple[int, str] = (0, "")) -> str | None:
+    """This launch's part of a debug file. When the file still BEGINS with the bytes an earlier
+    launch left (`mark`), the CLI appended and only what follows is read; otherwise it was written
+    anew and is read whole. So neither an old file's verdict nor a new file's payload is lost,
+    whichever of the two the CLI does."""
+    try:
+        data = Path(path).read_bytes() if path else None
+    except OSError:
+        return None
+    if data is None:
+        return None
+    n, sha = mark
+    if n and len(data) >= n and hashlib.sha1(data[:n]).hexdigest() == sha:
+        data = data[n:]
+    return data.decode("utf-8", "replace")
+
+
+def _cloud_fields(name: str, mux: str | None, pid=None, read_fn=None, view_fn=None, sleep=time.sleep,
+                  tries: int = CLOUD_READ_TRIES, log_fn=None) -> dict:
+    """The ledger fields of a launch that asked for `--cloud` (CLOUDBRIDGE-1): what the dispatch
+    printed, and where the evidence says it ran. `kind` is `cloud` only on evidence
+    (`cloudsess.landing`); a session found on a local Remote Control host is `local-host`."""
+    read_fn = read_fn or (lambda: fleet.read_screen(mux, name))
+    # CLOUDBRIDGE-1B: the CLI exits about 4 s after it creates the session and its screen goes
+    # with it, so the id is read from the launcher's `--debug-file` too (`log_fn`), which stays.
+    screen, facts, src = None, {"remote_ids": [], "url": None}, cloudsess.source_facts(None)
+    for i in range(tries):
+        screen = read_fn() or screen
+        facts = cloudsess.dispatch_facts(screen)
+        src = cloudsess.source_facts(log_fn() if log_fn else None)
+        facts["remote_ids"] = sorted(set(facts["remote_ids"]) | set(src["remote_ids"]))
+        if (facts["remote_ids"] or facts["url"]) and (log_fn is None or src["source"]):
+            break
+        if i + 1 < tries:
+            sleep(2)
+    view, table = (view_fn or _live)()
+    row = {"name": name, "asked": "cloud", "pid": pid, **facts}
+    v = cloudsess.landing(row, view, table, screen)
+    return {"asked": "cloud", **facts, "kind": v["kind"], "host": v["host"], "why": v["why"],
+            "source": src["source"], "bundle_reason": src["reason"], "source_checked": log_fn is not None}
+
+
+def _live() -> tuple[list[dict], dict | None]:
+    table = fleet.process_table()
+    return fleet.live_view(fleet.registry_records(), table), table
+
+
+def _cloud_rows(rows: list[dict], now: float) -> list[dict]:
+    return [r for r in rows if r.get("asked") == "cloud" and not r.get("closed_at")
+            and now - float(r.get("launched_at") or 0) < CLOUD_LS_DAYS * 86400]
+
+
+def cloud_lines(rows: list[dict], view: list[dict], table: dict | None, now: float,
+                record=None) -> list[str]:
+    """The `ls` lines of the sessions launched with `--cloud`. A row first SEEN on a local host is
+    written back to the ledger as `local-host` (`record`), so it stays that after its thread ends."""
+    out = []
+    for r in _cloud_rows(rows, now):
+        v = cloudsess.landing(r, view, table)
+        if v["kind"] == "local-host" and r.get("kind") != "local-host":
+            (record or fleet.append_launch)({**r, "kind": "local-host", "host": v["host"], "why": v["why"]})
+        out.append(cloudsess.ls_line(r, v))
+        if v["kind"] == "local-host":
+            out.append("    " + cloudsess.LOCAL_LINE.format(name=r["name"], host=v.get("host") or "unknown"))
+        if r.get("source") == "bundle" and v["kind"] == "cloud":
+            out.append("    " + cloudsess.bundle_line(r["name"], r.get("bundle_reason")))
+        if v["kind"] == "cloud":
+            out.append("    it runs on claude.ai, not here: open the address above to read or end it; "
+                       f"`sessions.py close --cloud {r['name']}` ends only the local launcher screen")
+    return out
+
+
+def cmd_close_cloud(name: str, dry: bool, quit_fn=None) -> int:
+    """`close --cloud NAME`: end the LOCAL launcher screen of a `--cloud` launch and say plainly
+    that the cloud session is not ended by it. Refuses a name that is not a `--cloud` launch."""
+    row = next((r for r in fleet.current_launches() if r["name"] == name), None)
+    if row is None or row.get("asked") != "cloud":
+        print(f"refused: {name!r} is not a session this tool launched with --cloud; "
+              f"plain `close` judges every other session.")
+        return 2
+    where = row.get("url") or "claude.ai/code"
+    if row.get("kind") == "local-host":
+        tail = (f"It ran on this Mac as a thread of the Remote Control host {row.get('host')!r}: "
+                f"that thread belongs to the host and is not ended here.")
+    else:
+        tail = f"The cloud session itself is NOT ended by this: end it on claude.ai ({where})."
+    if dry:
+        print(f"dry run: would end the local launcher screen {row.get('mux_session') or name!r} "
+              f"and mark the ledger row closed. {tail}")
+        return 0
+    (quit_fn or (lambda m, n: fleet.mux_quit_exact(m, n, None)))(
+        row.get("mux") or fleet.multiplexer(), row.get("mux_session") or name)
+    fleet.append_launch({**row, "closed_at": time.time()})
+    print(f"closed the local launcher screen of {name}. {tail}")
+    return 0
 
 
 def _launcher_problem(launcher: Path) -> str | None:
@@ -101,6 +253,24 @@ def _launcher_problem(launcher: Path) -> str | None:
         return ("the launcher has no `exec claude …` line — without `exec` the recorded pid is a "
                 "shell, and closing it would leave claude running")
     return None
+
+
+def _free_then_recheck(mem, note, readings, floor, swap_floor, sleep=time.sleep, clock=time.time):
+    """The launch's memory test refused: run the closer once (`fleet.close_when_needed`, which is
+    over its line whenever this guard refuses), then read the guard again every 3 s for up to
+    `session_launch_wait_s`. Returns (mem, note, readings, closed names); `mem` None = it passes
+    now. Nothing closed (nothing finished, or `session_close_apply` off) = no wait."""
+    res = fleet.close_when_needed(apply=fleet.applies(), by=f"sessions.py launch by {fleet.closer()}")
+    freed = [i["name"] for i in res.get("closed") or []]
+    if not freed:
+        return mem, note, readings, freed
+    deadline = clock() + fleet.launch_wait_s()
+    while True:
+        readings = fleet.launch_readings()
+        mem, note = fleet.launch_memory(readings, floor, swap_floor)
+        if not mem or clock() >= deadline:
+            return mem, note, readings, freed
+        sleep(3)
 
 
 def cmd_launch(a) -> int:
@@ -118,6 +288,13 @@ def cmd_launch(a) -> int:
         print("refused: neither screen nor tmux is available on this machine, so there is no way to "
               "run a session detached. Install one (macOS ships screen).")
         return 4
+    trust = fleet.folder_trust(a.cwd)
+    if trust is False and not a.untrusted_ok:
+        print(f"refused (trust): {os.path.realpath(a.cwd)} is recorded as NOT trusted in "
+              f"{fleet.claude_config_path()}, so a session launched there stops at the \"trust "
+              f"this folder\" question, which nobody sees. Run `claude` once in that folder and "
+              f"accept, or repeat the launch with --untrusted-ok.")
+        return 2
     config.state().mkdir(parents=True, exist_ok=True)
     with open(config.state() / "launches.lock", "w") as lk:
         common.lock_file(lk)
@@ -140,6 +317,14 @@ def cmd_launch(a) -> int:
             print("refused: --owner-go needs the owner's words, with at least one letter or digit; "
                   "an empty go is not a go.")
             return 2
+        freed: list[str] = []
+        if mem and not go and not over and fleet.launch_wait_s() > 0:
+            # SESSCLOSE-3 — one signal: the guard refuses, so the closer runs FIRST (it reads the
+            # same guard), and the launch goes on when the guard passes again.
+            mem, note, readings, freed = _free_then_recheck(mem, note, readings, floor, swap_floor)
+            if freed:
+                print(f"closed to make room: {', '.join(freed)} (reopen lines in "
+                      f"{config.state() / 'session-close.log'}).")
         if over or (mem and not go):
             idle = [i["name"] for i in fleet.sweep(apply=False, rows=fleet.current_launches())
                     if not i["keep"]]
@@ -159,6 +344,11 @@ def cmd_launch(a) -> int:
                      if len(go) > fleet.OWNER_GO_CHARS else "") + ".")
         elif note:
             print(f"note: {note}.")
+        # the CLI writes a relative --debug-file under the launch folder; its size BEFORE the
+        # launch is where this launch's lines begin
+        dbg = cloudsess.debug_file(_read_text(str(launcher)) or "") if _is_cloud_launcher(launcher) else None
+        dbg = os.path.join(a.cwd, dbg) if dbg else None
+        dbg_start = _mark(dbg)
         pidfile = config.state() / f"launch-{common.safe_sid(name)}.pid"
         try:
             pidfile.unlink()
@@ -184,9 +374,29 @@ def cmd_launch(a) -> int:
                "cwd": os.path.realpath(a.cwd), "launcher": str(launcher), "pid": pid,
                "pid_start": fleet.pid_start(pid), "mux": mux, "mux_session": name,
                "launched_at": time.time(), "seat": seat}
+        cloud = None
+        if _is_cloud_launcher(launcher):
+            cloud = _cloud_fields(name, mux, pid, log_fn=(lambda: _read_text(dbg, dbg_start)) if dbg else None)
+        if cloud:
+            row.update(cloud)
         fleet.append_launch(row)
     print(f"launched {name} under {mux} (pid {pid if pid else 'NOT RECORDED — the pidfile never appeared'}).")
     print(f"  attach: {fleet.attach_line(mux, name)}")
+    if cloud and cloud["kind"] == "local-host":
+        print("  " + cloudsess.LOCAL_LINE.format(name=name, host=cloud["host"] or "unknown"))
+    elif cloud and cloud["kind"] == "cloud":
+        print(f"  cloud session {cloud['url'] or 'session_' + cloud['remote_ids'][0]}: no local host "
+              f"or thread carries it. `sessions.py ls` looks again each time it runs.")
+    elif cloud:
+        print(f"  asked for --cloud, NOT CONFIRMED: {cloud['why']}. It is in the ledger as "
+              f"cloud-unconfirmed; run `sessions.py ls` in a minute — a session that landed on a "
+              f"local Remote Control host shows there as LOCAL HOST.")
+    if cloud and cloud["source"] == "bundle" and cloud["kind"] == "cloud":
+        print("  " + cloudsess.bundle_line(name, cloud["bundle_reason"]))
+    elif cloud and not cloud["source_checked"]:
+        print("  " + cloudsess.NO_LOG_LINE)
+    elif cloud and cloud["source"] is None and cloud["kind"] != "local-host":
+        print("  clone or bundle NOT KNOWN: the debug file does not say yet; `sessions.py ls` does not re-read it.")
     if count is not None:
         print(f"  claude processes before this launch: {count}, working: {busy}"
               + (f" (session_cap {fleet.cap()})" if fleet.cap() else " (no session_cap set)")
@@ -197,10 +407,10 @@ def cmd_launch(a) -> int:
     return 0 if pid else 1
 
 
-def _state_word(f: dict) -> str:
+def _state_word(f: dict, since: float | None = None, now: float | None = None) -> str:
     screen = f.get("screen")
     if screen and fleet.PROMPT_TEXT.search(screen):
-        return "PROMPT"
+        return fleet.prompt_words(since, now if now is not None else time.time()) if since else "PROMPT"
     if not f.get("scanned") and f.get("status") is None:
         return "BLIND"
     if (f.get("status") not in (None, "idle")) or (f.get("scanned") and f.get("end") is None):
@@ -220,19 +430,31 @@ def cmd_ls(_a) -> int:
           f"load {fleet.load_average()} · "
           f"{source} {'' if sw is None else f'{sw:.0%} used'} · "
           f"session_cap {fleet.cap() or 'unset'} · multiplexer {mux or 'none'}")
-    view = fleet.live_view(fleet.registry_records(), fleet.process_table())
+    table = fleet.process_table()
+    view = fleet.live_view(fleet.registry_records(), table)
     kinds = [e["kind"] for e in view]
     print(f"registry and process table: {kinds.count('HOST')} host(s), {kinds.count('THREAD')} "
           f"thread(s), {kinds.count('SESSION')} other session(s), {kinds.count('FORK')} fork(s), "
           f"{kinds.count('BLIND')} blind")
+    for line in cloud_lines(rows, view, table, time.time()):
+        print(line)
+    shown = {r["name"] for r in _cloud_rows(rows, time.time())}
     for r in rows:
+        if r["name"] in shown:
+            # its line is above; the local launcher process, if it still runs, is not a second one
+            if fleet.same_process(r.get("pid"), r.get("pid_start")):
+                seen.add(r.get("pid"))
+            continue
         f = fleet.gather(r, mux, None)
         if not f["alive"]:
             continue
         seen.add(r.get("pid"))
         tp = fleet.transcript_for(r.get("pid"), r["name"], r.get("launched_at"))
         ctx = context_cap.current_context(tp) if tp else None
-        bits = [r["name"], f"pid {r.get('pid')}", _state_word(f),
+        answer = fleet.attach_line(r.get('mux') or mux, r.get('mux_session') or r['name'])
+        since = fleet.observe_prompt(r, fleet.screen_prompt(f), time.time(), answer,
+                                     since=None if f.get("scanned") else r.get("launched_at"))
+        bits = [r["name"], f"pid {r.get('pid')}", _state_word(f, since),
                 f"context {ctx:,}" if ctx else "context unknown",
                 "handoff yes" if f["handoff"] else "handoff no"]
         if ctx and unreach and ctx >= unreach:
@@ -242,7 +464,7 @@ def cmd_ls(_a) -> int:
         if n:
             bits.append(f"{n} parked message(s)")
         print("- " + " · ".join(bits))
-        print(f"    answer it: {fleet.attach_line(r.get('mux') or mux, r.get('mux_session') or r['name'])}")
+        print(f"    answer it: {answer}")
     # SESSLSBLIND-1: the CLI's registry is the second source. Hosts, Project threads, forks and
     # sessions resumed by hand are seen there (or, for a host, in the process table) — keyed by
     # pid and session id, never by name.
@@ -253,8 +475,14 @@ def cmd_ls(_a) -> int:
         if e["kind"] in ("SESSION", "BLIND", "HOST"):
             sty = fleet.screen_of(e["pid"])
             screen = fleet.read_screen("screen", sty) if sty and e["kind"] != "HOST" else None
-            if screen and fleet.PROMPT_TEXT.search(screen):
-                print("    PROMPT on its screen")
+            if sty and e["kind"] != "HOST":
+                row = {"name": e.get("name") or f"pid {e['pid']}", "pid": e["pid"],
+                       "pid_start": fleet.pid_start(e["pid"])}
+                since = fleet.observe_prompt(
+                    row, None if screen is None else bool(fleet.PROMPT_TEXT.search(screen)),
+                    time.time(), fleet.attach_line("screen", sty))
+                if since:
+                    print(f"    {fleet.prompt_words(since, time.time())} on its screen")
             print(f"    answer it: {fleet.attach_line('screen', sty)}" if sty else
                   "    not in a screen session — its Terminal window or app, if any, is the only way in")
     launched = {r["name"] for r in rows if r.get("pid") in seen}
@@ -338,8 +566,10 @@ def cmd_replay(a) -> int:
     files = closerules.transcripts(Path(os.environ.get("CLAUDE_PROJECTS_DIR")
                                         or Path.home() / ".claude" / "projects"), since)
     facts = replay_facts()
-    rows = closerules.replay(files, now, since, idle, facts_fn=facts)
-    bound = closerules.replay(files, now, since, idle, facts_fn=facts, nothing_runs=True)
+    rep = fleet.report_minutes()
+    rows = closerules.replay(files, now, since, idle, facts_fn=facts, report_min=rep)
+    bound = closerules.replay(files, now, since, idle, facts_fn=facts, nothing_runs=True,
+                              report_min=rep)
     text = replay_table(rows, now, since, idle, len(files), closerules.reuse_gaps(files, since), bound)
     print(text)
     if a.out:
@@ -388,7 +618,8 @@ def replay_table(rows, now, since, idle, nfiles, gaps=(), bound=None) -> str:
            f"(reopened with the `claude -r` line the close log prints): {len(reused)}.**", "",
            "The rule replayed is the live one (`closerules.finished`): the last turn ended and is "
            f"{idle:g} min old, or its own handoff says done/landed/stopped and was committed in "
-           "that turn, or it reported to its seat; either one and 30 min of quiet. Not replayed — "
+           f"that turn, or it reported to its seat; either one and {fleet.report_minutes():g} min of quiet. "
+           "Not replayed — "
            "live-only facts that can only KEEP a session, so leaving them out can only ADD "
            "closes: the screen read (a prompt, an attached screen), unsaved work, a live process "
            "of its own, the registry status, a terminal window, the never list. One thing is read "
@@ -437,18 +668,64 @@ def _print_items(items, idle) -> None:
                   f"attended, not on session_close_never — reopen with: {i['resume']}{unc}{extra}")
 
 
+def _under_line(res: dict) -> str:
+    return (f"under the line ({fleet.figures(res['before'])}; line: swap < {res['target']:.0f} MB, "
+            f"memory level ≥ {res['floor']:g}, and the launch guard passes)")
+
+
+def _tick(apply: bool, by: str) -> int:
+    """`close --tick` — what the 5-minute login item runs (SESSCLOSE-3). Over the memory line, or
+    with the launch guard refusing: the when-needed pass, as before. Otherwise, at most once per
+    `session_close_every_s` and never in the same interval as a Stop pass (`fleet.due`, the stamp
+    the Stop pass keeps): one pass over every finished session — so finished sessions close when
+    nobody is working and no session stops. Its first line begins `under the line` when the
+    machine is under it AND the pass closed nothing: the login item logs nothing then."""
+    res = fleet.close_when_needed(apply=apply, by=by)
+    if res["stopped"] != "under the line":
+        if not res["candidates"] and res["over"] is None:
+            print(f"tick: {res['stopped']}.")
+            return 0
+        print(f"tick: over the line ({', '.join(res['over'] or [])}); closed {len(res['closed'])}"
+              + (f" ({', '.join(i['name'] for i in res['closed'])})" if res["closed"] else "")
+              + f"; after {fleet.figures(res['after'])}; {res['stopped']}.")
+        for i in res["closed"]:
+            print(f"closed  {i['name']} (pid {i['pid']}) — reopen with: {i['resume']}")
+        return 0
+    under = _under_line(res)
+    if not fleet.due(consume=apply):
+        print(under + ": nothing to do.")
+        return 0
+    res = fleet.close_when_needed(apply=apply, by=by + " (every finished session)", all_finished=True)
+    fleet.record_proposals(res.get("items") or [])
+    if not res["closed"]:
+        left = len(res["candidates"])
+        print(under + f"; {len(res.get('items') or [])} judged, none closed"
+              + (f", {left} closable (session_close_apply is off)" if left else "") + ".")
+        return 0
+    print(f"tick: closed {len(res['closed'])} finished session(s), the machine under the line: "
+          + ", ".join(i["name"] for i in res["closed"]) + ".")
+    for i in res["closed"]:
+        print(f"closed  {i['name']} (pid {i['pid']}) — reopen with: {i['resume']}")
+    fleet.close_log(fleet.pass_line("tick, every finished session", res.get("stats") or {},
+                                    len(res.get("items") or []), len(res["closed"])))
+    return 0
+
+
 def cmd_close(a) -> int:
     if a.replay is not None:
         return cmd_replay(a)
+    if getattr(a, "cloud", None):
+        return cmd_close_cloud(a.cloud, a.dry_run)
     on = fleet.applies()
     apply = on and not a.dry_run
     by = f"sessions.py close by {fleet.closer()}"
+    if getattr(a, "tick", False):
+        return _tick(apply, by)
     if a.when_needed or a.all_finished:
         res = fleet.close_when_needed(apply=apply, by=by, all_finished=a.all_finished)
         head = "all finished" if a.all_finished else "when needed"
         if res["stopped"] == "under the line":
-            print(f"under the line ({fleet.figures(res['before'])}; line: swap < "
-                  f"{res['target']:.0f} MB and memory level ≥ {res['floor']:g}): nothing to do.")
+            print(_under_line(res) + ": nothing to do.")
             return 0
         if not res["candidates"] and res["over"] is None and not a.all_finished:
             print(f"{head}: {res['stopped']}.")
@@ -465,14 +742,43 @@ def cmd_close(a) -> int:
         print(f"{head}: closed {len(res['closed'])}"
               + (f" ({', '.join(i['name'] for i in res['closed'])})" if res["closed"] else "")
               + f"; after {fleet.figures(res['after'])}; {res['stopped']}.")
+        st = res.get("stats") or {}
+        if st.get("deferred"):
+            print(f"{head}: judged {st['judged']} of {st['live']} live sessions in this pass's time; "
+                  f"the other {st['deferred']} are judged first by the next pass.")
         return 0
     if a.dry_run:
         print("dry run: nothing is closed.")
     elif not on:
         print("session_close_apply is off for this install: proposing only.")
-    items = fleet.sweep(apply=apply, by=by)
+    stats: dict = {}
+    items = fleet.sweep(apply=apply, by=by, budget_s=fleet.NEEDED_BUDGET_S, stats=stats)
     _print_items(items, fleet.idle_minutes())
+    if stats.get("deferred"):
+        print(f"judged {stats['judged']} of {stats['live']} live sessions in this pass's time; "
+              f"{stats['deferred']} were not judged.")
     fleet.record_proposals(items)
+    return 0
+
+
+def cmd_continue(a) -> int:
+    """CONTINUITY-1: one auto-continue pass (hooks/autocontinue.py) — every launched session the
+    usage window cut, once it has reset: the resume check, then "continue" typed into its window.
+    `--dry-run` types nothing and runs whatever `usage_continue` says; without it the pass runs
+    only when `usage_continue` is on (the same pass also runs at Stop). Prints one line per cut
+    session and exits 0."""
+    import autocontinue                                      # noqa: PLC0415
+    if not a.dry_run and not autocontinue.enabled():
+        print("usage_continue is off (set it true in config.json's `limits`, or use "
+              "`profile: atlas`); --dry-run shows what a pass would do")
+        return 0
+    items = autocontinue.run_pass(apply=not a.dry_run, by="sessions.py continue"
+                                  + (" --dry-run" if a.dry_run else ""))
+    if not items:
+        print("no launched session is stopped at the usage limit")
+    for i in items:
+        why = " ".join(str(i.get("why") or "").split())
+        print(f"{i['outcome']:<14} {i['name']}  {why[:200]}")
     return 0
 
 
@@ -490,6 +796,9 @@ def main(argv=None) -> int:
     la.add_argument("--owner-go", metavar="WORDS",
                     help="the owner's own words giving the go: launch past the MEMORY test only "
                          "(never the duplicate check or a cap); logged to owner-go.log")
+    la.add_argument("--untrusted-ok", action="store_true",
+                    help="launch although the folder is recorded as not trusted (the session may "
+                         "stop at the trust question)")
     la.add_argument("launcher")
     sub.add_parser("ls")
     pj = sub.add_parser("projects")
@@ -504,16 +813,26 @@ def main(argv=None) -> int:
     cl.add_argument("--when-needed", action="store_true",
                     help="only while the machine is over its memory line (session_close_swap_used_mb, "
                          "session_close_memory_floor): close the oldest finished sessions until it is "
-                         "under; under the line it reads two figures and does nothing else")
+                         "under; under the line it reads two figures and the launch test, nothing else")
+    cl.add_argument("--tick", action="store_true",
+                    help="what the 5-minute login item runs: over the memory line (or with the "
+                         "launch guard refusing) the --when-needed pass; otherwise, at most once "
+                         "per session_close_every_s, the --all-finished pass")
     cl.add_argument("--all-finished", action="store_true",
                     help="close every finished session this tool launched, oldest first, whatever "
                          "the memory line (the seat's manual sweep)")
     cl.add_argument("--replay", type=float, metavar="DAYS",
                     help="replay the close rules over the last DAYS of transcripts (the pilot)")
     cl.add_argument("--out", help="with --replay: also write the table to this file")
+    cl.add_argument("--cloud", metavar="NAME",
+                    help="end the LOCAL launcher screen of a session launched with --cloud; the "
+                         "cloud session itself is ended on claude.ai")
+    co = sub.add_parser("continue")
+    co.add_argument("--dry-run", action="store_true",
+                    help="judge every usage-cut session and type nothing")
     a = ap.parse_args(argv)
     return {"launch": cmd_launch, "ls": cmd_ls, "projects": cmd_projects,
-            "close": cmd_close}[a.cmd](a)
+            "close": cmd_close, "continue": cmd_continue}[a.cmd](a)
 
 
 if __name__ == "__main__":

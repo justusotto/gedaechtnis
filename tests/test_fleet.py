@@ -579,7 +579,9 @@ def test_a_pass_past_its_budget_defers_the_rest_and_closes_nothing_more(iso):
     _ledger(iso, {"name": "a", "pid": 1, "pid_start": "s"}, {"name": "b", "pid": 2, "pid_start": "s"})
     items = iso.sweep(apply=False, now=NOW, gather_fn=lambda r, m, me: finished(), budget_s=-1)
     assert items == []
-    assert "deferred\ta" in (iso.config.state() / "session-close.log").read_text()
+    # CLOSEBUDGET-1: one line with a count, not one line per session
+    assert (iso.config.state() / "session-close.log").read_text().split("\t", 1)[1] == (
+        "deferred\t2 session(s)\tpass budget -1s spent after 0 judged\n")
 
 
 @pytest.mark.parametrize("cmd", ["open -a Terminal /x/launch-builder-42.sh",

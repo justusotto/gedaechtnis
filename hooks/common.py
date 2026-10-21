@@ -388,6 +388,50 @@ def lock_file(fh) -> None:
     fcntl.flock(fh, fcntl.LOCK_EX)
 
 
+VAULT_FILES_LOCK = "vault-files.lock"      # the same name as vaultsync.FILES_LOCK; a test holds the two together
+_vault_files_fh = None
+
+
+def vault_files_hold(wait_s: float = 20.0) -> bool:
+    """Take the vault-files lock SHARED, from before a script READS a vault file until after it
+    has written it back. `vaultsync.py` moves the vault's files forward under the same lock,
+    exclusive: without this, a write computed from a read made before the move lands on top of
+    what the other machine sent, and the next commit of that file carries the loss to both
+    machines with no error (VAULTSYNC-F audit, M5). Shared, so two writers never wait for each
+    other. False = not had in `wait_s`: the caller writes NOTHING. Held once per process;
+    `vault_files_release()` ends it, and so does the end of the process."""
+    global _vault_files_fh
+    if _vault_files_fh is not None:
+        return True
+    try:
+        import fcntl
+        config.state().mkdir(parents=True, exist_ok=True)
+        fh = open(config.state() / VAULT_FILES_LOCK, "a+")
+    except (ImportError, OSError):
+        return True                              # nowhere to lock: exactly as before this lock existed
+    end = time.time() + wait_s
+    while True:
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
+            _vault_files_fh = fh
+            return True
+        except OSError:
+            if time.time() >= end:
+                fh.close()
+                return False
+            time.sleep(0.05)
+
+
+def vault_files_release() -> None:
+    global _vault_files_fh
+    fh, _vault_files_fh = _vault_files_fh, None
+    if fh is not None:
+        try:
+            fh.close()                           # closing the file drops the lock
+        except OSError:
+            pass
+
+
 def unlock_file(fh) -> None:
     if platform() == "windows":
         import msvcrt
@@ -869,6 +913,20 @@ def session_locations(stale_no_pid: float | None = None) -> list[tuple[str, int 
             seen_pairs.add(key)
             out.append(key)
     return out
+
+
+# The key in a clone's birth manifest that is not a path: {path: was it executable at birth}.
+CLONE_MODES_KEY = ".gedaechtnis-clone-modes"
+
+
+def sha256_file(path) -> str:
+    """sha256 of a file's content, read in 1 MB pieces (a large file is never held whole)."""
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def porcelain_z(out: str) -> list[tuple[str, str]]:

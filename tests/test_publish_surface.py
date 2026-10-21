@@ -37,15 +37,19 @@ HELPERS = {"sh", "_sh", "_sh2", "_run", "_git", "run_git"}
 # The programs the README lists, as the source spells them.
 DECLARED = {"'git'", "'ps'", "'lsof'", "'grep'", "'cp'", "'osascript'", "sys.executable",
             "config.python()", "'/bin/bash'",
-            "'screen'", "'tmux'", "'sysctl'"}   # TERMOVERLOAD-1: tools/sessions.py + the close check
+            "'screen'", "'tmux'", "'sysctl'",
+            "'ioreg'"}    # VAULTSYNC-3: hooks/homes.py reads this machine's id once (docs/what-it-runs.md)   # TERMOVERLOAD-1: tools/sessions.py + the close check
 # Files whose program is decided at run time; each is named in the README (the plugin's own
 # scripts, `notify_command`, `answer_router`, `claim_tool`) or runs `git`/`cp` through a helper.
 DYNAMIC_OK = {"hooks/answers.py", "hooks/boot_check.py", "hooks/maintenance.py",
               "hooks/session_start.py", "hooks/worktree.py", "init.py", "tools/status.py",
               "hooks/claim.py",
+              "hooks/vaultsync.py",   # VAULTSYNC: `git` through its own helper, and itself, detached (docs/what-it-runs.md)
               "hooks/common.py",   # PLATFORM-1: the Trash command of this machine (README "Platforms")
               # TERMOVERLOAD-1: screen or tmux, whichever this machine has (README names both)
               "hooks/fleet.py", "tools/sessions.py",
+              # CONTINUITY-1: the same two, to type "continue" into a launched session's window
+              "hooks/autocontinue.py",
               # PERMDESIGN-1: the reviewed script, in its repository's Python (README "reviewed")
               "tools/reviewed.py",
               # GEMINISETUP-1: `agy`, found on PATH under the name the rule file gives (README names it)
@@ -216,20 +220,29 @@ REMOVALS = {
     ("hooks/mergewindow.py", "unlink"): 1,    # the merge-window lock it granted
     ("init.py", "unlink"): 2,                 # its own stamp and temp file
     ("hooks/worktree.py", "rmtree"): 1,       # a clone it made, holding nothing unique (README)
+    ("hooks/vaultsync.py", "unlink"): 2,      # its own temp index after a merge is worked out, and its
+                                              # own kept-both note once a session has been told
     ("hooks/fleet.py", "unlink"): 1,          # the hardcopy file read_screen asked for a moment before
     ("hooks/fleet.py", "rmdir"): 1,           # ... and the mkdtemp folder it made for that file (empty)
     ("hooks/deliver.py", "unlink"): 3,        # its own claim of a parked file, once read back or restored
+    ("hooks/tmpsweep.py", "unlink"): 2,       # a file it is sweeping out of a dead session's own temp
+                                              # folder, and a dead symlink it replaces with its ledger
+    ("hooks/tmpsweep.py", "rmdir"): 1,        # the now-empty directories left behind in a tree it swept
+    ("hooks/tmpsweep.py", "remove"): 2,       # not a delete: a list method, dropping a symlinked or a
+                                              # dependency-folder entry from the walk, never a file
     ("tools/sessions.py", "unlink"): 1,       # its own stale launch pid file in the state dir
     ("tools/suitelock.py", "unlink"): 2,      # its own suite-lock entry, and a dead suite's
     ("tools/configure.py", "unlink"): 1,      # its own temp file beside config.json when a write fails
     ("tools/allow_rules.py", "unlink"): 1,    # its own temp file beside a settings file when a write fails
-    ("tools/gemini_worker.py", "rmdir"): 1,   # the mkdtemp working folder of one run, only when empty
+    ("tools/gemini_worker.py", "rmdir"): 2,   # the mkdtemp working folder of one run, only when empty;
+                                              # and the mkdtemp folder of one limits read, the same way
     ("tools/gemini_worker.py", "unlink"): 3,  # its own .partial: after the hard link to its final name, or
                                               # the empty one made a moment before a refusal; and its
                                               # own input-N copy of a --file in that working folder
 }
-if not GEMINI:
-    REMOVALS = {k: v for k, v in REMOVALS.items() if k[0] != "tools/gemini_worker.py"}
+# A published tree leaves these files out (rules/publish-exclude.json); their counts apply where they are.
+REMOVALS = {k: v for k, v in REMOVALS.items()
+            if k[0] not in ("tools/gemini_worker.py", "hooks/vaultsync.py") or (PLUGIN / k[0]).is_file()}
 REMOVERS = {"rmtree", "remove", "unlink", "rmdir", "removedirs"}
 
 

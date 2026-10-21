@@ -30,9 +30,9 @@
 #              tree's `.claude-plugin/plugin.json`, and a --tag that differs is refused before
 #              anything is built. Bump the version (and give CHANGELOG.md its heading) instead.
 #
-# THE VERSION RULE. tag = plugin.json version, always. Patch (0.5.0 -> 0.5.1) for fixes and
-# polish; minor (0.5 -> 0.6) for a capability a user notices; major only for a rework or a
-# complete new feature set. A tree whose CHANGELOG.md has no `## <version> ` heading is refused:
+# THE VERSION RULE. tag = plugin.json version, always. Patch (0.6.0 -> 0.6.1) for fixes, polish
+# and small additions such as a new tool or setting; minor (0.6 -> 0.7) for a larger capability a
+# user notices; major only for a rework or a complete new feature set. A tree whose CHANGELOG.md has no `## <version> ` heading is refused:
 # a release names what changed.
 #
 # Exit codes: 0 built and clean · 1 usage/environment, or the tag/version/changelog disagree ·

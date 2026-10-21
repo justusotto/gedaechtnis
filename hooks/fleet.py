@@ -62,6 +62,14 @@ INBOUND_ACCEPT = re.compile(r"crossSessionInbound[\"']?\s*:\s*[\"']accept")
 CLOSE_WAIT_S = 10.0
 GIT_TIMEOUT_S = 8          # a git that cannot answer in this long KEEPS the session (None, never [])
 SWEEP_BUDGET_S = 35.0      # the Stop entry has 60 s; sessions past the budget wait for the next pass
+SWEEP_CAP_S = 35.0         # ... counted from the pass's START there, as it always was: the Stop
+#                            entry gets no later than before (CLOSEBUDGET-1 review)
+STOP_CURSOR = "session-close.cursor"            # where the Stop pass resumes
+NEEDED_CURSOR = "session-close-needed.cursor"   # ... and the login item's / hand-run pass: one each,
+#                            or a pass that reaches the end resets the other's place
+NEEDED_BUDGET_S = 240.0    # the login item's pass and the hand-run ones (no hook limit above them)
+BUDGET_STRETCH = 3         # over the memory line a pass that has found nothing closable yet may run
+#                            this many budgets before it gives up (CLOSEBUDGET-1)
 SCAN_MAX_BYTES = 200 * 1024 * 1024   # a transcript past this is not read (KEPT): one file must not
                                      # spend the pass. Largest seen 2026-09-27: 57 MB, read in <1 s.
 
@@ -1063,7 +1071,8 @@ def _toplevel(d: str) -> str | None:
     return p.stdout.strip() if p.returncode == 0 and p.stdout.strip() else None
 
 
-def session_unsaved(cwd: str | None, worktree: str | None, writes) -> list[str] | None:
+def session_unsaved(cwd: str | None, worktree: str | None, writes,
+                    ended: float | None = None) -> list[str] | None:
     """Uncommitted work that is THIS SESSION'S (SESSCLOSE-2), [] when none, None when git cannot say.
 
     The first sweep counted every dirty path of the checkout the session ran in; a shared checkout
@@ -1073,9 +1082,25 @@ def session_unsaved(cwd: str | None, worktree: str | None, writes) -> list[str] 
     transcript WROTE (Write/Edit/MultiEdit/NotebookEdit) that sits in a git repo and is still
     uncommitted there counts. A file outside any repo is saved on disk and does not count.
     Residual, stated: a file written only by a shell command (`>`, `sed -i`) is not in the transcript
-    as a write; a builder's own worktree catches that case, a shared checkout does not."""
+    as a write; a builder's own worktree catches that case, a shared checkout does not.
+
+    SESSCLOSE-3 — committed = saved. `writes` is `{path: when the session last wrote it}`. A TRACKED
+    path that git lists as modified is saved when its last commit is at or after that write AND
+    the file on disk changed after `ended`, the end of the session's last turn: a commit carried
+    the path after the write, and the change git still lists was made when the session had
+    stopped acting, so it is not this session's (a commit time alone does not show that: an
+    index committed after a second edit, a shell edit after the commit, an amend of other paths
+    all leave the session's own change dirty under a later commit). `ended` unknown = unsaved.
+    (Measured 2026-10-04: a handoff committed at 23:13 and edited by its seat at
+    00:37 kept its builder for 12.1 h). Still unsaved: an untracked path, one added and never
+    committed, a deleted one, a write whose time is unknown, and any path git cannot date.
+    A path under the machine's temp folder whose repository is also there is not work to save (a throwaway checkout in a
+    scratchpad) — unless the session itself runs there."""
     out: list[str] = []
     own = own_worktree(cwd, worktree)
+    times = writes if isinstance(writes, dict) else {}
+    roots = temp_roots()
+    in_temp = _under(_real(cwd) if cwd else None, roots)
     if own and not os.path.lexists(own):
         # A removed worktree holds no file: `git worktree remove` refuses a dirty tree. Its commits
         # are on its branch. A fact, not a failed read (CLOSETUNE-1).
@@ -1086,6 +1111,7 @@ def session_unsaved(cwd: str | None, worktree: str | None, writes) -> list[str] 
             return None
         out.extend(dirt)
     by_repo: dict[str, list[str]] = {}
+    wrote_at: dict[tuple[str, str], float | None] = {}
     for fp in sorted(writes or ()):
         full = _real(fp if os.path.isabs(os.path.expanduser(fp)) else os.path.join(cwd or "/", fp))
         if not full or (own and full.startswith(_real(own) + os.sep)):
@@ -1094,8 +1120,14 @@ def session_unsaved(cwd: str | None, worktree: str | None, writes) -> list[str] 
         while d and not os.path.isdir(d):
             d = os.path.dirname(d)
         top = _toplevel(d) if d else None
+        # A throwaway checkout: the path AND the repository it belongs to are both under temp.
+        # A worktree in temp of a repository that lives elsewhere is real work (its branch is).
+        if top and not in_temp and _under(full, roots) and _under(_common_dir(top), roots):
+            continue
         if top:
-            by_repo.setdefault(top, []).append(os.path.relpath(full, _real(top)))
+            rel = os.path.relpath(full, _real(top))
+            by_repo.setdefault(top, []).append(rel)
+            wrote_at[(top, rel)] = times.get(fp)
     for top, rels in by_repo.items():
         try:
             p = subprocess.run(["git", "--no-optional-locks", "-C", top, "status", "--porcelain", "-z", "-uall", "--", *rels],
@@ -1109,11 +1141,61 @@ def session_unsaved(cwd: str | None, worktree: str | None, writes) -> list[str] 
         while i < len(fields):
             e = fields[i]
             if len(e) > 3:
-                out.append(os.path.join(top, e[3:]))
+                if not _committed_since(top, e[3:], e[:2], wrote_at.get((top, e[3:])), ended):
+                    out.append(os.path.join(top, e[3:]))
                 if e[0] in "RC":
                     i += 1
             i += 1
     return out
+
+
+def temp_roots() -> list[str]:
+    """The machine's temp folders, by real path: `/tmp`, `/private/tmp`, `$TMPDIR`. Never
+    `tempfile.gettempdir()`: with no writable temp folder it answers the CURRENT folder, which
+    would make a real checkout "temp"."""
+    out = []
+    for d in ("/tmp", "/private/tmp", os.environ.get("TMPDIR")):
+        r = _real(d) if d and os.path.isabs(d) else None
+        if r and r != os.sep and r not in out:
+            out.append(r)
+    return out
+
+
+def _common_dir(top: str) -> str | None:
+    """The real path of the repository a checkout belongs to (`--git-common-dir`); None when
+    git cannot say — which `_under` reads as not under temp, so the path is counted."""
+    try:
+        p = subprocess.run(["git", "--no-optional-locks", "-C", top, "rev-parse", "--git-common-dir"],
+                           capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                           timeout=GIT_TIMEOUT_S)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    out = p.stdout.strip() if p.returncode == 0 else ""
+    return _real(out if os.path.isabs(out) else os.path.join(top, out)) if out else None
+
+
+def _under(path: str | None, roots: list[str]) -> bool:
+    return bool(path) and any(path == r or path.startswith(r.rstrip(os.sep) + os.sep) for r in roots)
+
+
+def _committed_since(top: str, rel: str, xy: str, wrote: float | None,
+                     ended: float | None = None) -> bool:
+    """Whether a path git lists as dirty is nonetheless SAVED for the session that wrote it at
+    `wrote`: it is tracked and only modified (never untracked, added, deleted, renamed or
+    unmerged), its last commit on this checkout's HEAD is at or after that write, and the file
+    on disk was last changed AFTER `ended` (the end of the session's last turn). Anything that
+    cannot be read is False: the path counts as unsaved."""
+    if not wrote or not ended or xy not in (" M", "M ", "MM"):
+        return False
+    try:
+        if os.stat(os.path.join(top, rel)).st_mtime <= float(ended):
+            return False
+        p = subprocess.run(["git", "--no-optional-locks", "-C", top, "log", "-1", "--format=%ct",
+                            "--", rel], capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                           timeout=GIT_TIMEOUT_S)
+        return p.returncode == 0 and float(p.stdout.strip()) >= float(wrote)
+    except (OSError, subprocess.TimeoutExpired, ValueError, TypeError):
+        return False
 
 
 # ------------------------------------------------------------------------------ the decision ----
@@ -1124,6 +1206,67 @@ def idle_minutes() -> float:
     except (TypeError, ValueError):
         v = 180.0
     return v if v > 0 else 180.0
+
+
+def _minutes(key: str, default: float) -> float:
+    """A limit that is a number ≥ 0 (0 = off where the key says so); anything else → `default`."""
+    try:
+        raw = limits.get(key, default)
+        if isinstance(raw, bool):
+            return float(default)
+        v = float(raw)
+    except (TypeError, ValueError, KeyError):
+        return float(default)
+    return v if v >= 0 and v != float("inf") else float(default)      # NaN fails `v >= 0`
+
+
+def report_minutes() -> float:
+    """`session_close_report_minutes`: the quiet a session needs after it reported to its seat or
+    committed a done handoff (SESSCLOSE-3; before, the constant 30)."""
+    return _minutes("session_close_report_minutes", closerules.REPORT_IDLE_MIN)
+
+
+def stale_shell_minutes() -> float:
+    """`session_close_stale_shell_minutes`: how old the last turn of a session that REPORTED must
+    be before a background wait loop it left behind stops keeping it. 0 = such a loop keeps until
+    `session_close_abandoned_minutes`."""
+    return _minutes("session_close_stale_shell_minutes", 60)
+
+
+def abandoned_minutes() -> float:
+    """`session_close_abandoned_minutes`: how old the last turn must be before a session with
+    nothing unsaved and nothing live but idle shells or shell + `sleep` wait loops stops being
+    kept by them, reported or not. 0 = off."""
+    return _minutes("session_close_abandoned_minutes", 1440)
+
+
+def launch_wait_s() -> float:
+    """`session_launch_wait_s`: how long a launch the memory test refused waits, after the closer
+    ran, for the test to pass. 0 = the launch closes nothing and is refused at once."""
+    return _minutes("session_launch_wait_s", 30)
+
+
+def prompt_flag_minutes() -> float:
+    """`session_prompt_flag_minutes`: a prompt on a session's screen for longer than this is
+    FLAGGED in `sessions.py ls` and the health digest."""
+    return _minutes("session_prompt_flag_minutes", 5)
+
+
+def seat_addresses(seat: str | None, records: list[dict] | None = None) -> list[str]:
+    """The socket addresses a session may have sent its report to instead of its seat's name:
+    `uds:<messagingSocketPath>` of every registry record named like the seat (SESSCLOSE-3). The
+    path carries the seat's pid, and a record is rewritten by whatever session next runs under
+    that pid, so a record that still names the seat is the seat's address."""
+    if not seat:
+        return []
+    out = []
+    for rec in (registry_records() if records is None else records):
+        if not isinstance(rec, dict):
+            continue
+        sock = rec.get("messagingSocketPath")
+        if rec.get("name") == seat and isinstance(sock, str) and sock and f"uds:{sock}" not in out:
+            out.append(f"uds:{sock}")
+    return out
 
 
 def exempt_patterns() -> list[str]:
@@ -1139,7 +1282,7 @@ def classify(f: dict, now: float, idle_minutes: float) -> list[str]:
 
     CLOSETUNE-1: FINISHED is a fact about time (`closerules.finished`): the last turn ended, and it
     is `idle_minutes` old — or its handoff says done/landed/stopped with no turn since its commit,
-    or it reported to its seat 30 minutes ago. Last words that ask or wait no longer keep a session
+    or it reported to its seat `session_close_report_minutes` ago. Last words that ask or wait no longer keep a session
     that is finished; they go to `notes(f, …)`. What cannot be told for certain — git could not
     answer, git lists uncommitted paths it wrote, its screen could not be read, an old background
     task never reported, the owner typed into it — keeps it only while its last turn is younger
@@ -1156,8 +1299,15 @@ def classify(f: dict, now: float, idle_minutes: float) -> list[str]:
     process of its own keeps the session, named. With the registry saying idle and no such process
     (`_nothing_runs`), an old task that never reported no longer keeps it, and an unreadable screen
     does not either when the transcript shows the last turn ended with no task open: a prompt
-    needs a tool call or a task to ask for it."""
+    needs a tool call or a task to ask for it.
+
+    SESSCLOSE-3 (2026-10-06): `f` also carries seat_addrs (the seat's socket addresses),
+    report_min, stale_shell_min and work (`own_work`: per live process of its own, whether it only
+    WAITS). A session that reported and left only wait loops behind (`stale_loops`) is not kept
+    by them, by the registry's `shell`, or by the old task that started them; each loop is a note."""
     keep = []
+    stale = stale_loops(f, now)
+    report_min = f.get("report_min", closerules.REPORT_IDLE_MIN)
     if f.get("is_self"):
         keep.append("launched: it is the session running this pass")
     if not f.get("alive"):
@@ -1170,7 +1320,8 @@ def classify(f: dict, now: float, idle_minutes: float) -> list[str]:
         keep.append("transcript: no transcript to read its last turn from")
     else:
         v = closerules.finished(f.get("end"), now, idle_minutes, f.get("handoff_done"), f.get("seat"),
-                                nothing_runs=_nothing_runs(f))
+                                nothing_runs=_nothing_runs(f) or bool(stale),
+                                report_min=report_min, seat_addrs=f.get("seat_addrs") or ())
         keep.extend(v["hard"])
         soft.extend(v["soft"])
         age = v["age_s"]
@@ -1181,12 +1332,12 @@ def classify(f: dict, now: float, idle_minutes: float) -> list[str]:
             soft = [s for s in soft if not s.startswith("conversation:")]
             keep.extend(s + " — a hand-started session he typed into is his to close" for s in typed)
     status = f.get("status")
-    if status is not None and status != "idle":
+    if status is not None and status != "idle" and not (stale and status == "shell"):
         keep.append(f"idle: the session registry says {status!r}")
     if f.get("outside") and not f.get("mux"):
         keep.append("window: it runs in a terminal window, not a screen — closing it is the owner's")
     kids = f.get("children")
-    if kids:
+    if kids and not stale:
         keep.append(f"background: {len(kids)} process(es) it started are still running "
                     f"({', '.join(kids[:3])}{', …' if len(kids) > 3 else ''})")
     screen = f.get("screen")
@@ -1206,6 +1357,64 @@ def classify(f: dict, now: float, idle_minutes: float) -> list[str]:
     if soft and (age is None or age < line):
         keep.extend(f"{k} — keeps until its last turn is {line / 3600:g} h old" for k in soft)
     return keep
+
+
+def stale_loops(f: dict, now: float) -> list[str]:
+    """SESSCLOSE-3: the wait loops a FINISHED session left behind, as labels; [] = none, or not
+    provably so. Pure. All of these must hold:
+      - `stale_shell_min` > 0 and the last turn ended at least that long ago;
+      - the session SAID it is finished in that turn (`closerules.said`: a report to its seat, or
+        a done handoff committed) — a session that only went quiet is waiting for its loop;
+      - the registry was read and says `idle` or `shell`, never `busy`;
+      - EVERY live process of its own only waits (`own_work`: a shell whose command is a loop
+        with `sleep N` as its whole body, and nothing but its own forks and `sleep` under it).
+        One process that is anything else — a suite, a Python job, a browser, a script between
+        two of its commands — and every child keeps as before;
+      - every one of them, and every background task still open, was started BEFORE that
+        report: a loop started after it is what the session said it waits for.
+    THE DAY RULE — or, whatever it said: its last turn ended `abandoned_min`
+    (`session_close_abandoned_minutes`, a day) ago, git READ its work and nothing it wrote is
+    unsaved, the registry says `idle` or `shell`, and every live process of its own is `idle`
+    (`own_work`: a bare shell with nothing under it, or a shell whose command has a loop with
+    `sleep N` as its whole body and only its own forks and `sleep` under it) or has stood still
+    for `child_still_min` (`still_since`, MACFIX-1B: a hung command, a browser nobody drives).
+    A shell running anything else keeps. What such a loop would have done after its wait is given up: after a day
+    nobody is there to read it, and the close log carries the line that reopens the session.
+    Measured 2026-10-06: six sessions were kept 61–111 h by one `until …; do sleep N; done` each;
+    the four that had reported are these, the two that had not are real waiters."""
+    mins = f.get("stale_shell_min") or 0
+    end, work, kids = f.get("end"), f.get("work"), f.get("children")
+    if not f.get("scanned") or end is None or not work or kids is None or len(kids) != len(work):
+        return []
+    if f.get("status") not in ("idle", "shell"):
+        return []
+    ts = end.get("ts")
+    if ts is None:
+        return []
+    # The day rule (owner, 2026-10-06: "wont do this from hand anymore"): reported or not.
+    day = f.get("abandoned_min") or 0
+    still, need = f.get("still") or {}, (f.get("child_still_min") or 0) * 60
+
+    def quiet(w: dict) -> bool:
+        # MACFIX-1B: or it has stood still (`still_since`) for `child_still_min`: the same
+        # processes, no processor time. One that computed in that window keeps the session.
+        since = still.get(str(w.get("label")))
+        return bool(w.get("idle")) or (need > 0 and isinstance(since, (int, float))
+                                       and 0 <= since <= now - need)
+    if (day > 0 and now - ts >= day * 60 and f.get("unsaved") == []
+            and all(quiet(w) for w in work)):
+        return [str(w.get("label")) for w in work]
+    if mins <= 0 or now - ts < mins * 60 or not all(w.get("waits") for w in work):
+        return []
+    said_at = closerules.said_at(end, f.get("handoff_done"), f.get("seat"), f.get("seat_addrs") or ())
+    if not said_at:
+        return []
+    # What it started AFTER it reported is what it waits on ("I report when they finish").
+    started = [w.get("started") for w in work] + list((end.get("open_bg_ts") or {}).values())
+    # a process start is whole seconds: one in the report's own second counts as after it
+    if any(not isinstance(s, (int, float)) or not s or s + 1 > said_at for s in started):
+        return []
+    return [str(w.get("label")) for w in work]
 
 
 def _nothing_runs(f: dict) -> bool:
@@ -1238,6 +1447,66 @@ def own_processes(pid, table: dict[int, dict] | None) -> list[str] | None:
     1 s after it). The CLI runs every command, background task and Monitor through a shell, so a
     shell child is always work, whenever it started; so is anything that started later, except
     the keep-awake the CLI starts itself while it works (HELPER_NAMES)."""
+    work = own_work(pid, table)
+    return None if work is None else [w["label"] for w in work]
+
+
+WAIT_ONLY = ("sleep",)     # beside a shell, the one program that only waits
+# The whole loop body is one `sleep N`: `until <check>; do sleep 10; done`.
+WAIT_LOOP = re.compile(r";\s*do\s+sleep\s+[0-9.]+[smhd]?\s*;\s*done\b")
+# What may follow `done`: commands that only print (the usual form is "wait, then show the result").
+AFTER_LOOP = ("echo", "date", "true", ":", "printf", "cat", "tail", "head", "grep", "ls", "wc")
+# The CLI runs a command as `<shell> -c "<its own head> && eval '<the command>' < /dev/null && pwd -P >| <file>"`.
+CLI_FORM = re.compile(r"&& eval '(.*)' \\?< /dev/null && pwd -P >\| \S+\s*$", re.S)
+LOOP_HEAD = re.compile(r"^\s*(?:[A-Za-z_]\w*=[^;&|]*;\s*)*(?:until|while)\s")
+
+
+def wait_loop_text(text: str) -> bool:
+    """Whether a shell's command line is ONLY a wait loop. All of: the command (the CLI's own
+    wrapper taken off, else what follows `-c`) BEGINS with the loop — plain assignments, then
+    `until` / `while`; it has exactly ONE loop, whose whole body is `sleep N`; nothing runs in the
+    background (`&`); and after `done` there is nothing but commands that print (`AFTER_LOOP`:
+    echo, date, cat, grep, tail, …; pipes only between them; no redirect, no substitution,
+    nothing remote). So `while :; do rsync …; sleep 600; done`, `sleep 3600 && ./deploy.sh`,
+    `./a.sh; until …`, `( … ) & until …`, `trap … EXIT; until …` are all jobs; a shell with no
+    loop cannot be told. Work in the loop's CONDITION is accepted: it is a check. Pure."""
+    text = (text or "").replace("\\012", "\n")
+    m = CLI_FORM.search(text)
+    if m:
+        cmd = m.group(1).replace("'\"'\"'", "'")
+    elif " -c " in text:
+        cmd = text.split(" -c ", 1)[1]
+    else:
+        return False
+    found = list(WAIT_LOOP.finditer(cmd))
+    if len(found) != 1 or not LOOP_HEAD.match(cmd):
+        return False
+    if len(re.findall(r"\bdo\b", cmd)) != 1 or len(re.findall(r"\bdone\b", cmd)) != 1:
+        return False                                   # a second loop, or loop text inside a string
+    if re.search(r"(?<![&>])&(?!&)", cmd):
+        return False                                   # something was sent to the background
+    for part in re.split(r";|&&|\n", cmd[found[0].end():]):
+        part = part.strip()
+        if not part:
+            continue
+        if re.search(r"[`<>&]|\$\(|\|\|", part):
+            return False
+        for stage in part.split("|"):                 # a pipe between two printers still prints
+            if not stage.split() or stage.split()[0] not in AFTER_LOOP:
+                return False
+    return True
+
+
+def own_work(pid, table: dict[int, dict] | None) -> list[dict] | None:
+    """`own_processes` with three more facts per process: [{label, waits, started, idle}]
+    (`idle`: see the inner function; the day rule of `stale_loops` reads it). `waits`
+    (SESSCLOSE-3): the process is a shell whose command is only a wait loop (`wait_loop_text`:
+    `until …; do sleep 10; done`), and everything under it is `sleep` or a fork of that same
+    shell (same command). Decided by the command, not by the instant: a job sampled between two
+    of its commands, a shell running a script, a bare shell blocked in `read` or `wait` are all
+    work. Anything else anywhere under it (a Python job, a suite, `ssh`, a browser) is work, and
+    so is a process whose command cannot be read. `started`: its start, epoch seconds, or None.
+    None when the table or the session's own row could not be read. Pure."""
     try:
         me = table.get(int(pid)) if table is not None else None
     except (TypeError, ValueError):
@@ -1245,12 +1514,67 @@ def own_processes(pid, table: dict[int, dict] | None) -> list[str] | None:
     if me is None:
         return None
     born = _start_epoch(me.get("start") or "")
+    under: dict[int, list[int]] = {}
+    for c, proc in table.items():
+        under.setdefault(proc.get("ppid"), []).append(c)
+
+    def base_of(proc: dict) -> str:
+        return os.path.basename(proc["toks"][0]) if proc.get("toks") else "?"
+
+    def waits(c: int) -> bool:
+        mine = table[c].get("toks") or []
+        if base_of(table[c]) not in SHELLS + MORE_SHELLS or not wait_loop_text(" ".join(mine)):
+            return False
+        seen, todo = set(), [c]
+        while todo:
+            x = todo.pop()
+            if x in seen:
+                continue
+            seen.add(x)
+            b = base_of(table[x])
+            if b not in SHELLS + MORE_SHELLS + WAIT_ONLY:
+                return False
+            if b not in WAIT_ONLY and (table[x].get("toks") or [])[1:] != mine[1:]:
+                return False                      # another shell command: a script, not a fork
+            todo.extend(under.get(x, []))
+        return True
+
+    def idle(c: int) -> bool:
+        """The day rule's reading: a bare shell (no command) with nothing under it, or a shell
+        whose command has a loop with `sleep N` as its whole body and nothing under it but its
+        own forks and `sleep`. Unlike `waits`: what stands before or after the loop is not read."""
+        if base_of(table[c]) not in SHELLS + MORE_SHELLS:
+            return False
+        mine = table[c].get("toks") or []
+        seen, todo = set(), list(under.get(c, []))
+        if not todo and all(a.startswith("-") for a in mine[1:]):
+            return True                           # a bare shell: no command, nothing under it
+        text = " ".join(mine)
+        if not WAIT_LOOP.search(text):
+            return False
+        # loop keywords stand after a `;` — the word "done" inside a quoted pattern is not one
+        if (len(re.findall(r";\s*do\b", text)) != 1 or len(re.findall(r";\s*done\b", text)) != 1
+                or re.search(r"(?<![&>])&(?!&)", text)):
+            return False                          # a second loop, or a job in the background
+        while todo:
+            x = todo.pop()
+            if x in seen:
+                continue
+            seen.add(x)
+            b = base_of(table[x])
+            if b not in SHELLS + MORE_SHELLS + WAIT_ONLY:
+                return False
+            if b not in WAIT_ONLY and (table[x].get("toks") or [])[1:] != mine[1:]:
+                return False                      # another shell command: a script, not a fork
+            todo.extend(under.get(x, []))
+        return True
+
     out = []
     for c in sorted(table):
         proc = table[c]
         if proc.get("ppid") != int(pid):
             continue
-        base = os.path.basename(proc["toks"][0]) if proc.get("toks") else "?"
+        base = base_of(proc)
         st = _start_epoch(proc.get("start") or "")
         # `caffeinate` with only switches and numbers is the keep-awake; `caffeinate <job>` is work.
         awake = base in HELPER_NAMES and all(
@@ -1259,7 +1583,200 @@ def own_processes(pid, table: dict[int, dict] | None) -> list[str] | None:
         helper = awake or (base not in SHELLS + MORE_SHELLS + HELPER_NAMES and born is not None
                            and st is not None and 0 <= st - born <= HELPER_BOOT_S)
         if not helper:
-            out.append(f"pid {c} ({base})")
+            out.append({"label": f"pid {c} ({base})", "waits": waits(c), "started": st,
+                        "idle": idle(c)})
+    return out
+
+
+CHILD_STILL = "child-still.json"
+# The executable's own name (`ps -o comm=`), never a word on a command line.
+BROWSER_COMM = re.compile(r"^(Google Chrome( for Testing)?( Helper.*)?|Chromium( Helper.*)?|chrome|"
+                          r"chrome-headless-shell|headless_shell|chrome_crashpad_handler)$")
+# A shell whose command can wait for something outside it with no process to show for it.
+# (as a COMMAND word: at the start, or after ; & | ( { or do/then/else/while/until/if/eval — the
+# word "read" inside a path or an argument is not one).
+# Words that may stand before it are skipped: `IFS= read`, `! read`, `command read`, `time read`.
+SHELL_WAITS = re.compile(r"/dev/(tcp|udp)/|(?:^|[;&|({\n]|\b(?:do|then|else|while|until|if|eval)\s)\s*['\"]?"
+                         r"(?:(?:[A-Za-z_]\w*=\S*|!|command|builtin|time|exec|noglob)\s+)*"
+                         r"(?:read|wait|select|zselect|mkfifo|nc|coproc|vared|ztcp|zpty|sysread|suspend)\b")
+STILL_READINGS = 3         # a baseline counts after this many readings: one clock step is not a day
+
+
+def child_still_minutes() -> float:
+    """`session_close_child_still_minutes`: how long a process a session started must have stood
+    still (`still_since`) before it stops keeping a session whose last turn is a day old. 0 = off."""
+    return _minutes("session_close_child_still_minutes", 1440)
+
+
+def browser_idle_cpu_s() -> float:
+    """`session_close_browser_idle_cpu_seconds`: the processor seconds per day a browser may use
+    and still count as standing still (an idle headless Chrome ticks; measured 2026-10-06: about
+    44 s a day for a browser and its helpers three days after its session's last turn)."""
+    return _minutes("session_close_browser_idle_cpu_seconds", 120)
+
+
+def parse_cpu(s: str) -> float | None:
+    """`ps -o time=` ([[D-]H:]M:S[.cc]) as seconds; None when it is not that."""
+    try:
+        days, _, rest = (s or "").strip().rpartition("-")
+        v = 0.0
+        for x in rest.split(":"):
+            v = v * 60 + float(x)
+        return v + (int(days) * 86400 if days else 0) if v >= 0 else None
+    except ValueError:
+        return None
+
+
+def cpu_table() -> tuple[dict[int, float], dict[int, str]] | None:
+    """(pid -> processor seconds used since it started, pid -> its executable). None if unread."""
+    try:
+        p = subprocess.run(["ps", "-Awwo", "pid=,time=,comm="], capture_output=True, text=True,
+                           stdin=subprocess.DEVNULL, timeout=5, env={**os.environ, "LC_ALL": "C"})
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if p.returncode != 0:
+        return None
+    cpu, comm = {}, {}
+    for line in (p.stdout or "").splitlines():
+        bits = line.strip().split(None, 2)
+        v = parse_cpu(bits[1]) if len(bits) == 3 else None
+        if v is not None and bits[0].isdigit():
+            cpu[int(bits[0])], comm[int(bits[0])] = v, bits[2]
+    return (cpu, comm) if cpu else None
+
+
+def is_browser(comm: str | None) -> bool:
+    """A browser or one of its helpers, by its executable alone: `ssh host chrome`, a Python
+    driver or `tail -f Chromium.log` name one and are not one."""
+    return bool(comm) and comm.startswith("/") and bool(BROWSER_COMM.match(os.path.basename(comm)))
+
+
+# Beside a shell and a browser, the programs that have nothing outside the machine to wait for:
+# one of these with no processor time for a day is hung (reading a terminal nobody types into).
+# NOT here, on purpose: `sleep` (a timer: the wait-loop rules judge it), `ssh`, `curl`, `tail`
+# (it follows a log), Python, anything else — a remote job or a long timer also uses no
+# processor time, so a tree holding one of those is never "standing still" and keeps as before.
+# Also not here: `cat`, `head`, `tee` (the usual readers of a named pipe: `cat gate && ./deploy.sh`).
+# A shell counts only when its command has no word that waits without a process (SHELL_WAITS).
+# What is left and accepted, as under the day rule's sleep loops: a command that would have gone
+# on after a filter that hung for a day is given up; the close log carries the line that reopens.
+LOCAL_FILTERS = ("grep", "egrep", "fgrep", "ugrep", "rg", "tr", "sed", "awk", "wc", "sort", "uniq", "cut", "jq")
+
+
+def tree_reading(root: int, table: dict[int, dict] | None, cpu: dict[int, float] | None,
+                 comm: dict[int, str] | None = None) -> dict | None:
+    """{`pid|start`: [processor seconds, is a browser]} for `root` and everything under it.
+    None when the table, a start time or one process's seconds could not be read, or when one
+    process is something that may be waiting for the outside (not a shell, a browser or one of
+    LOCAL_FILTERS). Pure."""
+    if table is None or cpu is None or comm is None or root not in table:
+        return None
+    under: dict[int, list[int]] = {}
+    for c, proc in table.items():
+        under.setdefault(proc.get("ppid"), []).append(c)
+    out, todo, seen = {}, [root], set()
+    while todo:
+        x = todo.pop()
+        if x in seen:
+            continue
+        seen.add(x)
+        if x not in cpu or not table[x].get("start"):
+            return None
+        toks, browser = table[x].get("toks") or [], is_browser(comm.get(x))
+        base = os.path.basename(comm.get(x) or "") or "?"
+        if not browser and base not in SHELLS + MORE_SHELLS + LOCAL_FILTERS:
+            return None
+        if base in SHELLS + MORE_SHELLS:
+            args = toks[1:]
+            # a shell running a script FILE cannot be read (the waiting word is in the file): keep.
+            # Readable: a bare shell (switches only) and `-c <command>`.
+            if "-c" not in args and any(not a.startswith("-") for a in args):
+                return None
+            if SHELL_WAITS.search(" ".join(a for a in args if not a.startswith("-"))):
+                return None
+        out[f"{x}|{table[x]['start']}"] = [cpu[x], browser]
+        todo.extend(under.get(x, []))
+    return out
+
+
+def still_step(old: dict | None, cur: dict, now: float, browser_s_per_day: float) -> dict:
+    """One reading against the last one: the entry to keep ({since, at, n, procs}). Pure. `since`
+    stands only when the tree is the SAME processes (pid and start), no process that is not a
+    browser used any processor time since the last reading, and the browsers together used no
+    more than their idle allowance for the time since that reading. Anything else — a process came or went (a loop that starts `ssh` then
+    `sleep` changes at every turn), a job computed — starts a new baseline at `now`."""
+    b_now = sum(sec for sec, browser in cur.values() if browser)
+    fresh = {"since": now, "at": now, "n": 1, "b0": b_now, "procs": cur}
+    if not isinstance(old, dict) or not isinstance(old.get("procs"), dict):
+        return fresh
+    was, since, at, n, b0 = old["procs"], old.get("since"), old.get("at"), old.get("n"), old.get("b0")
+    if (not isinstance(since, (int, float)) or not isinstance(at, (int, float)) or not isinstance(n, int)
+            or not isinstance(b0, (int, float))
+            or not since <= at <= now or set(was) != set(cur)):
+        return fresh
+    used = 0.0
+    for k, (sec, browser) in cur.items():
+        try:
+            d = sec - float(was[k][0])
+        except (TypeError, ValueError, IndexError):
+            return fresh
+        if d < 0 or (d > 0 and not browser):
+            return fresh
+        used += d
+    # Two lines, both must hold: since the LAST reading (five idle days do not buy a busy hour),
+    # and since the baseline (many short readings do not add up to more than the day's allowance).
+    if (used > browser_s_per_day * max(now - at, 3600.0) / 86400.0
+            or b_now - b0 > browser_s_per_day * max(now - since, 3600.0) / 86400.0):
+        return fresh
+    return {"since": since, "at": now, "n": n + 1, "b0": b0, "procs": cur}
+
+
+def still_since(work: list[dict] | None, table: dict[int, dict] | None, now: float,
+                cpu: dict[int, float] | None = None, comm: dict[int, str] | None = None) -> dict[str, float]:
+    """{label: since when that process of a session's own has stood still} for `own_work`'s
+    processes (MACFIX-1B). Reads `cpu_table()` unless given, and keeps the baselines in
+    `child-still.json` under one lock; a process whose tree could not be read as still gets no
+    entry AND loses its baseline, one read fewer than STILL_READINGS times gets none yet, and
+    none gets one when the file cannot be written. Entries of processes that are gone are
+    dropped on each write."""
+    if not work or table is None or child_still_minutes() <= 0:
+        return {}
+    if cpu is None:
+        cpu, comm = cpu_table() or (None, None)
+    cur, unread = {}, []
+    for w in work:
+        m = re.match(r"pid (\d+) ", str(w.get("label")))
+        if not m or int(m.group(1)) not in table:
+            continue
+        key = f"{m.group(1)}|{table[int(m.group(1))].get('start')}"
+        t = tree_reading(int(m.group(1)), table, cpu, comm)
+        if t is None:
+            unread.append(key)                                # not still NOW: its baseline goes
+        else:
+            cur[str(w["label"])] = (key, t)
+    alive = {f"{pid}|{proc.get('start')}" for pid, proc in table.items()}
+    out = {}
+    try:
+        config.state().mkdir(parents=True, exist_ok=True)
+        with open(config.state() / "child-still.lock", "w") as lk:
+            common.lock_file(lk)
+            try:
+                doc = json.loads((config.state() / CHILD_STILL).read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                doc = {}
+            doc = doc if isinstance(doc, dict) else {}
+            had = json.dumps(doc, sort_keys=True)
+            for label, (key, t) in cur.items():
+                doc[key] = still_step(doc.get(key), t, now, browser_idle_cpu_s())
+                if doc[key]["n"] >= STILL_READINGS:
+                    out[label] = doc[key]["since"]
+            doc = {k: v for k, v in doc.items() if k in alive and k not in unread}
+            if json.dumps(doc, sort_keys=True) != had:
+                tmp = config.state() / (CHILD_STILL + ".tmp")
+                tmp.write_text(json.dumps(doc) + "\n", encoding="utf-8")
+                os.replace(tmp, config.state() / CHILD_STILL)
+    except OSError:
+        return {}
     return out
 
 
@@ -1268,15 +1785,26 @@ def unknown_line_s(idle_minutes: float) -> float:
     return idle_minutes * 60 * closerules.UNKNOWN_FACTOR
 
 
+STALE_NOTE = "stale wait loop not counted"
+
+
 def notes(f: dict, now: float, idle_minutes: float) -> list[str]:
     """What is printed beside a close and never keeps it: the last words, uncommitted paths."""
     out = []
     if f.get("scanned") and f.get("end") is not None:
+        stale = stale_loops(f, now)
         v = closerules.finished(f.get("end"), now, idle_minutes, f.get("handoff_done"), f.get("seat"),
-                                nothing_runs=_nothing_runs(f))
+                                nothing_runs=_nothing_runs(f) or bool(stale),
+                                report_min=f.get("report_min", closerules.REPORT_IDLE_MIN),
+                                seat_addrs=f.get("seat_addrs") or ())
         out += v["notes"]
         if v["how"]:
             out.insert(0, "finished: " + v["how"])
+        said = closerules.said(f.get("end"), f.get("handoff_done"), f.get("seat"),
+                               f.get("seat_addrs") or ())
+        out += [f"{STALE_NOTE}: {label} — " + ("it reported, " if said else "it did not report, ")
+                + f"its last turn is {(v['age_s'] or 0) / 60:.0f} min old, and only an idle shell, "
+                "a sleep loop or a process that has stood still is left under it" for label in stale]
         if f.get("screen") is None and _no_prompt_possible(f):
             out.append("its screen could not be read; its last turn ended with no tool call or "
                        "task open, so no prompt can be up")
@@ -1438,14 +1966,23 @@ def gather(r: dict, mux: str | None, me: int | None) -> dict:
     last_end = sc["ends"][-1] if sc and sc["ends"] else None
     since_launch = {k: v for k, v in (last_end["writes"] if last_end else {}).items()
                     if not at or not v or v >= at - 60}
+    table = full_process_table()
+    work = own_work(pid, table)
     return {
+        "still": still_since(work, table, time.time()),
+        "child_still_min": child_still_minutes(),
         "is_self": bool(me) and pid == me,
         "alive": same_process(pid, r.get("pid_start")),
         "exempt": any(fnmatch.fnmatchcase(r["name"], pat) for pat in exempt_patterns()),
         "handoff": handoff_written(r.get("handoff"), at, r.get("cwd")),
         "handoff_done": handoff_done(r.get("handoff"), r.get("cwd"), own_handoffs(last_end)),
-        "children": own_processes(pid, full_process_table()),
+        "children": None if work is None else [w["label"] for w in work],
+        "work": work,
         "seat": r.get("seat"),
+        "seat_addrs": seat_addresses(r.get("seat")),
+        "report_min": report_minutes(),
+        "stale_shell_min": stale_shell_minutes(),
+        "abandoned_min": abandoned_minutes(),
         "wrote": sorted(since_launch),
         "status": registry_status(pid),
         "scanned": sc is not None,
@@ -1453,7 +1990,8 @@ def gather(r: dict, mux: str | None, me: int | None) -> dict:
         "screen": read_screen(m, session) if m else None,
         "attached": (screen_attached(session) if m == "screen"
                      else tmux_attached(session) if m == "tmux" else False),
-        "unsaved": session_unsaved(r.get("cwd"), r.get("worktree"), since_launch),
+        "unsaved": session_unsaved(r.get("cwd"), r.get("worktree"), since_launch,
+                                   (last_end or {}).get("ts")),
         "outside": bool(r.get("outside")),
         "mux": m,
     }
@@ -1844,9 +2382,74 @@ def safe_close_log(action: str, r: dict, why: str, by: str) -> None:
         pass
 
 
-def sweep(apply: bool, now: float | None = None, gather_fn=gather, refusals_fn=None,
+def cursor_path(name: str = STOP_CURSOR) -> Path:
+    return config.state() / name
+
+
+def read_cursor(name: str = STOP_CURSOR) -> dict | None:
+    """Where the last pass that ran out of budget stopped: {name, pid, launched_at}, or None. A file
+    that cannot be read as that — whatever is in it — is no cursor; it never stops a pass."""
+    try:
+        doc = json.loads(cursor_path(name).read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError):
+        return None
+    if not isinstance(doc, dict) or not isinstance(doc.get("name"), str):
+        return None
+    return {"name": doc["name"], "pid": doc.get("pid"), "launched_at": _launched(doc)}
+
+
+def write_cursor(r: dict | None, name: str = STOP_CURSOR) -> None:
+    """Remember the last session judged (None: the pass reached the end, the next starts at the
+    oldest). Written whole beside the file and renamed into place; never removed, so an empty
+    document is "none". One fixed temp name: a failed rename leaves at most one file behind."""
+    doc = {} if r is None else {"name": str(r.get("name")), "pid": r.get("pid"),
+                                "launched_at": _launched(r),
+                                "at": time.strftime("%Y-%m-%dT%H:%M:%S")}
+    try:
+        config.state().mkdir(parents=True, exist_ok=True)
+        tmp = cursor_path(name).with_name(name + ".tmp")
+        tmp.write_text(json.dumps(doc) + "\n", encoding="utf-8")
+        os.replace(tmp, cursor_path(name))
+    except (OSError, TypeError, ValueError):
+        pass
+
+
+def _launched(r: dict) -> float:
+    """A row's launch time as a finite number; anything else (missing, a bool, NaN, infinite, an
+    integer too large for a float) is 0 — the row sorts first, it never raises."""
+    at = r.get("launched_at")
+    if not isinstance(at, (int, float)) or isinstance(at, bool):
+        return 0.0
+    try:
+        v = float(at)
+    except OverflowError:
+        return 0.0
+    return v if v == v and v not in (float("inf"), float("-inf")) else 0.0
+
+
+def pass_order(rows: list[dict], cursor: dict | None) -> list[dict]:
+    """The rows oldest launch first, turned so the pass begins right AFTER the cursor's session and
+    ends with the ones the last pass already judged. Every row stays in the list exactly once. A
+    cursor naming a session no longer here resumes at the first one launched after it. The
+    cursor's session is the row with its name AND pid: two live sessions can carry one name (a
+    session resumed by hand while the first still runs), and matching the name alone sent every
+    pass back to the first of them."""
+    rows = sorted(rows, key=_launched)                        # stable: equal ages keep their order
+    if not cursor or not rows:
+        return rows
+    at = next((n + 1 for n, r in enumerate(rows)
+               if r.get("name") == cursor["name"] and r.get("pid") == cursor.get("pid")), None)
+    if at is None:
+        at = next((n for n, r in enumerate(rows) if _launched(r) > cursor["launched_at"]), 0)
+    at %= len(rows)
+    return rows[at:] + rows[:at]
+
+
+def sweep(apply: bool, now: float | None = None, gather_fn=None, refusals_fn=None,
           budget_s: float = SWEEP_BUDGET_S, rows: list[dict] | None = None,
-          by: str | None = None, log_proposals: bool = True) -> list[dict]:
+          by: str | None = None, log_proposals: bool = True, resume: bool = False,
+          cap_s: float | None = None, until_found: int = 0, stats: dict | None = None,
+          timer=time.time, alive_fn=None, cursor: str = STOP_CURSOR) -> list[dict]:
     """One pass over the live sessions — the launch ledger's, and (SESSCLOSE-2) every other live
     interactive session the CLI has a record of. Returns one item per live session with its verdict.
 
@@ -1855,7 +2458,21 @@ def sweep(apply: bool, now: float | None = None, gather_fn=gather, refusals_fn=N
     each refused one with its reasons. True: each closeable session is closed by `apply_item`
     (facts gathered AGAIN, both checks re-run, only then its screen quit). Every close and refusal
     goes to close.log with the line that reopens it (`claude -r <name>`), so a wrong close costs one
-    command. Each item carries `last_ts` (its last turn's end) so a caller can close oldest first."""
+    command. Each item carries `last_ts` (its last turn's end) so a caller can close oldest first.
+
+    The budget (CLOSEBUDGET-1). `budget_s` counts from the first session JUDGED, not from the
+    listing; `cap_s` (the Stop entry) bounds the whole pass from its start. Every row is tested
+    for a live process (`alive_fn`, as shipped `same_process`) BEFORE any fact is gathered:
+    gathering the facts of ~180 ended ledger rows (a 2 s screen read each) spent the whole budget
+    before the first live session (measured 2026-10-02: 8,160 "deferred" lines, `judged: 0`). A
+    caller that injects its own `gather_fn` decides `alive` there, unless it gives `alive_fn` too.
+    `resume`: the pass runs oldest
+    launch first, begins after the session the last budget-cut pass stopped at (`pass_order`, the
+    file `cursor`), and records where it stops, so every session is judged within a few passes. `until_found`: the
+    budget does not end the pass before that many closable sessions are found (up to
+    `BUDGET_STRETCH` budgets; never past `cap_s`). What the budget leaves unjudged is ONE log line
+    with a count. `stats`, when given, receives {live, judged, deferred, found}."""
+    t_pass = timer()
     clock = (lambda: now) if now is not None else time.time
     now = clock()
     mux = multiplexer()
@@ -1867,26 +2484,57 @@ def sweep(apply: bool, now: float | None = None, gather_fn=gather, refusals_fn=N
     refusals_fn = refusals_fn or live_refusals
     by = by or closer()
     items = []
-    started = time.time()
     cands = current_launches() if rows is None else rows
     if rows is None:
         cands = cands + outside_sessions(cands)
-    for r in cands:
-        if time.time() - started > budget_s:
-            close_log(f"deferred\t{r['name']}\tpass budget {budget_s:.0f}s spent")
-            continue
+    if alive_fn is None and gather_fn is None:
+        alive_fn = same_process
+    gather_fn = gather_fn or gather
+    if alive_fn is not None:
+        # an ended row is nothing to close or report: drop it on the one cheap read, before `gather`.
+        # Inside the cap: with a slow `ps` the rows not yet read stay in and are left for later.
+        kept = []
+        for n, r in enumerate(cands):
+            if cap_s is not None and timer() - t_pass > cap_s:
+                kept.extend(cands[n:])
+                break
+            if (bool(me) and r.get("pid") == me) or alive_fn(r.get("pid"), r.get("pid_start")):
+                kept.append(r)
+        cands = kept
+    if resume:
+        cands = pass_order(cands, read_cursor(cursor))
+    started = timer()
+    judged = found = 0
+    last = None
+    for n, r in enumerate(cands):
+        t = timer()
+        spent = t - started > budget_s and (found >= until_found
+                                            or t - started > budget_s * BUDGET_STRETCH)
+        if spent or (cap_s is not None and t - t_pass > cap_s):
+            left = len(cands) - n
+            close_log(f"deferred\t{left} session(s)\tpass budget {budget_s:.0f}s spent after "
+                      f"{judged} judged" + (f"; the next pass resumes after {last['name']}"
+                                            if resume and last else ""))    # none judged: as before
+            break
+        last = r
+        judged += 1
         f = gather_fn(r, mux, me)
         if not f.get("alive") and not f.get("is_self"):
             continue                                          # gone: nothing to close or report
         keep = classify(f, now, idle)
         refused, _anchor = ([], None) if keep else refusals_fn(r)
         end = f.get("end") or {}
+        observe_prompt(r, screen_prompt(f), time.time(),
+                       attach_line(r.get("mux") or mux, r.get("mux_session") or r["name"]),
+                       since=None if f.get("scanned") else r.get("launched_at"))
         item = {"name": r["name"], "pid": r.get("pid"), "keep": keep, "refused": refused,
                 "closed": False, "outside": bool(r.get("outside")), "resume": resume_line(r),
                 "admission": REGISTRY_ADMITTED if r.get("outside") else "ledger",
                 "attach": attach_line(r.get("mux") or mux, r.get("mux_session") or r["name"]),
                 "last_ts": end.get("ts"), "notes": [] if keep else notes(f, now, idle),
                 "uncommitted": uncommitted_note(f), "row": r}
+        if not keep and not refused:
+            found += 1
         if not keep and not refused and apply:
             apply_item(item, mux=mux, me=me, clock=clock, gather_fn=gather_fn,
                        refusals_fn=refusals_fn, by=by)
@@ -1898,6 +2546,10 @@ def sweep(apply: bool, now: float | None = None, gather_fn=gather, refusals_fn=N
             close_log(f"proposed\t{r['name']}\tpid {r['pid']}\t(dry run or session_close_apply off)"
                       f"\treopen: {item['resume']}")
         items.append(item)
+    if resume and judged:                    # a pass that judged nobody keeps the place it had
+        write_cursor(last if judged < len(cands) else None, cursor)
+    if stats is not None:
+        stats.update(live=len(cands), judged=judged, deferred=len(cands) - judged, found=found)
     return items
 
 
@@ -1927,7 +2579,9 @@ def apply_item(item: dict, mux: str | None = None, me: int | None = None, clock=
     if how:
         item["closed"] = True
         item["resume"] = reopen
-        why = "; ".join(notes(f, clock(), idle)[:1]) or f"finished and idle ≥{idle:g} min"
+        ns = notes(f, clock(), idle)
+        why = ("; ".join(ns[:1] + [n for n in ns[1:] if n.startswith(STALE_NOTE)])
+               or f"finished and idle ≥{idle:g} min")
         close_log(f"closed\t{r['name']}\tpid {r['pid']}\t{how}\treopen: {reopen}")
         safe_close_log("closed", r, f"{why}; {how}; reopen: {reopen}", by)
         return True
@@ -2019,18 +2673,40 @@ def figures(m: dict) -> str:
     return f"swap {sw}, memory level {lv}"
 
 
+def launch_guard() -> str | None:
+    """Why `sessions.py launch` would refuse a launch for memory right now, or None."""
+    return launch_memory(launch_readings(), launch_level_floor(), launch_swap_free_floor_mb())[0]
+
+
+GUARD_OVER = "the launch guard refuses"
+
+
 def close_when_needed(apply: bool, by: str, readings_fn=None, sweep_fn=None,
                       apply_fn=None, settle_s: float = 2.0, all_finished: bool = False,
-                      rows: list[dict] | None = None) -> dict:
+                      rows: list[dict] | None = None, guard_fn=None) -> dict:
     """Close the oldest finished sessions first, only while the machine is over its memory line
     (`all_finished`: every finished session, whatever the line). Returns {before, after, over,
-    closed: [item], candidates: [item], stopped}. A machine under the line costs the two readings
+    closed: [item], candidates: [item], stopped}. A machine under the line costs the readings
     and nothing else: no sweep runs. Ledger rows, and (CLOSETUNE-2) the hand-started sessions the
-    registry admits (`registry_refusals`): every other session is refused by `close_refusals`."""
+    registry admits (`registry_refusals`): every other session is refused by `close_refusals`.
+
+    SESSCLOSE-3 — one signal. The machine is ALSO over the line whenever the launch guard would
+    refuse a launch (`guard_fn`, as shipped `launch_guard`): measured 2026-10-03, the guard
+    refused at pressure level 2 / memory level 40 while this pass, which read only swap and the
+    level, printed "under the line". Both are read again before every close. A caller that
+    injects its own `readings_fn` and no `guard_fn` gets no guard reading (a test's figures are
+    its own; the machine's are not)."""
+    if guard_fn is None:
+        guard_fn = launch_guard if readings_fn is None else (lambda: None)
     readings_fn = readings_fn or memory_readings
     target, floor = swap_used_limit_mb(), memory_floor()
+
+    def over(m: dict) -> list[str] | None:
+        w, g = over_line(m, target, floor), guard_fn()
+        return (w or []) + [f"{GUARD_OVER}: {g}"] if g else w
+
     before = readings_fn()
-    why = over_line(before, target, floor)
+    why = over(before)
     res = {"before": before, "after": before, "over": why, "closed": [], "candidates": [],
            "stopped": "", "target": target, "floor": floor}
     if not all_finished:
@@ -2044,8 +2720,14 @@ def close_when_needed(apply: bool, by: str, readings_fn=None, sweep_fn=None,
         rows = current_launches()
         rows = rows + outside_sessions(rows)
     live = [r for r in rows if same_process(r.get("pid"), r.get("pid_start"))]
+    stats: dict = {}
+    # Over the line the pass does not stop on its budget before it has found ONE session to close
+    # (CLOSEBUDGET-1); a pass cut short resumes after the last session judged.
     items = (sweep_fn or sweep)(apply=False, rows=live, by=by, log_proposals=False,
-                                budget_s=240.0)
+                                budget_s=NEEDED_BUDGET_S, resume=True, stats=stats,
+                                cursor=NEEDED_CURSOR,
+                                until_found=0 if all_finished else 1)
+    res["stats"] = stats
     cands = sorted((i for i in items if not i["keep"] and not i["refused"]),
                    key=lambda i: (i.get("last_ts") is None, i.get("last_ts") or 0))
     res["candidates"] = cands
@@ -2057,7 +2739,7 @@ def close_when_needed(apply: bool, by: str, readings_fn=None, sweep_fn=None,
     for i in cands:
         if not all_finished:
             now_m = readings_fn()            # fresh before EVERY close: the sweep can take minutes
-            w = over_line(now_m, target, floor)
+            w = over(now_m)
             if not w:
                 res["stopped"] = "back under the line" if w == [] else "the figures became unreadable"
                 break
@@ -2075,7 +2757,16 @@ def close_when_needed(apply: bool, by: str, readings_fn=None, sweep_fn=None,
         res["stopped"] = res["stopped"] or ("no finished session left to close" if cands else
                                             "no finished session to close")
     res["after"] = readings_fn() if res["closed"] else (now_m if cands and not all_finished else before)
+    if why:                                  # over the line: one line per pass, whatever it did
+        close_log(pass_line("when needed", stats, len(items), len(res["closed"]))
+                  + f"\t{figures(before)} -> {figures(res['after'])}\t{res['stopped']}")
     return res
+
+
+def pass_line(what: str, stats: dict, judged: int, closed: int) -> str:
+    """`pass` line of session-close.log: how many live sessions, judged, closed, left for later."""
+    return (f"pass\t{what}\tlive {stats.get('live', judged)}, judged {stats.get('judged', judged)}, "
+            f"closed {closed}, deferred {stats.get('deferred', 0)}")
 
 
 def mux_quit_exact(mux: str | None, name: str, anchor: int | None) -> None:
@@ -2135,6 +2826,107 @@ def record_proposals(items: list[dict]) -> None:
         pass
 
 
+def claude_config_path() -> Path:
+    """The CLI's own settings file (`~/.claude.json`; under `CLAUDE_CONFIG_DIR` when that is set)."""
+    d = os.environ.get("CLAUDE_CONFIG_DIR")
+    return (Path(os.path.expanduser(d)) if d else Path.home()) / ".claude.json"
+
+
+def folder_trust(cwd: str | None, path: Path | None = None) -> bool | None:
+    """Whether the CLI will start in `cwd` without its "do you trust this folder" dialog
+    (SESSCLOSE-3: a session launched detached into an untrusted folder sat at that dialog for good).
+    Read from `projects[<path>].hasTrustDialogAccepted` in the CLI's settings file. True: the
+    folder or a folder above it is accepted (the CLI lets a parent vouch — measured 2026-10-06:
+    one of ~80 worktrees under an accepted repo has an entry of its own). False: the folder has
+    an entry that says not accepted, and nothing above it is accepted. None: it cannot be told —
+    the file or its `projects` could not be read, or the folder has no entry at all."""
+    try:
+        doc = json.loads((path or claude_config_path()).read_text(encoding="utf-8"))
+        projects = doc.get("projects") if isinstance(doc, dict) else None
+    except (OSError, ValueError):
+        return None
+    here = _real(cwd) if cwd else None
+    if not isinstance(projects, dict) or not here:
+        return None
+    by_real = {}
+    for k, v in projects.items():
+        if isinstance(k, str) and isinstance(v, dict):
+            real = _real(k) or k
+            if real == k or real not in by_real:         # an alias only fills a gap
+                by_real[real] = v.get("hasTrustDialogAccepted")
+    d = here
+    while True:
+        if by_real.get(d) is True:
+            return True
+        up = os.path.dirname(d)
+        if up == d:
+            break
+        d = up
+    return False if by_real.get(here) is False else None
+
+
+PROMPT_SEEN = "prompt-seen.json"
+
+
+def read_prompt_seen() -> dict:
+    """{`name|pid`: {since, name, pid, pid_start, attach}} — every session a pass or `ls` last
+    saw with a prompt on its screen, and since when. {} when unread."""
+    try:
+        doc = json.loads((config.state() / PROMPT_SEEN).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return {k: v for k, v in doc.items() if isinstance(v, dict)} if isinstance(doc, dict) else {}
+
+
+def observe_prompt(r: dict, prompt: bool | None, now: float, attach: str = "",
+                   since: float | None = None, alive_fn=None) -> float | None:
+    """Record what one read of a session's screen showed, and return since when it has shown a
+    prompt (None: no prompt). `prompt` True: its entry is kept, or begun at `since` (default
+    `now`; a session with no transcript counts from its launch). False: its entry is dropped.
+    None (the screen could not be read): nothing changes. Entries whose process is gone are
+    dropped on every write. One small file under one lock; a failed write loses only the age."""
+    key = f"{r.get('name')}|{r.get('pid')}"
+    if prompt is None:
+        return (read_prompt_seen().get(key) or {}).get("since")
+    if not prompt and key not in read_prompt_seen():
+        return None                                           # the common read: no lock, no write
+    alive_fn = alive_fn or same_process
+    try:
+        config.state().mkdir(parents=True, exist_ok=True)
+        with open(config.state() / "prompt-seen.lock", "w") as lk:
+            common.lock_file(lk)
+            doc = read_prompt_seen()
+            had = dict(doc)
+            if prompt:
+                doc.setdefault(key, {"since": float(since if since else now), "name": r.get("name"),
+                                     "pid": r.get("pid"), "pid_start": r.get("pid_start"),
+                                     "attach": attach})
+            else:
+                doc.pop(key, None)
+            doc = {k: v for k, v in doc.items()
+                   if k == key or alive_fn(v.get("pid"), v.get("pid_start"))}
+            if doc != had:
+                tmp = config.state() / (PROMPT_SEEN + ".tmp")
+                tmp.write_text(json.dumps(doc, indent=1) + "\n", encoding="utf-8")
+                os.replace(tmp, config.state() / PROMPT_SEEN)
+            return (doc.get(key) or {}).get("since") if prompt else None
+    except OSError:
+        return now if prompt else None
+
+
+def prompt_words(since: float | None, now: float, flag_min: float | None = None) -> str:
+    """`PROMPT 23 min — FLAGGED` past `session_prompt_flag_minutes`, else `PROMPT 2 min`."""
+    flag_min = prompt_flag_minutes() if flag_min is None else flag_min
+    mins = max(0.0, (now - since) / 60) if isinstance(since, (int, float)) and since else 0.0
+    return f"PROMPT {mins:.0f} min" + (" — FLAGGED" if flag_min > 0 and mins >= flag_min else "")
+
+
+def screen_prompt(f: dict) -> bool | None:
+    """True / False: a prompt is / is not on the screen `gather` read; None: no screen was read."""
+    screen = f.get("screen")
+    return None if screen is None else bool(PROMPT_TEXT.search(screen))
+
+
 def attach_line(mux: str | None, name: str) -> str:
     if mux == "tmux":
         return f"tmux attach -t {name}"
@@ -2143,8 +2935,9 @@ def attach_line(mux: str | None, name: str) -> str:
     return "(no multiplexer)"
 
 
-def due(now: float | None = None) -> bool:
-    """Machine-wide rate limit for the Stop chore: True at most once per `session_close_every_s`."""
+def due(now: float | None = None, consume: bool = True) -> bool:
+    """Machine-wide rate limit for the Stop chore: True at most once per `session_close_every_s`.
+    `consume=False` only asks (a dry run must not use up the next real pass's turn)."""
     now = time.time() if now is None else now
     every = int(limits.get("session_close_every_s", 300) or 300)
     st = config.state() / "session-close.last"
@@ -2158,7 +2951,8 @@ def due(now: float | None = None) -> bool:
                 last = 0.0
             if now - last < every:
                 return False
-            st.write_text(str(now))
+            if consume:
+                st.write_text(str(now))
             return True
     except OSError:
         return False

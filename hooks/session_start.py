@@ -414,6 +414,14 @@ def main() -> None:
     except Exception:
         import traceback as _tb
         log("hook-errors", "session_start/wtsweep: " + _tb.format_exc().replace("\n", " | "))
+    try:                                             # MACFIX-1: the temp sweep, while it only proposes
+        import tmpsweep as _tmpsweep
+        _ts = _tmpsweep.facts_line()
+        if _ts:
+            _wt = (_wt + "\n" + _ts) if _wt else _ts
+    except Exception:
+        import traceback as _tb
+        log("hook-errors", "session_start/tmpsweep: " + _tb.format_exc().replace("\n", " | "))
     # STALLBRIEF-1 — the managed sessions that stopped moving, with the worktree line folded in
     # beneath them. Absent when `session_name_pattern` is unset or no managed session is live;
     # the worktree line then prints on its own, exactly as before.

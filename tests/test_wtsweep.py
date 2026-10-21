@@ -17,6 +17,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -1003,3 +1004,184 @@ def test_a_FAILING_rev_list_never_reads_as_merged(clones, monkeypatch):
         return real(args, **k)
     monkeypatch.setattr(ws, "_git", broken)
     assert ws.sweep(repo, apply=True)["kept"] == [(str(clone.resolve()), ws.KEPT_CLONE_GIT)]
+
+
+# ---------------------------------------------------------------------------------------------
+# CLONESWEEP-2 (q:CU-2026-10-02-CLONESWEEP-2): findings F1-F6 of the second fix-only review.
+# Each test proposes the clone FIRST (the control), then does the one thing the finding names.
+
+def test_F1_a_commit_made_in_a_linked_worktree_that_was_then_removed_keeps_the_clone(clones):
+    """The commit is in no ref and no reflog of the clone: only `git fsck` still names it.
+    Control: the SOURCE's own dangling commit, copied into the clone at birth, keeps nothing."""
+    repo, ws = clones["repo"], clones["wtsweep"]
+
+    def dangle(r, where):
+        lw = clones["tmp"] / where
+        git("worktree", "add", "-q", "--detach", str(lw), cwd=r)
+        (lw / "g.txt").write_text(f"made in {where}\n", encoding="utf-8")
+        git("add", "--", "g.txt", cwd=lw)
+        git("commit", "-q", "-m", "in a linked worktree", "--", "g.txt", cwd=lw)
+        sha = git("rev-parse", "HEAD", cwd=lw)
+        git("worktree", "remove", "--force", str(lw), cwd=r)
+        git("worktree", "prune", cwd=r)
+        assert sha in git("fsck", "--connectivity-only", "--dangling", "--no-progress", cwd=r)
+        return sha
+    dangle(repo, "src-lw")
+    clone, _ = make_clone(clones)
+    assert ws.sweep(repo, apply=False)["proposed"] == [str(clone.resolve())]
+    dangle(clone, "clone-lw")
+    os.utime(clone / ".gedaechtnis-clone-of")           # no clock may hide it either
+    assert ws.sweep(repo, apply=True)["kept"] == [(str(clone.resolve()), ws.KEPT_UNMERGED)]
+    assert clone.exists()
+
+
+def test_F1_a_failing_fsck_never_reads_as_held(clones, monkeypatch):
+    repo, ws = clones["repo"], clones["wtsweep"]
+    clone, _ = make_clone(clones)
+    real = ws._git
+
+    def broken(args, **k):
+        if args[:1] == ["fsck"]:
+            return subprocess.CompletedProcess(args, 1, "", "error: bad object")
+        return real(args, **k)
+    monkeypatch.setattr(ws, "_git", broken)
+    assert ws.sweep(repo, apply=True)["kept"] == [(str(clone.resolve()), ws.KEPT_CLONE_GIT)]
+
+
+def test_F2_a_linked_worktree_outside_the_clone_keeps_it_even_after_the_marker_was_touched(clones):
+    """Only uncommitted files in it, then the marker touched: `born` is now later than the entry,
+    so the clock says "inherited". The entry's checkout points back into THIS clone's .git.
+    Control: the source's own linked worktree, inherited by the clone, keeps nothing."""
+    repo, ws = clones["repo"], clones["wtsweep"]
+    git("worktree", "add", "-q", "-b", "src-wt", str(clones["tmp"] / "src-linked"), "main", cwd=repo)
+    clone, _ = make_clone(clones)
+    assert ws.sweep(repo, apply=False)["proposed"] == [str(clone.resolve())]   # inherited: no keep
+    lw = clones["tmp"] / "elsewhere" / "clone-linked"
+    lw.parent.mkdir()
+    git("worktree", "add", "-q", "--detach", str(lw), cwd=clone)
+    (lw / "notes.txt").write_text("uncommitted, outside the clone\n", encoding="utf-8")
+    time.sleep(1.1)
+    os.utime(clone / ".gedaechtnis-clone-of")
+    born = (clone / ".gedaechtnis-clone-of").stat().st_mtime
+    entry = clone / ".git" / "worktrees" / "clone-linked"
+    assert max(entry.lstat().st_mtime, entry.lstat().st_ctime) < born       # the clock is blind now
+    assert (str(clone.resolve()), ws.KEPT_CLONE_LINKED) in ws.sweep(repo, apply=True)["kept"]
+    assert clone.exists()
+    # ... and once that checkout is gone, there is no file left in it to keep the clone for
+    git("worktree", "remove", "--force", str(lw), cwd=clone)
+    assert ws.clone_worktree_added(clone, born) is False
+
+
+def test_F3_a_dropped_commit_with_an_OLD_committer_date_still_keeps_the_clone(clones):
+    """A reflog entry's time is the committer's date. Control: the same act with today's date
+    was already kept (N2); here the date is 2001 and the marker is not touched."""
+    repo, ws = clones["repo"], clones["wtsweep"]
+    clone, _ = make_clone(clones)
+    assert ws.sweep(repo, apply=False)["proposed"] == [str(clone.resolve())]
+    (clone / "g.txt").write_text("dropped\n", encoding="utf-8")
+    git("add", "--", "g.txt", cwd=clone)
+    env = dict(os.environ, GIT_COMMITTER_DATE="2001-01-01T00:00:00", GIT_AUTHOR_DATE="2001-01-01T00:00:00")
+    p = subprocess.run(["git", "commit", "-q", "-m", "old date", "--", "g.txt"], cwd=clone, env=env,
+                       capture_output=True, text=True)
+    assert p.returncode == 0, p.stderr
+    p = subprocess.run(["git", "reset", "-q", "--hard", "HEAD~1"], cwd=clone, env=env, capture_output=True)
+    assert p.returncode == 0
+    assert ws.sweep(repo, apply=True)["kept"] == [(str(clone.resolve()), ws.KEPT_UNMERGED)]
+
+
+def test_F4_a_born_dirty_path_that_became_a_FIFO_or_a_symlink_is_work_and_is_never_opened(clones):
+    """A TRACKED file edited before birth (git lists it whatever it has become; an untracked FIFO
+    is in no status at all). Control: untouched after birth, the clone is proposed."""
+    repo, ws = clones["repo"], clones["wtsweep"]
+    (repo / "f.txt").write_text("edited before the clone was born\n", encoding="utf-8")
+    clone, born = make_clone(clones)
+    assert ws.sweep(repo, apply=False)["proposed"] == [str(clone.resolve())]      # control
+    (clone / "elsewhere.txt").write_text("edited before the clone was born\n", encoding="utf-8")
+    (clone / "f.txt").unlink()
+    (clone / "f.txt").symlink_to("elsewhere.txt")                                 # the SAME content
+    assert "f.txt" in ws.clone_dirt(clone, born)
+    (clone / "f.txt").unlink()
+    (clone / "elsewhere.txt").unlink()
+    os.mkfifo(clone / "f.txt")
+    done = []
+    t = threading.Thread(target=lambda: done.append(ws.clone_dirt(clone, born)), daemon=True)
+    t.start()
+    t.join(10)
+    assert not t.is_alive(), "clone_dirt blocked on the FIFO"
+    assert done == [["f.txt"]]
+    assert ws.sweep(repo, apply=False)["kept"] == [(str(clone.resolve()), ws.KEPT_DIRTY)]
+
+
+def test_F4_a_symlink_the_clone_was_BORN_with_is_not_work_until_it_points_elsewhere(clones):
+    repo, ws = clones["repo"], clones["wtsweep"]
+    (repo / "link.txt").symlink_to("f.txt")
+    clone, born = make_clone(clones)
+    assert json.loads((clone / ".gedaechtnis-clone-manifest.json").read_text())["link.txt"] == "link:f.txt"
+    assert ws.clone_dirt(clone, born) == []
+    (clone / "link.txt").unlink()
+    (clone / "link.txt").symlink_to("other.txt")
+    assert ws.clone_dirt(clone, born) == ["link.txt"]
+
+
+def test_F4_a_born_symlink_replaced_by_a_regular_file_is_work_whatever_the_clock_says(clones):
+    """Review of SMALLFIX-B: the manifest holds `link:<target>` for it, no hash, so the path fell
+    to the clock, and a `born` later than the write (a touched marker) read it as no work."""
+    repo, ws = clones["repo"], clones["wtsweep"]
+    (repo / "link.txt").symlink_to("f.txt")
+    clone, born = make_clone(clones)
+    assert ws.clone_dirt(clone, born) == []                                       # control
+    (clone / "link.txt").unlink()
+    (clone / "link.txt").write_text("the clone's own text\n", encoding="utf-8")
+    later = time.time() + 3600                    # as if the marker had been touched after the write
+    assert ws.clone_dirt(clone, later) == ["link.txt"]
+    assert ws.clone_dirt(clone, born) == ["link.txt"]
+
+
+def test_a_tracked_file_ABSENT_at_birth_and_written_since_is_work_whatever_the_clock_says(clones):
+    """Fix-review N3: the manifest says "gone" for it, so it fell to the clock as well. A path that
+    was absent at birth and is a file in the status now can only be the clone's act."""
+    repo, ws = clones["repo"], clones["wtsweep"]
+    (repo / "f.txt").unlink()                     # tracked, deleted before the clone was born
+    clone, born = make_clone(clones)
+    assert json.loads((clone / ".gedaechtnis-clone-manifest.json").read_text())["f.txt"] == "gone"
+    assert ws.clone_dirt(clone, born) == []                                       # control
+    (clone / "f.txt").write_text("the clone's own text, not what git has\n", encoding="utf-8")
+    assert ws.clone_dirt(clone, time.time() + 3600) == ["f.txt"]
+    assert ws.sweep(repo, apply=False)["kept"] == [(str(clone.resolve()), ws.KEPT_DIRTY)]
+
+
+def test_F5_chmod_alone_on_a_born_dirty_file_is_work_and_an_old_manifest_still_reads(clones):
+    repo, ws = clones["repo"], clones["wtsweep"]
+    clone, born = make_clone(clones, dirt_at_birth="scratch.txt")
+    assert ws.clone_dirt(clone, born) == []                                       # control
+    os.chmod(clone / "scratch.txt", 0o755)
+    assert ws.clone_dirt(clone, born) == ["scratch.txt"]
+    assert ws.sweep(repo, apply=False)["kept"] == [(str(clone.resolve()), ws.KEPT_DIRTY)]
+    # a manifest written before this row has no modes: the content alone decides, nothing raises
+    man = clone / ".gedaechtnis-clone-manifest.json"
+    doc = json.loads(man.read_text())
+    doc.pop(ws.common.CLONE_MODES_KEY)
+    man.write_text(json.dumps(doc))
+    assert ws.clone_dirt(clone, born) == []
+
+
+def test_F6_a_file_is_hashed_in_pieces_and_the_result_is_the_plain_sha256(clones, tmp_path, monkeypatch):
+    import hashlib, builtins
+    common = clones["wtsweep"].common
+    big = tmp_path / "big.bin"
+    big.write_bytes(b"ab" * (3 << 19) + b"tail")                                  # 3 MB + 4 bytes
+    sizes, real_open = [], builtins.open
+
+    def spy(path, mode="r", *a, **k):
+        fh = real_open(path, mode, *a, **k)
+        if str(path) == str(big):
+            real_read = fh.read
+            class Wrapped:                                                         # noqa: E306
+                def read(self, n=-1): sizes.append(n); return real_read(n)
+                def __enter__(self): return self
+                def __exit__(self, *e): fh.close()
+            return Wrapped()
+        return fh
+    monkeypatch.setattr(builtins, "open", spy)
+    assert common.sha256_file(big) == hashlib.sha256(big.read_bytes()).hexdigest()
+    assert len(sizes) >= 4 and set(sizes) == {1 << 20}                             # never a whole read

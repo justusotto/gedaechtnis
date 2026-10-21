@@ -134,6 +134,8 @@ DEFAULTS = {
     "row_identity_deny_from": "",
     "marker_roster_door": False,
     "artifact_open_door": False,
+    # VAULTSYNC-3: one write-home machine per lane and shared path (hooks/homes.py).
+    "write_homes_door": False,
     # KILLDOOR-1: a kill whose target the shell computes (hooks/killdoor.py).
     "kill_door": True,
     "kill_deny_from": "",
@@ -153,9 +155,40 @@ DEFAULTS = {
     "session_close_swap_used_mb": 4096,
     "session_close_memory_floor": 30,
     "session_close_exempt": [],
+    # SESSCLOSE-3: the quiet after a report, the stale wait loop, the launch's wait on the closer,
+    # and the age at which a prompt on a screen is flagged.
+    "session_close_report_minutes": 30,
+    "session_close_stale_shell_minutes": 60,
+    "session_close_abandoned_minutes": 1440,
+    "session_close_child_still_minutes": 1440,
+    "session_close_browser_idle_cpu_seconds": 120,
+    "session_launch_wait_s": 30,
+    "session_prompt_flag_minutes": 5,
     "session_close_never": ["* host", "*-host", "rc-host*"],
     "session_cap_per_seat": 0,
     "session_launch_door": "warn",
+    # CONTINUITY-1: auto-continue after a usage reset (hooks/autocontinue.py) and the hand-off
+    # line's early warning (context_cap.py, level `line`).
+    "usage_continue": False,
+    "usage_continue_every_s": 300,
+    "context_handoff_line_tokens": 0,
+    "context_handoff_warn_share": 0.8,
+    # MACFIX-1: the session temp folder and the processes dead sessions left (hooks/tmpsweep.py),
+    # and two Bash doors (hooks/macdoors.py, NOT BUILT YET: their keys do nothing). All four are on under `"profile": "atlas"`.
+    "tmp_sweep": True,
+    "tmp_sweep_apply": False,
+    "tmp_sweep_root": "",
+    "tmp_sweep_strip_days": 2,
+    "tmp_sweep_days": 7,
+    "tmp_sweep_big_file_mb": 100,
+    "tmp_sweep_every_s": 21600,
+    "tmp_sweep_max_per_pass": 60,
+    "leftover_procs": True,
+    "leftover_procs_apply": False,
+    "leftover_procs_min_age_s": 86400,
+    "chrome_clone_door": False,
+    "chrome_launcher_hint": "",
+    "deploy_door": False,
 }
 
 # ★ ONE tuple, not three globals. `_CACHE`, `_PROBLEMS` and `_OVERRIDDEN` were kept in step only
@@ -169,9 +202,16 @@ _STATE: tuple | None = None
 # PUBLICDOORS-1: a profile is a named set of limit values, applied over the shipped file and under
 # the vault's own `limits` object, so one key set by hand still wins either way. `public` is the
 # default and changes nothing. `atlas` turns on the four doors written for a vault with work
-# queues, review pages and a lane roster.
+# queues, review pages and a lane roster, and auto-continue after a usage reset (CONTINUITY-1).
 PROFILE_DOORS = ("artifact_open_door", "judge_md_door", "row_identity_door", "marker_roster_door")
-PROFILES = {"public": {}, "atlas": {k: True for k in PROFILE_DOORS}}
+# CONTINUITY-1: auto-continue after a usage reset types into sessions, so a public install opts in.
+# MACFIX-1 (owner-ruling-smooth-no-hard-limits-temp-sweep-80-percent-usage-in-menubar-2026-10-06): the
+# temp sweep and the leftover-process chore ACT, and the Chrome-copy and deploy doors are on.
+PROFILE_MAC = {"tmp_sweep_apply": True, "leftover_procs_apply": True, "chrome_clone_door": True,
+               "deploy_door": True, "chrome_launcher_hint": "scripts/chrome_launch.py"}
+# VAULTSYNC-3: the write-homes door is on for this profile and still inert until `topology.homes_file` names a file.
+PROFILE_HOMES = {"write_homes_door": True}
+PROFILES = {"public": {}, "atlas": {**{k: True for k in PROFILE_DOORS}, "usage_continue": True, **PROFILE_MAC, **PROFILE_HOMES}}
 
 
 def _profile() -> tuple[str, list]:

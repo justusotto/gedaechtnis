@@ -26,6 +26,12 @@ TWO LEVELS, and why they are measured differently — they answer different ques
           The ceiling is a property of the harness, not of how much of it your boot spent. At this
           point the only safe act left is the handoff itself.
 
+  LINE  = `context_handoff_warn_share` (0.8) × the session's own hand-off line (CONTINUITY-1).
+          The line is the session's: `GEDAECHTNIS_HANDOFF_LINE` from its launcher, else "hand off at
+          280k" in its opening prompt, else the vault's `context_handoff_line_tokens` (0 = none).
+          Sessions overshot their line by 50-100k and the review was what got cut. "Run your review
+          and gates now; finish if ≤2 steps remain, else write the handoff."
+
   REACH = `resume_window` − `resume_min_headroom` − `context_reach_margin_tokens` (TERMOVERLOAD-1).
           Not a statement about work done but about REACHABILITY: at `resume_window` −
           `resume_min_headroom` (350,000 shipped) the resume gate refuses every message sent to
@@ -75,7 +81,7 @@ so it may never read the whole file. The current figure comes from a bounded TAI
 Both degrade to "no notice" rather than to a slow hook.
 """
 from __future__ import annotations
-import json, os
+import json, math, os, re
 from pathlib import Path
 
 import common
@@ -355,6 +361,55 @@ def reach_bound() -> int | None:
     return bound if bound > 0 else None
 
 
+LINE_ENV = "GEDAECHTNIS_HANDOFF_LINE"
+# "hand off at 280k", "hand-off at 280k", "handoff at 280,000 tokens": the phrase chain briefs use.
+# A unit is required ("k" or "tokens"): "hand off at 15,000 lines" is not a context line. A phrase
+# negated just before it ("do not hand off at 200k") is skipped.
+LINE_PHRASE = re.compile(r"\bhand[\s-]?off\s+at\s+(\d{1,3}(?:,\d{3})+|\d+)\s*(k\b|tokens\b)", re.I)
+LINE_NEGATED = re.compile(r"\b(?:not|never|don't|do not|no)\W+(?:\w+\W+){0,2}$", re.I)
+LINE_FLOOR = 50000
+
+
+def _tokens(text) -> int | None:
+    """280000 / "280k" / "280,000" → 280000; anything else → None."""
+    m = re.fullmatch(r"\s*(\d[\d,]*)\s*(k)?\s*", str(text or ""), re.I)
+    if not m:
+        return None
+    n = int(m.group(1).replace(",", "")) * (1000 if m.group(2) else 1)
+    return n if n > 0 else None
+
+
+def _line_from_opener(transcript: Path) -> int | None:
+    import resume_gate                                     # noqa: PLC0415 — owns the opener reader
+    text = resume_gate.opener_text(transcript)
+    for m in LINE_PHRASE.finditer(text):
+        if LINE_NEGATED.search(text[max(0, m.start() - 30):m.start()]):
+            continue
+        n = int(m.group(1).replace(",", "")) * (1000 if m.group(2).lower() == "k" else 1)
+        if n >= LINE_FLOOR:
+            return n
+    return None
+
+
+def handoff_line(sid: str, transcript: Path) -> "tuple[int | None, str]":
+    """(the hand-off line, where it came from) — CONTINUITY-1. The session's own line wins: its
+    environment (`GEDAECHTNIS_HANDOFF_LINE`, set by its launcher), else its opening prompt's
+    "hand off at 280k"; else the vault's `context_handoff_line_tokens`; else (None, "")."""
+    env = _tokens(os.environ.get(LINE_ENV))
+    if env:
+        return env, LINE_ENV
+    doc = _load(sid)
+    if "opener_line" in doc:                               # read once; 0 = the opener names none
+        cached = doc.get("opener_line")
+    else:
+        cached = _line_from_opener(transcript) or 0
+        _update(sid, lambda d: d.__setitem__("opener_line", cached))
+    if isinstance(cached, int) and cached > 0:
+        return cached, "your opening prompt"
+    cfg = int(limits.get("context_handoff_line_tokens", 0) or 0)
+    return (cfg, "context_handoff_line_tokens") if cfg > 0 else (None, "")
+
+
 def _short_clause() -> str:
     """What still reaches a WARM session past the cold bound (MSGGATE-1): a short message up to
     `resume_window`, when `resume_short_chars` is on (0 = off); a longer one while it fits."""
@@ -406,6 +461,18 @@ def notice(sid: str, transcript_path: str | None) -> str | None:
                     f"(cap {cap:,}). There is room for a handoff and not much else: write it now, "
                     f"mark what is unfinished, and hand over. Nothing here is blocked."
                     + (UNRECORDED_SUFFIX if unrecorded else ""))
+
+        share = float(limits.get("context_handoff_warn_share", 0.8) or 0)
+        if share > 0 and not fired & {"line", "cap"}:
+            line, source = handoff_line(sid, transcript)
+            if line and current >= math.ceil(line * share):
+                unrecorded = not _record_fired(sid, "line")
+                log("context_cap", f"line\t{sid}\t{current}\tline={line}\tsource={source}")
+                return (f"CONTEXT — {round(share * 100)} % OF YOUR HAND-OFF LINE: {current:,} of "
+                        f"{line:,} tokens (from {source}). Run your review and gates now, before "
+                        f"building more. If two steps or fewer remain, finish them; otherwise "
+                        f"write the handoff. Nothing here is blocked."
+                        + (UNRECORDED_SUFFIX if unrecorded else ""))
 
         bound = reach_bound()
         if bound and current >= bound and not fired & {"reach", "warn", "cap"}:

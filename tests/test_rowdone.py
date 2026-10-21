@@ -88,6 +88,27 @@ def head_files(w):
     return git(w["vault"], "show", "--name-only", "--format=", "HEAD").splitlines()
 
 
+# ---- write homes (VAULTSYNC-3): the flip is a vault write, so it has a home machine too -----------
+
+def test_a_row_is_not_flipped_from_a_machine_that_is_not_the_queue_files_home(w, tmp_path, monkeypatch, request):
+    import json
+    (w["vault"] / "homes.txt").write_text("machine: macbook id=AAAA\nmachine: mini id=BBBB\ndefault: macbook\n")
+    git(w["vault"], "add", "homes.txt"); git(w["vault"], "commit", "-q", "-m", "homes")
+    (tmp_path / "config.json").write_text(json.dumps(
+        {"limits": {"write_homes_door": True}, "topology": {"homes_file": "homes.txt"}}))
+    monkeypatch.setenv("GEDAECHTNIS_MACHINE_ID", "BBBB")
+    monkeypatch.delenv("GEDAECHTNIS_LIMITS", raising=False); monkeypatch.delenv("GEDAECHTNIS_PROFILE", raising=False)
+    rowdone.homes.limits._reset_for_tests()      # limits caches per process: read THIS test's config
+    request.addfinalizer(rowdone.homes.limits._reset_for_tests)
+    before = own(w)
+    code, line = run(w, [("ME-1", w["merged"])])[0]
+    assert code == rowdone.FOREIGN and "WRITE HOMES" in line and "this machine is mini" in line
+    assert own(w) == before
+    monkeypatch.setenv("GEDAECHTNIS_MACHINE_ID", "AAAA")                      # the control: at home, it flips
+    code, line = run(w, [("ME-1", w["merged"])])[0]
+    assert code == rowdone.OK and own(w) != before
+
+
 # ---- the positive control ----------------------------------------------------------------------
 
 def test_a_merged_row_flips_and_its_done_line_is_the_LAST_sub_line(w):
@@ -525,4 +546,19 @@ def test_negative_an_owed_list_outside_the_packages_roots_is_refused_and_nothing
         m.setattr(rowdone.rootguard, "permit", refuse)
         rowdone.owe("ME-2", w["merged"], "b", w["repo"], "ME", False, None)
         assert rowdone.apply_owed("ME", ME_PATHS) == []
+    assert [e["qid"] for e in owed(w)] == ["ME-1"]
+
+
+def test_F8_owe_says_owed_only_when_the_entry_is_in_the_written_list(w, busy, monkeypatch):
+    """CLONESWEEP-2 F8: with the owed list unwritable, `owe` returned True and the caller printed
+    "owed" with nothing recorded. Control first: a writable list returns True and holds the entry."""
+    args = ("ME-1", w["merged"], "b", w["repo"])
+    assert rowdone.owe(*args, "ME", False, None) is True and [e["qid"] for e in owed(w)] == ["ME-1"]
+    assert rowdone.owe(*args, "ME", False, None) is True                 # already there: still owed
+
+    def refuse(path, why="", scratch=None):
+        raise rowdone.rootguard.OutsideRoot(f"{path} is outside every root")
+    with monkeypatch.context() as m:
+        m.setattr(rowdone.rootguard, "permit", refuse)
+        assert rowdone.owe("ME-2", w["merged"], "b", w["repo"], "ME", False, None) is False
     assert [e["qid"] for e in owed(w)] == ["ME-1"]

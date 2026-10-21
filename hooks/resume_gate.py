@@ -276,8 +276,9 @@ def _override_reason(message) -> str | None:
     return None
 
 
-def decide(inp: dict, now: float | None = None) -> tuple[str, str] | None:
-    """("deny", reason) / ("note", text) / None (say nothing)."""
+def decide(inp: dict, now: float | None = None, park: bool = True) -> tuple[str, str] | None:
+    """("deny", reason) / ("note", text) / None (say nothing). `park=False` (CONTINUITY-1's
+    auto-continue) refuses without parking the message for the target's next prompt."""
     ti = inp.get("tool_input") or {}
     to = ti.get("to") or ""
     sid = inp.get("session_id", "-")
@@ -303,7 +304,7 @@ def decide(inp: dict, now: float | None = None) -> tuple[str, str] | None:
     total, compacted = context_cap.reading(transcript, sub) if transcript else (None, False)
     age = last_record_age(transcript, now) if transcript else None
     if total is not None and age is not None and compacted:
-        return _compacted(inp, to, sid, tsid, target, transcript, age, now)
+        return _compacted(inp, to, sid, tsid, target, transcript, age, now, park)
     if total is None or age is None:
         log("resume_gate", f"unmeasured\tfrom={sid}\tto={to}\ttarget={tsid}")
         return ("note", f"Resume check: could NOT measure `{to}` (no readable transcript for "
@@ -365,7 +366,7 @@ def decide(inp: dict, now: float | None = None) -> tuple[str, str] | None:
     handoffs = [] if sub else common.handoff_paths(tsid)
     log("deny", f"resume{'-subagent' if sub else ''}\tfrom={sid}\tto={to}\ttarget={tsid}\t"
                 f"total={total}\tage={int(age)}\tttl={ttl}\tmodel={model}\tcap={cap}\twindow={window}\theadroom={min_head}\t{cost}")
-    parked = None if sub else _park(str(target.get("name") or to), "; ".join(why), ti.get("message"),
+    parked = None if (sub or not park) else _park(str(target.get("name") or to), "; ".join(why), ti.get("message"),
                                     sid)
     text = (head("PARKED" if parked else "REFUSED") + " "
             f"Not sent: `{to}` is idle, and waking it is refused — " + "; ".join(why) + f". "
@@ -418,7 +419,7 @@ def _warm_rule(message, total: int, window: int) -> tuple[str, str | None]:
 
 
 def _compacted(inp: dict, to: str, sid: str, tsid: str, target: dict, transcript: Path,
-               age: float, now: float) -> tuple[str, str] | None:
+               age: float, now: float, park: bool = True) -> tuple[str, str] | None:
     """The target compacted after its last measured call: its figure is the OLD window's, and
     nothing on disk gives the new one until its next call (CONTEXTMSG-1). The size rules are not
     applied to a figure known to be stale; the Fable-cold rule, which does not depend on size, is."""
@@ -439,7 +440,7 @@ def _compacted(inp: dict, to: str, sid: str, tsid: str, target: dict, transcript
                         f"ttl={ttl}\tmodel={model}")
             why = (f"it runs {FABLE} and is cold, and a cold Fable session is started again only "
                    f"on the owner's word")
-            parked = _park(str(target.get("name") or to), why,
+            parked = None if not park else _park(str(target.get("name") or to), why,
                            (inp.get("tool_input") or {}).get("message"), sid)
             return ("deny", f"Not sent: `{to}` is idle, and waking it is refused — {why}. (It "
                             f"compacted after its last measured call, so its size is not yet "

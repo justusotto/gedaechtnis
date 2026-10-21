@@ -47,7 +47,7 @@ Nothing here is destructive on its own: `git worktree remove` refuses a dirty tr
 module never calls `rm`, never uses `--force`, and never removes the main worktree.
 """
 from __future__ import annotations
-import fnmatch, hashlib, json, os, re, shlex, subprocess, time
+import fnmatch, json, os, re, shlex, stat, subprocess, time
 from pathlib import Path
 
 import common
@@ -74,6 +74,7 @@ KEPT_YOUNG = "a clone younger than worktree_clone_min_age_seconds"
 KEPT_CLONE_GIT = "a clone whose git state could not be read"
 KEPT_CLONE_STASH = "a clone with a stash made after it was cloned"
 KEPT_CLONE_LINKED = "a clone in which a git worktree was added after it was cloned"
+MAX_DANGLING = 4000                      # more dangling commits than fit one command: kept, unjudged
 MAX_CLONE_TIPS = 50                      # more tips than this to judge one by one: kept, not judged
 GENERATED = ["*.pyc", "__pycache__/*", "*/__pycache__/*", ".DS_Store", "*/.DS_Store", "node_modules",
              "*/node_modules", "*.log", "*-log.tsv", ".claude/scheduled_tasks.lock"]
@@ -377,11 +378,14 @@ def clone_dirt(wt: Path, born: float) -> list[str] | None:
 
     A clone is born with the source's uncommitted files (`.gedaechtnis-clone-manifest.json` lists
     them, each with its sha256 at birth). Its own work is a dirty path the manifest does not list,
-    a listed file whose content no longer has that sha256, a directory (a nested repository: its
-    inside is not read), or a path missing now that was there at birth. A listed path with no hash
-    (born "gone" or "unreadable") is judged by time: written or replaced after `born`, reading the
-    modification time AND the inode change time, since a copy that keeps an old modification time
-    (`cp -p`, `rsync -a`, `mv`) still moves the second.
+    a listed file whose content no longer has that sha256 or whose executable bit changed, a
+    directory (a nested repository: its inside is not read), a symlink that was not that same
+    link at birth, anything that is no regular file (a FIFO, a socket: never opened, so a read can
+    not block the Stop hook), or a path missing now that was there at birth. A regular file now
+    that was absent or a symlink at birth is work. A listed regular file born "unreadable" (no
+    hash, and nothing else to compare) is judged by time: written or replaced after
+    `born`, reading the modification time AND the inode change time, since a copy that keeps an
+    old modification time (`cp -p`, `rsync -a`, `mv`) still moves the second.
     Generated files (`worktree_generated`) are never work. Files git ignores are not seen."""
     try:
         base = json.loads((wt / ".gedaechtnis-clone-manifest.json").read_text(encoding="utf-8"))
@@ -390,6 +394,8 @@ def clone_dirt(wt: Path, born: float) -> list[str] | None:
     st = _git(["status", "--porcelain", "-z", "-uall"], cwd=wt, timeout=40)
     if st.returncode != 0 or not isinstance(base, dict):
         return None
+    modes = base.get(common.CLONE_MODES_KEY)
+    modes = modes if isinstance(modes, dict) else {}     # a manifest from before CLONESWEEP-2 has none
     out = []
     for _xy, rel in common.porcelain_z(st.stdout):
         if rel.startswith(".gedaechtnis-clone-") or _generated(rel):
@@ -400,14 +406,22 @@ def clone_dirt(wt: Path, born: float) -> list[str] | None:
         except OSError:
             changed = want != "gone"                     # absent now: the clone's act unless born so
         else:
-            if (wt / rel).is_dir():
+            if stat.S_ISLNK(s.st_mode):                  # the link itself, never what it points at
+                try:
+                    changed = want != "link:" + os.readlink(wt / rel)
+                except OSError:
+                    changed = True
+            elif not stat.S_ISREG(s.st_mode):            # a folder, a FIFO, a socket: never opened
                 changed = True
             elif isinstance(want, str) and len(want) == 64:
                 try:                                     # the content itself: no clock can hide it
-                    changed = hashlib.sha256((wt / rel).read_bytes()).hexdigest() != want
+                    changed = (common.sha256_file(wt / rel) != want
+                               or (rel in modes and bool(s.st_mode & 0o111) != bool(modes[rel])))
                 except OSError:
                     changed = True
-            else:
+            elif want == "gone" or (isinstance(want, str) and want.startswith("link:")):
+                changed = True                           # born absent or a symlink, a regular file now:
+            else:                                        # no clock is asked (a touched marker moves `born`)
                 changed = max(s.st_mtime, s.st_ctime) > born
         if rel not in base or changed:
             out.append(rel)
@@ -415,48 +429,89 @@ def clone_dirt(wt: Path, born: float) -> list[str] | None:
 
 
 def clone_worktree_added(wt: Path, born: float) -> bool:
-    """Whether a git worktree was added IN the clone after its birth. A clone is born with a copy
-    of the source's `.git/worktrees/` entries; those are the source's. An entry made or changed
-    after `born` is the clone's own linked worktree, wherever its checkout lies: its uncommitted
-    files are in no status this sweep reads, so the clone is kept. Unreadable = True (kept)."""
+    """Whether the clone has a linked git worktree of its OWN. A clone is born with a copy of the
+    source's `.git/worktrees/` entries; those are the source's. An entry is the clone's own when
+    it was made or changed after `born`, OR (no clock: a touched marker moves `born`) when the
+    checkout it names points back into THIS clone's `.git`. Wherever that checkout lies, its
+    uncommitted files are in no status this sweep reads, so the clone is kept. An entry whose
+    checkout is gone holds no files (its commits are tips, see below). Unreadable = True (kept)."""
+    own = os.path.realpath(wt / ".git")
     try:
-        return any(max(e.lstat().st_mtime, e.lstat().st_ctime) > born
-                   for e in (wt / ".git" / "worktrees").iterdir())
+        entries = [e for e in (wt / ".git" / "worktrees").iterdir() if e.is_dir()]
     except FileNotFoundError:
         return False
     except OSError:
         return True
+    for e in entries:
+        try:
+            if max(e.lstat().st_mtime, e.lstat().st_ctime) > born:
+                return True
+            checkout_git = Path((e / "gitdir").read_text(encoding="utf-8", errors="replace").strip())
+        except OSError:
+            return True
+        try:
+            back = checkout_git.read_text(encoding="utf-8", errors="replace").strip()
+        except (FileNotFoundError, NotADirectoryError):
+            continue                                     # the checkout is gone: no file can be in it
+        except OSError:
+            return True
+        if back.startswith("gitdir:"):
+            target = os.path.realpath(back[len("gitdir:"):].strip())
+            if target == own or target.startswith(own + os.sep):
+                return True
+    return False
 
 
 def clone_commits_kept_elsewhere(src: Path, wt: Path, born: float = 0.0) -> bool | None:
     """Whether every commit the clone holds is also in `src`. The clone's tips are EVERY ref it
     has (branches, tags, anything under `refs/`), HEAD, the HEAD of every linked worktree
-    (`for-each-ref` does not list those), and every reflog entry written after `born` (a commit
-    left behind by `reset --hard` or by leaving a detached HEAD is held by the reflog alone).
+    (`for-each-ref` does not list those), EVERY reflog entry (a commit left behind by
+    `reset --hard` or by leaving a detached HEAD is held by the reflog alone; no time is read,
+    a reflog time is the committer's date and can be set to anything), and every DANGLING commit
+    (`git fsck`: a commit made in a linked worktree that was then removed is in no ref and no
+    reflog) — each minus what the source has: its refs, its reflog entries, and for a dangling
+    commit the object itself (the clone was born with a copy of the source's own dangling ones).
     More than `MAX_CLONE_TIPS` tips the source does not have: "not held", unjudged.
     A commit counts as held by `src` when
     one of its refs or reflogs reaches it, or when `git cherry` marks it patch-equivalent to a
     commit on main. A merge commit is never patch-equivalent: one only the clone has keeps it.
     The clone's objects are read in place (an alternate object directory); nothing is fetched.
-    None when git cannot read either side; a failing `git cherry` is "not held", never "held"."""
+    None when git cannot read either side; a failing `git cherry` is "not held", never "held".
+    `born` is no longer read (kept for the callers)."""
     tips = _git(["for-each-ref", "--format=%(objectname)"], cwd=wt)
     head = _git(["rev-parse", "HEAD"], cwd=wt)
     have = _git(["for-each-ref", "--format=%(objectname)"], cwd=src)
     linked = _git(["worktree", "list", "--porcelain"], cwd=wt)
-    logs = _git(["log", "-g", "--all", "--date=unix", "--format=%H %gd"], cwd=wt, timeout=40)
-    if (tips.returncode != 0 or head.returncode != 0 or have.returncode != 0
-            or linked.returncode != 0 or logs.returncode != 0):
+    logs = _git(["log", "-g", "--all", "--format=%H"], cwd=wt, timeout=40)
+    src_logs = _git(["log", "-g", "--all", "--format=%H"], cwd=src, timeout=40)
+    if any(p.returncode != 0 for p in (tips, head, have, linked, logs, src_logs)):
         return None
     extra = {l[5:].strip() for l in linked.stdout.splitlines() if l.startswith("HEAD ")}
-    for line in logs.stdout.splitlines():
-        sha, _, sel = line.partition(" ")
-        m = re.search(r"@\{(\d+)\}$", sel)
-        # reflog times are whole seconds and `born` is not: an entry from the second the clone was
-        # born in counts as after it. An unreadable time counts as after birth too.
-        if m is None or float(m.group(1)) + 1 > born:
-            extra.add(sha)
+    theirs = set(have.stdout.split()) | set(src_logs.stdout.split())
+    mine = (set(tips.stdout.split()) | {head.stdout.strip()} | extra | set(logs.stdout.split())) - theirs
+    held = _tips_held(src, wt, mine)
+    if held is not True:
+        return held
+    # Only a clone that would otherwise be proposed pays for the connectivity check.
+    fsck = _git(["fsck", "--connectivity-only", "--dangling", "--no-progress"], cwd=wt, timeout=40)
+    if fsck.returncode != 0:
+        return None
+    dangling = {l.split()[2] for l in fsck.stdout.splitlines() if l.startswith("dangling commit ")}
+    dangling -= theirs | mine
+    if len(dangling) > MAX_DANGLING:
+        return None
+    if dangling:                 # the ones whose object the source holds too were there at birth
+        there = _git(["rev-list", "--no-walk", "--ignore-missing", *sorted(dangling)], cwd=src, timeout=40)
+        if there.returncode != 0:
+            return None
+        dangling -= set(there.stdout.split())
+    return _tips_held(src, wt, dangling)
+
+
+def _tips_held(src: Path, wt: Path, tips: set) -> bool | None:
+    """True when `src` holds every commit reachable from `tips` (or its patch); see above."""
     alt = wt / ".git" / "objects"
-    mine = sorted((set(tips.stdout.split()) | {head.stdout.strip()} | extra) - set(have.stdout.split()))
+    mine = sorted(tips)
     if not mine:
         return True
     if len(mine) > MAX_CLONE_TIPS:

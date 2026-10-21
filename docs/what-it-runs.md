@@ -12,8 +12,12 @@ against the source):
   only `git fetch` copies commits from a local worktree clone into its source repository. Nothing
   pushes.
 - `ps`, `lsof` — to tell whether a session or a worktree is still in use.
-- `screen` or `tmux`, and `sysctl` (macOS) — only in `tools/sessions.py` and the close check: to
-  start a session detached, read what is on a session's screen (it never types into one), end a
+- `ioreg` (macOS) — only in `hooks/homes.py`, once per machine, to read the machine's id. That
+  check is off unless you configure it.
+- `screen` or `tmux`, and `sysctl` (macOS) — only in `tools/sessions.py`, the close check and
+  `hooks/autocontinue.py`: to
+  start a session detached, read what is on a session's screen, type one "continue" line into a session the usage limit
+  stopped (only with `usage_continue` on), end a
   finished session when you have switched that on, and read the memory-pressure level, the share
   of memory free and how much swap is in use. A launch that goes past the memory test with
   `--owner-go` writes the words given to `owner-go.log` in the state directory.

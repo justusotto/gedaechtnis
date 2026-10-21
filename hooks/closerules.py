@@ -311,11 +311,48 @@ def verdict(end: dict | None, now: float, idle_min: float, handoff: bool = False
 
 
 UNKNOWN_FACTOR = 4          # an UNKNOWN keeps only while the session is younger than idle × this
-REPORT_IDLE_MIN = 30        # minutes of quiet after a done handoff or a report to its seat
+REPORT_IDLE_MIN = 30        # minutes of quiet after a done handoff or a report to its seat: the
+                            # default of `session_close_report_minutes` (SESSCLOSE-3)
+
+
+def to_seat(end: dict | None, seat: str | None, seat_addrs=()) -> bool:
+    """Whether the turn `end` sent a message to its seat: by the seat's NAME, or by one of
+    `seat_addrs` — the other form a session addresses its seat in, `uds:<its socket path>`
+    (SESSCLOSE-3: two finished sessions reported that way and waited the full idle time)."""
+    addrs = {a for a in (seat, *seat_addrs) if isinstance(a, str) and a}
+    return bool(addrs) and any(s.get("to") in addrs for s in (end or {}).get("sent") or [])
+
+
+def handoff_in_turn(end: dict | None, handoff_done: float | None, slack_s: float = 300) -> bool:
+    """Whether `handoff_done` (the commit time of a done/landed/stopped handoff) falls inside the
+    final turn: from when it began to `slack_s` after it ended."""
+    if not end or handoff_done is None or end.get("began") is None or end.get("ts") is None:
+        return False
+    return end["began"] <= handoff_done <= end["ts"] + slack_s
+
+
+def said(end: dict | None, handoff_done: float | None = None, seat: str | None = None,
+         seat_addrs=(), slack_s: float = 300) -> bool:
+    """SESSCLOSE-3: the session SAID it is finished, by an act and not by its words — its final
+    turn reported to its seat, or committed a done handoff. True whatever the turn's age."""
+    return to_seat(end, seat, seat_addrs) or handoff_in_turn(end, handoff_done, slack_s)
+
+
+def said_at(end: dict | None, handoff_done: float | None = None, seat: str | None = None,
+            seat_addrs=(), slack_s: float = 300) -> float | None:
+    """WHEN the final turn said it (`said`): the time of its last message to its seat, or of the
+    done handoff's commit, whichever is later. None: it did not, or no time could be read (a
+    message with no timestamp has none)."""
+    addrs = {a for a in (seat, *seat_addrs) if isinstance(a, str) and a}
+    times = [float(s.get("ts") or 0) for s in (end or {}).get("sent") or [] if s.get("to") in addrs]
+    if handoff_in_turn(end, handoff_done, slack_s):
+        times.append(float(handoff_done))
+    return max(times) if times and max(times) > 0 else None
 
 
 def finished(end: dict | None, now: float, idle_min: float, handoff_done: float | None = None,
-             seat: str | None = None, slack_s: float = 300, nothing_runs: bool = False) -> dict:
+             seat: str | None = None, slack_s: float = 300, nothing_runs: bool = False,
+             report_min: float = REPORT_IDLE_MIN, seat_addrs=()) -> dict:
     """CLOSETUNE-1: whether a session is FINISHED, from facts about time, never from its words. Pure.
 
     Finished when its last turn ENDED (no tool call without its result at the tail) and ONE of:
@@ -323,19 +360,22 @@ def finished(end: dict | None, now: float, idle_min: float, handoff_done: float 
       (handoff) `handoff_done` — the author time of the last commit of its handoff whose State
                 says DONE / LANDED / STOPPED — falls INSIDE the final turn (from when it began to
                 `slack_s` after it ended): the session committed it as its last act — and the
-                turn ended at least REPORT_IDLE_MIN minutes ago (CLOSETUNE-2: the replay of
+                turn ended at least `report_min` minutes ago (CLOSETUNE-2: the replay of
                 2026-09-29..10-02 found three such sessions messaged by their seat 2, 13 and 16
                 minutes after the handoff; none after 30);
-      (report)  the final turn sent a message to `seat` (SendMessage `to`, no error) and ended at
-                least REPORT_IDLE_MIN minutes ago.
-    Returns {how, age_s, hard, soft, notes}: `how` = which criterion held (None = not finished);
+      (report)  the final turn sent a message to its seat — `seat` by name, or one of
+                `seat_addrs` (SendMessage `to`, no error) — and ended at least `report_min`
+                minutes ago.
+    Returns {how, age_s, hard, soft, notes, said}: `how` = which criterion held (None = not
+    finished); `said` = the final turn reported to the seat or committed a done handoff, at any age;
     `hard` keeps whatever the age; `soft` keeps only while age < idle × UNKNOWN_FACTOR (the caller
     adds its own soft facts: git unknown or dirt, an unreadable screen); `notes` never keep — the
     last words that ask or wait, and the old evidence rule, are printed, not obeyed.
     `nothing_runs` (CLOSETUNE-2): the caller READ that nothing of this session's runs — its registry
     status is idle and it has no live process of its own. An OLD task that never reported is then
     a note, not a doubt. A young one keeps either way."""
-    out = {"how": None, "age_s": None, "hard": [], "soft": [], "notes": []}
+    out = {"how": None, "age_s": None, "hard": [], "soft": [], "notes": [],
+           "said": said(end, handoff_done, seat, seat_addrs, slack_s)}
     if end is None:
         out["hard"].append("idle: its last turn has not ended (working, or a tool call waiting on a prompt)")
         return out
@@ -344,14 +384,13 @@ def finished(end: dict | None, now: float, idle_min: float, handoff_done: float 
     out["age_s"] = age
     if age is not None and age >= idle_min * 60:
         out["how"] = f"its last turn ended {age / 3600:.1f} h ago (≥ {idle_min / 60:g} h)"
-    elif (handoff_done is not None and end.get("began") is not None and ts is not None
-          and end["began"] <= handoff_done <= ts + slack_s and age >= REPORT_IDLE_MIN * 60):
+    elif (age is not None and age >= report_min * 60
+          and handoff_in_turn(end, handoff_done, slack_s)):
         out["how"] = (f"its handoff's State line says done/landed/stopped, no turn began after its "
-                      f"commit, and it has been quiet {age / 60:.0f} min (≥ {REPORT_IDLE_MIN})")
-    elif (seat and age is not None and age >= REPORT_IDLE_MIN * 60
-          and any(s.get("to") == seat for s in end.get("sent") or [])):
-        out["how"] = (f"it sent its report to its seat {seat} and has been quiet "
-                      f"{age / 60:.0f} min (≥ {REPORT_IDLE_MIN})")
+                      f"commit, and it has been quiet {age / 60:.0f} min (≥ {report_min:g})")
+    elif age is not None and age >= report_min * 60 and to_seat(end, seat, seat_addrs):
+        out["how"] = (f"it sent its report to its seat {seat or 'by its socket'} and has been quiet "
+                      f"{age / 60:.0f} min (≥ {report_min:g})")
     if out["how"] is None:
         out["hard"].append(
             f"finished: its last turn ended {'at an unknown time' if age is None else f'{max(age, 0) / 60:.0f} min ago'}"
@@ -394,7 +433,8 @@ def close_moment(end: dict, idle_min: float, handoff: bool = False) -> float | N
 
 
 def live_moment(end: dict, idle_min: float, handoff_done: float | None = None,
-                seat: str | None = None, nothing_runs: bool = False) -> float | None:
+                seat: str | None = None, nothing_runs: bool = False,
+                report_min: float = REPORT_IDLE_MIN, seat_addrs=()) -> float | None:
     """The earliest time the LIVE rule (`finished`, as `fleet.classify` applies it: no hard keep,
     and a soft keep only up to idle × UNKNOWN_FACTOR) would close a session whose last turn is
     `end`, or None if it never would. Pure: `finished` asked at each moment its answer can change."""
@@ -403,11 +443,12 @@ def live_moment(end: dict, idle_min: float, handoff_done: float | None = None,
         return None
     line = idle_min * 60 * UNKNOWN_FACTOR
     starts = [st for st in (end.get("open_bg_ts") or {}).values() if st]
-    for t in sorted({ts, ts + REPORT_IDLE_MIN * 60, ts + idle_min * 60, ts + line,
+    for t in sorted({ts, ts + report_min * 60, ts + idle_min * 60, ts + line,
                      (end.get("wake_until") or 0) + 1, *(st + idle_min * 60 for st in starts)}):
         if t < ts:
             continue
-        v = finished(end, t, idle_min, handoff_done, seat, nothing_runs=nothing_runs)
+        v = finished(end, t, idle_min, handoff_done, seat, nothing_runs=nothing_runs,
+                     report_min=report_min, seat_addrs=seat_addrs)
         if v["how"] and not v["hard"] and (not v["soft"] or t - ts >= line):
             return t
     return None
@@ -440,10 +481,14 @@ OTHER_TRANSCRIPT = "another transcript under its name began (a new launch or a r
 
 
 def replay(files: list[Path], now: float, since: float, idle_min: float, facts_fn=None,
-           nothing_runs: bool = False) -> list[dict]:
+           nothing_runs: bool = False, report_min: float = REPORT_IDLE_MIN,
+           scans: list[dict] | None = None) -> list[dict]:
     """Per session (transcripts grouped by session name; an unnamed one stands alone): the first
     moment the LIVE rule (`live_moment`) would have closed it at or after `since`, and what happened
-    after. `facts_fn(scan, end)` -> (handoff_done, seat) supplies what the transcript does not hold.
+    after. `facts_fn(scan, end)` -> (handoff_done, seat[, seat_addrs]) supplies what the
+    transcript does not hold. `report_min`: the quiet a report or a done handoff needs (the key
+    `session_close_report_minutes`). `scans`: the files already scanned, for a caller that replays
+    the same window at several values.
 
     Row: {name, files, closed_at, end_text, after, after_kind, wrong, reused, reason}. Activity
     AFTER `closed_at`, in the same transcript or a later one under the same name, is one of two
@@ -458,11 +503,10 @@ def replay(files: list[Path], now: float, since: float, idle_min: float, facts_f
     stays a doubt for 12 h. True drops every such doubt — the upper bound, and the gap the live
     read of the registry and the process table has to cover."""
     groups: dict[str, list[dict]] = {}
-    for f in files:
-        s = scan(f)
+    for s in (scans if scans is not None else [scan(f) for f in files]):
         if not s["ends"] and not s["activity"]:
             continue
-        key = s["name"] or f"(unnamed) {f.stem[:8]}"
+        key = s["name"] or f"(unnamed) {Path(s['path']).stem[:8]}"
         groups.setdefault(key, []).append(s)
     rows = []
     for key, scans in sorted(groups.items()):
@@ -472,8 +516,9 @@ def replay(files: list[Path], now: float, since: float, idle_min: float, facts_f
                "after_kind": "", "wrong": False, "reused": False, "reason": "", "ends": len(ends)}
         owner = {id(e): s for s in scans for e in s["ends"]}
         for e in ends:
-            done, seat = facts_fn(owner[id(e)], e) if facts_fn else (None, None)
-            t = live_moment(e, idle_min, done, seat, nothing_runs)
+            done, seat, *more = facts_fn(owner[id(e)], e) if facts_fn else (None, None)
+            t = live_moment(e, idle_min, done, seat, nothing_runs, report_min,
+                            more[0] if more else ())
             if t is None or t < since:
                 continue
             nxt = next((a for a in acts if a > e["ts"] + 0.5), None)

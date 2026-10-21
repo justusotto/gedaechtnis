@@ -37,6 +37,7 @@ import kernelentry
 import apostrophe_door
 import ruledoors
 import killdoor
+import homes
 import limits as _limits
 
 EV = "PreToolUse"
@@ -766,6 +767,11 @@ def rule_bash_partition(cmd: str, inp: dict) -> str | None:
             r = rule_display_name_filename(p)      # deterministic, like the stem rule: every mode, every lane
             if r:
                 return r + f" (Bash write via {how}.)"
+    for p, how in targets:                             # write homes: before the vault-cwd pass, a machine is not a lane
+        wh = homes.refusal(vault_rel(p) or "", lane)
+        if wh:
+            log("deny", f"bash\twrite-home\t{vault_rel(p)}\tbash={how}\tsession={sid}")
+            return wh + f" (Bash write via {how}.)"
     if lane is None and cwd and under(expand(cwd), common.VAULT):
         log("partition", f"ok\tVAULT-CWD\tbash\tsession={sid}")
         return None                                    # a session opened in the vault itself is the owner's own hand
@@ -1221,6 +1227,12 @@ def do_write(inp: dict) -> None:
             log("deny", f"write\tkernel-entry\t{rel}\tsession={sid}")
             refuse(ke)
             return
+    # Write homes (VAULTSYNC-3): on a vault two machines share, a file is written from ONE of them.
+    wh = homes.refusal(rel, lane)
+    if wh:
+        log("deny", f"write\twrite-home\t{rel}\tsession={sid}")
+        refuse(wh)
+        return
     _partition_checks(inp, cwd, p, rel, lane, prefixes, marker, mode, sid, refuse)
     if refused:
         return

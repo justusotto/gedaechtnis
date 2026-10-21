@@ -36,8 +36,8 @@ nothing, and prints the two commands for a person to run. Paths listed in
 `--with-excluded` publishes them too.
 
 **Versions.** A release's tag is always `v` plus the `version` in `.claude-plugin/plugin.json`
-(0.5.0 → `v0.5.0`). A patch is fixes and polish, a minor version a capability a user notices, and a
-major version a rework or a complete new feature set. The script cuts that tag itself and refuses,
+(0.5.0 → `v0.5.0`). A patch is fixes, polish and small additions such as a new tool or setting; a
+minor version is a larger capability a user notices, and a major version a rework or a complete new feature set. The script cuts that tag itself and refuses,
 before building anything, a `--tag` that differs from the version, a `--tag` on a tree with no
 version, and a version that `CHANGELOG.md` has no `## <version> ` heading for. To release a
 different number, change `plugin.json` and the CHANGELOG heading in a commit and cut from that
@@ -64,6 +64,9 @@ marker files it keeps in its state directory (and `tools/configure.py` removes t
 wrote beside `config.json` when that write fails, as `tools/allow_rules.py` does beside a settings file). One exception: when a worktree clone the plugin made
 itself is removed and holds nothing unique (every commit fetched back into the source repository,
 no uncommitted or stashed work), the clone directory is deleted rather than sent to the Trash. A
-clone that does hold something goes to the Trash. A file no rule names is kept until someone
-writes the rule that names it; age never decides. A rule that needs judgment stays prose, because a guard that guesses produces false refusals. Hooks catch their own errors:
+clone that does hold something goes to the Trash. A second exception, off until `tmp_sweep_apply`
+is on: the temp sweep removes large files and copied folders from the session temp folders of
+sessions that are no longer alive, and those folders themselves after `tmp_sweep_days`. Outside
+that sweep, a file no rule names is kept until someone writes the rule that names it, and age does
+not decide. A rule that needs judgment stays prose, because a guard that guesses produces false refusals. Hooks catch their own errors:
 every hook body logs its traceback and exits 0. No file names a directory of its own; all read `hooks/config.py`.

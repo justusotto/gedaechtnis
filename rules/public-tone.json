@@ -48,13 +48,13 @@
     "never": {
       "README.md": 2,
       "docs/configuration.md": 6,
-      "docs/contributing.md": 8,
+      "docs/contributing.md": 7,
       "docs/doors.md": 1,
       "docs/hooks.md": 15,
       "docs/install.md": 4,
       "docs/measurements.md": 1,
       "docs/platforms.md": 1,
-      "docs/what-it-runs.md": 3,
+      "docs/what-it-runs.md": 2,
       "docs/why-hooks-not-prompts.md": 2
     }
   }

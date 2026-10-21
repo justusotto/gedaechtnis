@@ -182,6 +182,16 @@
             "type": "command",
             "command": "python3 -B \"${CLAUDE_PLUGIN_ROOT}/hooks/chore.py\" sessclose",
             "timeout": 60
+          },
+          {
+            "type": "command",
+            "command": "python3 -B \"${CLAUDE_PLUGIN_ROOT}/hooks/chore.py\" usagecontinue",
+            "timeout": 60
+          },
+          {
+            "type": "command",
+            "command": "python3 -B \"${CLAUDE_PLUGIN_ROOT}/hooks/chore.py\" tmpsweep",
+            "timeout": 20
           }
         ]
       }

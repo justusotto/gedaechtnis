@@ -321,7 +321,7 @@ def quiet(fl, monkeypatch):
     monkeypatch.setattr(fl, "registry_status", lambda pid: "idle")
     monkeypatch.setattr(fl, "read_screen", lambda m, n: "❯ \n  ? for shortcuts")
     monkeypatch.setattr(fl, "screen_attached", lambda n: False)
-    monkeypatch.setattr(fl, "session_unsaved", lambda cwd, wt, w: [])
+    monkeypatch.setattr(fl, "session_unsaved", lambda cwd, wt, w, ended=None: [])
     return fl
 
 

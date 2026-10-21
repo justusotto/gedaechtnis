@@ -239,6 +239,9 @@ def launch(fl, tmp_path, monkeypatch):
         monkeypatch.setattr(ses.fleet, "working_count", lambda p, status_fn=None: len(p))
         monkeypatch.setattr(ses.fleet, "cap", lambda: cap)
         monkeypatch.setattr(ses.fleet, "sweep", lambda **_kw: [])
+        # SESSCLOSE-3: a memory refusal runs the closer first; here it finds nothing to close
+        # (tests/test_sessclose3.py holds the cases where it does).
+        monkeypatch.setattr(ses.fleet, "close_when_needed", lambda **_kw: {"closed": []})
         monkeypatch.setattr(ses.subprocess, "run", fake_run)
         del calls[:]
         argv = ["launch", "--name", name, "--cwd", str(tmp_path)]

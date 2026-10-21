@@ -186,6 +186,204 @@ def test_a_non_python_script_is_refused_even_when_reviewed(tmp_path, state):
     assert p.returncode == 3 and "RAN" not in p.stdout and "not a Python script" in p.stderr
 
 
+# ---------------------------------------------- the owner's interpreter list (RUNREVIEWED-2) ----
+
+SESSION_VARS = ("CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_ENTRYPOINT")
+
+
+def venv_repo(tmp_path: Path, marker: str = "VENV") -> tuple[Path, Path, Path]:
+    """A repository with a `.venv/bin/python` that announces itself, then runs the real Python."""
+    repo = tmp_path / "miner"
+    py = repo / ".venv" / "bin" / "python"
+    py.parent.mkdir(parents=True)
+    py.write_text(f'#!/bin/sh\necho {marker}-INTERPRETER\nexec "{sys.executable}" "$@"\n')
+    py.chmod(0o755)
+    s = repo / "verify" / "live.py"
+    s.parent.mkdir()
+    s.write_text("import sys\nprint('RAN', sys.argv[1:])\n")
+    return repo, py, s
+
+
+def owner_env(st: Path) -> dict:
+    e = env_for(st)
+    for v in SESSION_VARS:
+        e.pop(v, None)
+    return e
+
+
+def reviewed_cli(st: Path, *args: str, env: dict | None = None) -> subprocess.CompletedProcess:
+    return subprocess.run([sys.executable, str(TOOLS / "reviewed.py"), *args], capture_output=True,
+                          text=True, env=env or owner_env(st), timeout=60)
+
+
+def test_a_listed_interpreter_runs_the_reviewed_script(tmp_path, state):
+    import reviewed                                                    # noqa: PLC0415
+    repo, py, s = venv_repo(tmp_path)
+    assert reviewed.add(str(s), str(review_record(tmp_path)), "x")[0] == 0
+    p = reviewed_cli(state, "allow-interpreter", str(repo), str(py))
+    assert p.returncode == 0, p.stderr
+    p = subprocess.run(["bash", str(TOOLS / "run_reviewed.sh"), "--python", str(py), str(s), "a1"],
+                       capture_output=True, text=True, env=env_for(state), timeout=60)
+    assert p.returncode == 0, p.stderr
+    assert "VENV-INTERPRETER" in p.stdout and "RAN ['a1']" in p.stdout
+    assert f"\t{py}\t" in (state / "reviewed.log").read_text()
+
+
+def test_an_unlisted_interpreter_is_still_refused(tmp_path, state):
+    import reviewed                                                    # noqa: PLC0415
+    repo, py, s = venv_repo(tmp_path)
+    other = tmp_path / "other" / "python"
+    other.parent.mkdir()
+    other.write_text("#!/bin/sh\necho OTHER-INTERPRETER\n")
+    other.chmod(0o755)
+    assert reviewed.add(str(s), str(review_record(tmp_path)), "x")[0] == 0
+    # nothing listed at all
+    p = run_wrapped(state, Path("--python"), str(py), str(s))
+    assert p.returncode == 3 and "VENV" not in p.stdout and "RAN" not in p.stdout
+    assert "reviewed_interpreters" in p.stderr
+    # listed for this repo, but a different interpreter asked for
+    assert reviewed_cli(state, "allow-interpreter", str(repo), str(py)).returncode == 0
+    p = run_wrapped(state, Path("--python"), str(other), str(s))
+    assert p.returncode == 3 and "OTHER" not in p.stdout and "RAN" not in p.stdout
+    assert "not listed" in p.stderr
+    # listed for this repo, asked for a script outside it
+    out = make_script(tmp_path)
+    assert reviewed.add(str(out), str(review_record(tmp_path)), "x")[0] == 0
+    p = run_wrapped(state, Path("--python"), str(py), str(out))
+    assert p.returncode == 3 and "RAN" not in p.stdout
+    # an unreviewed script stays refused with a listed interpreter
+    s.write_text(s.read_text() + "# edited\n")
+    p = run_wrapped(state, Path("--python"), str(py), str(s))
+    assert p.returncode == 3 and "NOT REVIEWED" in p.stderr and "VENV" not in p.stdout
+    # and without --python the old rule holds: the planted venv is not used
+    s.write_text("import sys\nprint('RAN', sys.argv[1:])\n")
+    p = run_wrapped(state, s)
+    assert p.returncode == 0 and "RAN" in p.stdout and "VENV" not in p.stdout
+
+
+def test_only_the_owner_sets_the_interpreter_list(tmp_path, state):
+    import configure                                                  # noqa: PLC0415
+    repo, py, _s = venv_repo(tmp_path)
+    cfg = tmp_path / "config.json"
+    cfg.write_text(json.dumps({"limits": {}, "keep": 1}))
+    in_session = {**owner_env(state), "CLAUDECODE": "1"}
+    p = reviewed_cli(state, "allow-interpreter", str(repo), str(py), env=in_session)
+    assert p.returncode == 3 and "owner" in p.stderr
+    assert "reviewed_interpreters" not in json.loads(cfg.read_text())
+    # configure.py cannot write it at all, with or without --owner
+    for extra in ([], ["--owner"]):
+        q = subprocess.run([sys.executable, str(TOOLS / "configure.py"), "set", "reviewed_interpreters",
+                            json.dumps({str(repo): str(py)}), *extra], capture_output=True, text=True,
+                           env=owner_env(state), timeout=60)
+        assert q.returncode != 0
+    assert "reviewed_interpreters" not in json.loads(cfg.read_text())
+    assert configure.key_class("reviewed_interpreters").startswith("owner")
+    # the owner's terminal: written, other keys kept, backup made, idempotent, removable
+    assert reviewed_cli(state, "allow-interpreter", str(repo), str(py)).returncode == 0
+    d = json.loads(cfg.read_text())
+    assert d["reviewed_interpreters"] == {str(repo.resolve()): [str(py)]} and d["keep"] == 1
+    assert list(tmp_path.glob("config.json.pre-reviewed_interpreters-*"))
+    p = reviewed_cli(state, "allow-interpreter", str(repo), str(py))
+    assert p.returncode == 0 and "already listed" in p.stdout
+    assert reviewed_cli(state, "disallow-interpreter", str(repo)).returncode == 0
+    assert "reviewed_interpreters" not in json.loads(cfg.read_text())
+
+
+def test_a_hand_written_spelling_of_the_repository_is_revoked_too(tmp_path, state, monkeypatch):
+    """Review MUST-FIX 1: `~/miner` and `<repo>/` are honoured by the reader, so the writer finds them."""
+    import reviewed                                                    # noqa: PLC0415
+    repo, py, s = venv_repo(tmp_path)
+    cfg = tmp_path / "config.json"
+    env = {**owner_env(state), "HOME": str(tmp_path)}
+    cfg.write_text(json.dumps({"reviewed_interpreters": {"~/miner": str(py), str(repo) + "/": [str(py)]}}))
+    assert reviewed.add(str(s), str(review_record(tmp_path)), "x")[0] == 0
+    run = lambda: subprocess.run(["bash", str(TOOLS / "run_reviewed.sh"), "--python", str(py), str(s)],  # noqa: E731
+                                 capture_output=True, text=True, env={**env_for(state), "HOME": str(tmp_path)})
+    assert "VENV-INTERPRETER" in run().stdout
+    assert reviewed_cli(state, "allow-interpreter", str(repo), str(py), env=env).returncode == 0
+    assert json.loads(cfg.read_text())["reviewed_interpreters"] == {str(repo.resolve()): [str(py)]}
+    assert reviewed_cli(state, "disallow-interpreter", str(repo), env=env).returncode == 0
+    assert "reviewed_interpreters" not in json.loads(cfg.read_text())
+    p = run()
+    assert p.returncode == 3 and "VENV" not in p.stdout
+
+
+def test_a_neighbour_folder_and_a_broken_config_get_nothing(tmp_path, state):
+    import reviewed                                                    # noqa: PLC0415
+    repo, py, _s = venv_repo(tmp_path)
+    twin = tmp_path / "miner2" / "live.py"
+    twin.parent.mkdir()
+    twin.write_text("print('RAN')\n")
+    assert reviewed.add(str(twin), str(review_record(tmp_path)), "x")[0] == 0
+    assert reviewed_cli(state, "allow-interpreter", str(repo), str(py)).returncode == 0
+    p = run_wrapped(state, Path("--python"), str(py), str(twin))
+    assert p.returncode == 3 and "RAN" not in p.stdout
+    p = run_wrapped(state, Path(f"--python={py}"), str(twin))
+    assert p.returncode == 3 and "RAN" not in p.stdout
+    assert reviewed_cli(state, "allow-interpreter", str(tmp_path.anchor), str(py)).returncode == 3
+    cfg = tmp_path / "config.json"
+    cfg.write_text("{broken")
+    assert reviewed_cli(state, "allow-interpreter", str(repo), str(py)).returncode == 3
+    assert cfg.read_text() == "{broken"
+    cfg.write_text(json.dumps({"reviewed_interpreters": {str(repo): 5}}))
+    p = reviewed_cli(state, "allow-interpreter", str(repo), str(py))
+    assert p.returncode == 0 and "Traceback" not in p.stderr
+    notexec = tmp_path / "plain.txt"
+    notexec.write_text("x")
+    assert reviewed_cli(state, "allow-interpreter", str(repo), str(notexec)).returncode == 3
+
+
+def test_a_case_variant_key_is_revoked_and_a_dead_relative_value_stays_dead(tmp_path, state):
+    """Fix-review MUST-FIX 1 and 2."""
+    import config, reviewed                                            # noqa: PLC0415
+    repo, py, s = venv_repo(tmp_path)
+    cfg = tmp_path / "config.json"
+    variant = str(repo.parent / "MINER")
+    if os.path.exists(variant):                                        # a case-insensitive disk
+        cfg.write_text(json.dumps({"reviewed_interpreters": {variant: str(py)}}))
+        assert reviewed_cli(state, "disallow-interpreter", str(repo)).returncode == 0
+        assert "reviewed_interpreters" not in json.loads(cfg.read_text())
+    cfg.write_text(json.dumps({"reviewed_interpreters": {str(repo): ["rel/python", str(py)]}}))
+    new = tmp_path / "new-python"
+    new.write_text("#!/bin/sh\n")
+    new.chmod(0o755)
+    p = subprocess.run([sys.executable, str(TOOLS / "reviewed.py"), "allow-interpreter", str(repo), str(new)],
+                       capture_output=True, text=True, env=owner_env(state), cwd=str(tmp_path))
+    assert p.returncode == 0, p.stderr
+    assert json.loads(cfg.read_text())["reviewed_interpreters"] == {str(repo.resolve()): [str(py), str(new)]}
+    assert config.reviewed_interpreters() == {str(repo.resolve()): [str(py), str(new)]}
+
+
+@pytest.mark.parametrize("key,where", [(".", "repo"), ("miner", "parent")])
+def test_a_dead_RELATIVE_KEY_is_never_carried_over_to_the_absolute_key(tmp_path, state, key, where):
+    """Review 2026-10-06 MUST-FIX: the reader ignores a relative key, but the writer resolved it
+    against the owner's terminal cwd — so `{".": [other]}`, dead, became `{<repo>: [other, py]}`
+    when he ran allow-interpreter from inside the repo, and `other` could run."""
+    import config                                                      # noqa: PLC0415
+    repo, py, s = venv_repo(tmp_path)
+    other = tmp_path / "other-python"
+    other.write_text("#!/bin/sh\n")
+    other.chmod(0o755)
+    cfg = tmp_path / "config.json"
+    key = key if key == "." else repo.name
+    cfg.write_text(json.dumps({"reviewed_interpreters": {key: [str(other)]}}))
+    assert config.reviewed_interpreters() == {}, "control: the reader ignores the relative key"
+    cwd = repo if where == "repo" else repo.parent
+    p = subprocess.run([sys.executable, str(TOOLS / "reviewed.py"), "allow-interpreter", str(repo), str(py)],
+                       capture_output=True, text=True, env=owner_env(state), cwd=str(cwd))
+    assert p.returncode == 0, p.stderr
+    assert config.reviewed_interpreters() == {str(repo.resolve()): [str(py)]}
+    assert str(other) not in json.dumps(config.reviewed_interpreters())
+
+
+def test_a_malformed_interpreter_entry_is_ignored(tmp_path, state):
+    import config                                                      # noqa: PLC0415
+    cfg = tmp_path / "config.json"
+    cfg.write_text(json.dumps({"reviewed_interpreters": {
+        "relative/repo": "/usr/bin/python3", str(tmp_path): "relative/python", "/x": 5}}))
+    assert config.reviewed_interpreters() == {}
+
+
 # ------------------------------------------------------------------ the allow rules ----
 
 @pytest.fixture

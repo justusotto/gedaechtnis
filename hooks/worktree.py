@@ -13,7 +13,7 @@ plugin removes a directory itself, and only a clone it made; if it holds uncommi
 moved to this machine's Trash (`common.move_to_trash`), never rm'd.
 """
 from __future__ import annotations
-import hashlib, json, os, shutil, subprocess, sys, time
+import json, os, shutil, stat, subprocess, sys, time
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import common
@@ -52,17 +52,32 @@ def repo_root(cwd: str) -> Path | None:
 
 
 def dirt_manifest(repo: Path) -> dict:
-    """sha256 of every dirty or untracked file (-uall) at this moment — the clone's own baseline."""
-    out = {}
+    """What every dirty or untracked path (-uall) is at this moment — the clone's own baseline:
+    a regular file's sha256 (read in chunks), a symlink's target as `link:<target>` (never the
+    content it points at), "gone", or "unreadable" (anything else: a FIFO, a socket, a folder).
+    `common.CLONE_MODES_KEY` holds, per regular file, whether it was executable (CLONESWEEP-2)."""
+    out, modes = {}, {}
     st = sh(["git", "-C", str(repo), "status", "--porcelain", "-z", "-uall"])
     for _xy, rel in common.porcelain_z(st.stdout):
         if rel.startswith(".gedaechtnis-clone-"):
             continue
         p = repo / rel
         try:
-            out[rel] = hashlib.sha256(p.read_bytes()).hexdigest() if p.is_file() else "gone"
+            mode = p.lstat().st_mode
+        except OSError:
+            out[rel] = "gone"
+            continue
+        try:
+            if stat.S_ISLNK(mode):
+                out[rel] = "link:" + os.readlink(p)
+            elif stat.S_ISREG(mode):
+                out[rel] = common.sha256_file(p)
+                modes[rel] = bool(mode & 0o111)
+            else:
+                out[rel] = "unreadable"
         except OSError:
             out[rel] = "unreadable"
+    out[common.CLONE_MODES_KEY] = modes
     return out
 
 

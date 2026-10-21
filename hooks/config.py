@@ -53,6 +53,11 @@ Recognised JSON keys, all optional:
   stall_minutes       with `session_name_pattern` set, how long a managed session may go without an
                       assistant record before session start lists it as STALLED (default 20)
   python              interpreter used to run that script (default: the one running the hook)
+  reviewed_interpreters  the per-repository interpreters `tools/run_reviewed.sh --python` may use,
+                      as {"<repository folder>": "<interpreter>" or [list]}; absent by default, and
+                      then `--python` is refused everywhere. The OWNER's key: `configure.py` does
+                      not write it; `tools/reviewed.py allow-interpreter` does, and refuses inside
+                      a Claude session (RUNREVIEWED-2)
   tool_root           the checkout the plugin lives in, used to find sibling tools it calls
                       (default: the directory two levels above this file)
   claim_tool          the region-claim helper the session-claim hook calls (default:
@@ -90,7 +95,8 @@ Recognised JSON keys, all optional:
                       TOPOLOGY section at the foot of this file.
   profile             `public` (default) or `atlas`: a named set of limit values (hooks/limits.py
                       PROFILES). `atlas` turns on the four doors written for a vault with work
-                      queues, review pages and a lane roster. env GEDAECHTNIS_PROFILE.
+                      queues, review pages and a lane roster, and `usage_continue`.
+                      env GEDAECHTNIS_PROFILE.
   limits              an object of THIS VAULT's threshold overrides, merged over rules/limits.json
                       by hooks/limits.py — e.g. {"boot_budget_bytes": 100000} for a vault whose
                       ruled boot chain is larger than the package default. Only names the package
@@ -458,6 +464,27 @@ def python() -> str:
     return sys.executable or "python3"
 
 
+def reviewed_interpreters() -> dict:
+    """`reviewed_interpreters` as {resolved repository folder: [absolute interpreter paths]}.
+
+    The interpreter paths are made absolute but NOT symlink-resolved: a virtual environment's
+    `bin/python` is a symlink to its base interpreter, and resolving it would drop the venv.
+    A malformed entry is skipped, never guessed at."""
+    raw = _load().get("reviewed_interpreters")
+    out: dict = {}
+    if not isinstance(raw, dict):
+        return out
+    for repo, pys in raw.items():
+        pys = [pys] if isinstance(pys, str) else pys
+        if not isinstance(repo, str) or not repo.strip() or not isinstance(pys, list):
+            continue
+        keep = [os.path.normpath(os.path.expanduser(v)) for v in pys
+                if isinstance(v, str) and os.path.isabs(os.path.expanduser(v))]
+        if keep and os.path.isabs(os.path.expanduser(repo)):
+            out[str(Path(os.path.expanduser(repo)).resolve())] = keep
+    return out
+
+
 def compact_point() -> bool:
     """COMPACTDOOR-1 pilot: `compact_point` = `on` turns on the compact ritual (the PreCompact door,
     the re-inject after compaction). Anything else — and the default — is off. Re-read per call.
@@ -642,6 +669,7 @@ _TOPOLOGY_KEYS = {
     "channels_dir": str,
     "shared_append_files": list,
     "stem_rule_dir": str,
+    "homes_file": str,
 }
 
 

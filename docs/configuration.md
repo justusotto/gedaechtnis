@@ -22,14 +22,21 @@ that file with the vault it created; edit it to move the vault.
 | `notify_command` | — | none. Where a message goes besides the seat's mailbox: run as `<command> <seat>` with the message as JSON on stdin. The mailbox is written first, so a transport that is missing or slow costs a late message and never a lost one |
 | `topology` | — | none. The shipped shape is `Global/` plus one folder per project. A vault that has grown work queues, per-lane outboxes, a cross-lane ledger, an artifact index, shared umbrella files or a folder with reserved file names names them here; each rule is off until it does. Keys: `non_region_tops`, `queues_dir`, `artifacts_index`, `ledger_dir`, `channels_dir`, `shared_append_files`, `stem_rule_dir`. A key that is present and unusable is named back to you at session start, not ignored |
 
-**Chores that move or remove files.** Three Stop-hook chores change your files: compaction (moves
+**Chores that move or remove files.** Five Stop-hook chores change your files or processes: compaction (moves
 the oldest entries of a memory file over `max_memory_file_bytes` into an archive file), the Boot-file
-roll (the same for a Boot file over its budget, inside its declared window only) and the worktree
+roll (the same for a Boot file over its budget, inside its declared window only), the worktree
 sweep (removes clean, merged, unused worktrees under a repository's `.claude/worktrees/`, and moves
-finished copy-on-write clones to `~/Downloads/To delete <date>/` with a ledger). On a
+finished copy-on-write clones to `~/Downloads/To delete <date>/` with a ledger), the temp sweep
+(removes large files, copied repositories, browser profiles and dependency folders from the session
+temp folders of sessions that are no longer alive after `tmp_sweep_strip_days`, and the whole folder
+after `tmp_sweep_days`; what it removes is not moved to the Trash, and each folder lists it in its
+`SWEPT.txt`) and the leftover-process chore (sends SIGTERM to a headless browser a session that is no
+longer alive left running in its temp folder). On a
 fresh install each only proposes: the next session start says what it would do, with details in
-`proposals.json` in the state directory. To let one act, set `compaction_apply`, `boot_roll_apply`
-or `worktree_sweep_apply` to `true` in the `limits` object of `config.json`. Each touches only its
+`proposals.json` in the state directory. To let one act, set `compaction_apply`, `boot_roll_apply`,
+`worktree_sweep_apply`, `tmp_sweep_apply` or `leftover_procs_apply` to `true` in the `limits` object of `config.json`. The temp sweep acts on at most
+`tmp_sweep_max_per_pass` folders a pass and lists what it removed in each folder's `SWEPT.txt`; it
+makes no commit and has no undo command. Each of the first three touches only its
 own kind of file (compaction: files named for a memory role, never a queue, notice or other note),
 moves at most `max_move_share` (a quarter) of a file and changes at most `max_files_per_pass` files
 per pass, leaves a file alone if it changed while the pass was working, and writes into its commit
@@ -78,6 +85,12 @@ safe enough for a narrow allow rule:
   writes a row into the ledger itself (it is a plain file), what the script imports (a module
   planted beside it runs, as under `python script.py`), and the plugin's own code, which is trusted
   like every hook.
+  A script that needs its repository's virtual environment runs with
+  `bash tools/run_reviewed.sh --python <repo>/.venv/bin/python <script.py> [args]`, and only when
+  the owner has listed that interpreter for that repository, once, from your own terminal:
+  `python3 tools/reviewed.py allow-interpreter <repo> <repo>/.venv/bin/python` (it writes
+  `reviewed_interpreters` in `config.json` and refuses inside a Claude session; `configure.py`
+  cannot write that key; `disallow-interpreter <repo>` removes it). Any other `--python` is refused.
 - `bash tools/apply-allow-rules.sh` merges the rules in `rules/allow-rules.json` into each
   repository's `.claude/settings.json` (the roster's repositories, the one the plugin lives in, and
   `--repo DIR`): the two tools above, `configure.py set|unset|get|show`, the four exact

@@ -72,6 +72,20 @@ EXEMPT = {
     "hooks/config.py::write_keys": "writes the config file (itself a root), or the explicit path a caller passed",
 
     # --- the state directory, reached only through config.state(); no argument steers the path.
+    # --- VAULTSYNC: the two-machine vault sync and the write-homes door. State-dir files by literal
+    # name, git's own temp files, and copies for a person to read; the vault's files are moved by git only.
+    "hooks/common.py::vault_files_hold": "state dir; opens the lock file config.state() joined to a literal name",
+    "hooks/homes.py::machine_id": "state dir; caches this machine's id at config.state() joined to a literal name",
+    "hooks/vaultsync.py::_write_json": "state dir; every caller passes config.state() joined to a literal name",
+    "hooks/vaultsync.py::log": "state dir; appends to config.state() joined to a literal log name",
+    "hooks/vaultsync.py::merge_driver": "writes the path git hands a merge driver, inside git's own merge",
+    "hooks/vaultsync.py::_merge_tree": "removes the temp index file it made itself with tempfile a moment before",
+    "hooks/vaultsync.py::_kept_take": "state dir; renames then removes its own kept-both note by literal name",
+    "hooks/vaultsync.py::cmd_conflict": "state dir; writes copies for a person under config.state()/vaultsync-conflict",
+    "hooks/vaultsync.py::selftest": "writes only inside the TemporaryDirectory it created for the self-test",
+    "hooks/vaultsync.py::hook": "state dir; writes its own told-once stamps at config.state() joined to literal names",
+    "hooks/vaultsync.py::__enter__": "state dir; opens its lock file at config.state() joined to a literal name",
+    "hooks/vaultsync.py::commit": "nested in selftest: writes inside the TemporaryDirectory the self-test created",
     "hooks/common.py::log": "state dir; the path is config.state() joined to a literal name",
     # COMPACTDOOR-2 round 2 (finding A): the session record written in one rename, never half.
     "hooks/common.py::write_text_atomic": "replaces a file its callers name — every caller passes "
@@ -91,6 +105,8 @@ EXEMPT = {
     # safe_sid()); read_screen removes only the mkstemp file it created in the same call.
     "hooks/fleet.py::append_launch": "state dir; config.state() joined to a literal name",
     "hooks/fleet.py::close_log": "state dir; config.state() joined to a literal name",
+    "hooks/fleet.py::observe_prompt": "state dir; config.state() joined to the literal prompt-seen.json / .lock (SESSCLOSE-3)",
+    "hooks/fleet.py::still_since": "state dir; config.state() joined to the literal child-still.json / .lock (MACFIX-1B)",
     "hooks/fleet.py::safe_close_log": "state dir; config.state() joined to the literal close.log (HANDLINES-1)",
     "hooks/fleet.py::owner_go_log": "state dir; config.state() joined to the literal owner-go.log (LAUNCHGATE-1)",
     # HANDLINES-1 — tools/configure.py writes only the package's own config file and its state log.
@@ -107,17 +123,25 @@ EXEMPT = {
     "tools/gemini_worker.py::_clear": "removes by IDENTITY, never by a path alone: a copy is unlinked through the open handle of the mkdtemp folder this run created (dir_fd), and only when its device and inode are the ones _copy_in() recorded when it wrote that copy; the rmdir runs only when the path still is that same folder (device and inode compared), and only removes an empty folder — a folder the tool moved, or a link it planted at the old path, is left and named",
     "tools/gemini_worker.py::_create": "opens <OUT>.partial or <OUT>.stderr beside the --out path the caller named with mode xb: an existing file, or a symlink, is refused, never written",
     "tools/gemini_worker.py::_place": "os.link gives the .partial its final name (<OUT> or <OUT>.failed) and fails rather than replace a file that is there; the unlink removes only that .partial after the link succeeded",
+    "tools/gemini_worker.py::read_usage": "os.rmdir on the folder this call made a moment before with tempfile.mkdtemp for the limits read; rmdir removes an EMPTY folder only, fails on a link or a file, and anything the tool wrote there stays",
     "tools/gemini_worker.py::ledger_append": "state dir; appends one row to config.state() joined to the literal gemini-runs.tsv, never rewrites it",
     "tools/reviewed.py::log": "state dir; config.state() joined to the literal reviewed.log",
     "tools/reviewed.py::add": "state dir; appends one row to config.state()/reviewed.tsv, never rewrites it",
     "hooks/fleet.py::record_proposals": "state dir; config.state() joined to a literal name",
+    "hooks/fleet.py::write_cursor": "state dir; config.state() joined to one of two literal cursor names, written beside it and renamed into place (CLOSEBUDGET-1)",
     "hooks/fleet.py::due": "state dir; config.state() joined to literal names",
+    "hooks/autocontinue.py::_put": "state dir; config.state() joined to the literal usage-continue.json / .lock (CONTINUITY-1)",
+    "hooks/autocontinue.py::due": "state dir; config.state() joined to literal names (CONTINUITY-1)",
+    "hooks/autocontinue.py::__enter__": "state dir; config.state() joined to the literal usage-continue.pass.lock (CONTINUITY-1)",
     "hooks/fleet.py::park": "state dir; config.state() joined to a name sanitized by safe_sid()",
     "hooks/deliver.py::_claim": "state dir; renames fleet.parked_path() (safe_sid name) to a claim beside it, same directory",
     "hooks/deliver.py::_restore": "state dir; puts its own claim files back as fleet.parked_path(), same directory",
     "hooks/deliver.py::deliver": "state dir; removes only claim files _claim() created beside fleet.parked_path()",
     "hooks/fleet.py::read_screen": "removes only the hardcopy file and the mkdtemp folder this function created a moment before",
     "tools/sessions.py::cmd_launch": "state dir; its lock and a pid file named by safe_sid() of the session name",
+    # CLOUDBRIDGE-1: both callers build the path from the repository the person named on the
+    # command line; the vault is only read by this tool.
+    "tools/cloudbridge.py::write_if_changed": "writes under the repository the caller named on the command line: emit writes its .cloud/ folder, pull writes .orchestration/cloud/<branch>/; the vault is read, never written",
     "tools/sessions.py::cmd_replay": "the --out file the person running the replay names on the command line, and its folder; nothing else is written",
     "hooks/compact_door.py::_record_pointer": "state dir; config.state() joined to a literal name and a "
                                               "session id sanitized by safe_sid()",
@@ -128,6 +152,12 @@ EXEMPT = {
                                     "mode, then os.replace (the temp file is unlinked if the write fails); "
                                     "only when the file is UTF-8 and already holds a compact-point heading, "
                                     "and the bytes are copied as read except that one heading's text",
+    "hooks/tmpsweep.py::remove_tree": "the session temp folder, never the vault: called only by sweep/strip on a "
+                                      "`<temp root>/-<slug>/<uuid>` unit that classify() passed (allow-list, "
+                                      "liveness, no link in the path) — test_tmpsweep.py",
+    "hooks/tmpsweep.py::_unlink": "one file or link inside the unit remove_tree was given; same guard as remove_tree",
+    "hooks/tmpsweep.py::strip": "the ledger SWEPT.txt inside the unit being stripped; same guard as remove_tree",
+    "hooks/tmpsweep.py::due": "state dir; the path is config.state() joined to the literal name tmpsweep.stamp",
     "hooks/wtsweep.py::record": "state dir; the path is config.state() joined to the literal name "
                                "'worktree-sweep.json' by state_file(), with nothing caller-supplied "
                                "in it. The DESTRUCTIVE half of this module is the `git worktree "
@@ -331,11 +361,12 @@ def test_no_exemption_is_stale():
     """An exemption for a function that no longer mutates anything is a claim nobody is checking.
     It also hides the next site that takes the same name."""
     _, used = scan(list(product_modules()))
-    # GEMINI-PUBLIC: a published tree leaves tools/gemini_worker.py out (rules/publish-exclude.json);
-    # its entries are not stale there, the file is absent. Where the file is, they are checked.
+    # GEMINI-PUBLIC: a published tree leaves some files out (rules/publish-exclude.json); their
+    # entries are not stale there, the file is absent. Where the file is, they are checked.
     root = Path(__file__).resolve().parents[1]
-    absent = {k for k in EXEMPT if k.startswith("tools/gemini_worker.py::")
-              and not (root / "tools" / "gemini_worker.py").is_file()}
+    left_out = ("tools/gemini_worker.py", "hooks/vaultsync.py", "tools/cloudbridge.py")
+    absent = {k for k in EXEMPT if k.split("::")[0] in left_out
+              and not (root / k.split("::")[0]).is_file()}
     stale = sorted(set(EXEMPT) - used - absent)
     assert not stale, (
         "EXEMPT entries that match no mutating function any more:\n  " + "\n  ".join(stale)

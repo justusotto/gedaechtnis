@@ -29,6 +29,34 @@ import config
 import lesson_push
 import lazy_body
 import deferral_door
+import homes
+
+
+class _vault_files:
+    """`with _vault_files(what, rel, lane) as ok:` — the vault-files lock, shared, from before a
+    chore READS a vault file until after it has written and committed it, so a vault sync never
+    moves the file between the two (VAULTSYNC-3; `common.vault_files_hold`). `ok` False = the
+    chore writes NOTHING: the lock was not had, or this machine is not the file's write home
+    (`homes.refusal`). Either way one chore.log line says so."""
+
+    def __init__(self, what: str, rel: str = "", lane: "str | None" = None, wait_s: float = 5.0):
+        self.what, self.rel, self.lane, self.wait_s, self.mine = what, rel, lane, wait_s, False
+
+    def __enter__(self) -> bool:
+        why = homes.refusal(self.rel, self.lane) if self.rel else None
+        if why:
+            log("chore", f"{self.what}\t{self.rel}\tskipped: {why}")
+            return False
+        already = common._vault_files_fh is not None
+        if not common.vault_files_hold(self.wait_s):
+            log("chore", f"{self.what}\t{self.rel}\tskipped: a vault sync held the vault's files")
+            return False
+        self.mine = not already
+        return True
+
+    def __exit__(self, *exc) -> None:
+        if self.mine:
+            common.vault_files_release()
 
 EV = "PostToolUse"
 UUID = re.compile(r"https://claude\.ai/code/artifact/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})")
@@ -103,30 +131,35 @@ def do_artifact(inp: dict) -> None:
         context(EV, f"Artifact {uid} (“{title}”) published. This vault configures no artifact index "
                     f"(`topology.artifacts_index` in {config.config_path()}), so no row was written.")
         return
-    common.STATE.mkdir(parents=True, exist_ok=True)
-    lk = open(common.STATE / "artifacts-index.lock", "w")
-    common.lock_file(lk)                                    # read-modify-write under a lock: two publishes never lose a row
-    try:
-        txt = idx.read_text(encoding="utf-8")
-    except OSError:
-        context(EV, f"Artifact {uid} published but the artifact index {idx} is not readable; it is NOT indexed.")
-        return
-    if uid in txt:
-        return
-    row = f"| {time.strftime('%Y-%m-%d')} | {title.replace('|', '/')} | `{uid}` |\n"
-    if ANCHOR in txt:
-        i = txt.index(ANCHOR)
-        # insert before the blank line that precedes the anchor paragraph
-        j = txt.rfind("\n\n", 0, i)
-        txt = txt[:j + 1] + row + txt[j + 1:] if j != -1 else txt[:i] + row + "\n" + txt[i:]
-    else:
-        txt = txt.rstrip("\n") + "\n" + row
-    tmp = idx.with_suffix(".md.tmp-" + uid[:8])
-    rootguard.permit(idx, "artifacts index")
-    tmp.write_text(txt, encoding="utf-8")
-    os.replace(tmp, idx)                                           # atomic: no reader ever sees a half-written index
-    sha = commit_path_limited(common.VAULT, common.vault_rel(idx) or str(idx), f"artifacts-index: {title} ({uid[:8]})")
-    common.unlock_file(lk); lk.close()
+    idx_rel = common.vault_rel(idx) or ""
+    with _vault_files("artifact-index", idx_rel, lane_for(inp.get("cwd"))[0]) as ok:
+        if not ok:
+            context(EV, f"Artifact {uid} published; the artifact index was NOT written (see chore.log).")
+            return
+        common.STATE.mkdir(parents=True, exist_ok=True)
+        lk = open(common.STATE / "artifacts-index.lock", "w")
+        common.lock_file(lk)                                    # read-modify-write under a lock: two publishes never lose a row
+        try:
+            txt = idx.read_text(encoding="utf-8")
+        except OSError:
+            context(EV, f"Artifact {uid} published but the artifact index {idx} is not readable; it is NOT indexed.")
+            return
+        if uid in txt:
+            return
+        row = f"| {time.strftime('%Y-%m-%d')} | {title.replace('|', '/')} | `{uid}` |\n"
+        if ANCHOR in txt:
+            i = txt.index(ANCHOR)
+            # insert before the blank line that precedes the anchor paragraph
+            j = txt.rfind("\n\n", 0, i)
+            txt = txt[:j + 1] + row + txt[j + 1:] if j != -1 else txt[:i] + row + "\n" + txt[i:]
+        else:
+            txt = txt.rstrip("\n") + "\n" + row
+        tmp = idx.with_suffix(".md.tmp-" + uid[:8])
+        rootguard.permit(idx, "artifacts index")
+        tmp.write_text(txt, encoding="utf-8")
+        os.replace(tmp, idx)                                           # atomic: no reader ever sees a half-written index
+        sha = commit_path_limited(common.VAULT, common.vault_rel(idx) or str(idx), f"artifacts-index: {title} ({uid[:8]})")
+        common.unlock_file(lk); lk.close()
     log("chore", f"artifact-index\t{uid}\t{title}\tcommit={sha}")
     context(EV, f"Artifact {uid} (“{title}”) is now a row in {common.vault_rel(idx) or idx}"
                 + (f", committed {sha}." if sha else ", written but NOT committed (git refused; see ~/.claude/gedaechtnis/chore.log)."))
@@ -149,7 +182,21 @@ def _vault_has_head() -> bool:
         return False
 
 
-def map_row_for(p: Path, rel: str) -> str | None:
+def map_row_for(p: Path, rel: str, lane: "str | None" = None) -> str | None:
+    parts = rel.split("/")
+    if (p.suffix != ".md" or p.stem not in ROLE_STEMS or p.stem == "Map" or not (2 <= len(parts) <= 3)
+            or not (p.parent / "Map.md").is_file()):
+        return None                              # no row is coming: no lock taken, no hook time spent
+    map_rel = vault_rel(p.parent / "Map.md") or ""
+    with _vault_files("map-row", map_rel, lane) as ok:
+        if ok:
+            return _map_row_for(p, rel)
+    if re.search(r"\[\[" + re.escape(p.stem) + r"(?=[|\]#])", (p.parent / "Map.md").read_text(encoding="utf-8", errors="replace")):
+        return None
+    return f"New file {rel}: its row in {map_rel} was NOT added (see chore.log for why). Add it by hand."
+
+
+def _map_row_for(p: Path, rel: str) -> str | None:
     """Add the Map row for a just-CREATED role file; returns the report line, or None.
 
     Every arm is a refusal to act: not a role stem, no Map.md beside it, already linked, or the
@@ -420,25 +467,27 @@ def do_write(inp: dict) -> None:
     row_note = log_session_edit(rel, p)
     if row_note:
         notes.append(row_note)
+    lane = lane_for(inp.get("cwd"))[0]
     if was_created(p):                           # consumes the gate's marker either way
         # The CREATED SET, on the same evidence and in the same breath as the Map row: a file this
         # session made has no sibling's content in it, so D1 lets this session Write it whole.
         # Recorded HERE rather than at the gate because only a PostToolUse can know the write
         # actually happened — a creation the gate denied must never license a later overwrite.
         record_created(sid, rel)
-        note = map_row_for(p, rel)
+        note = map_row_for(p, rel, lane)
         if note:
             notes.append(note)
     qrel = config.queues_rel()
     if qrel and rel.startswith(qrel + "/") and p.suffix == ".md":
-        try:
-            b = p.read_bytes()
-            if b and not b.endswith(b"\n"):
-                rootguard.permit(p, "QLINT trailing-newline repair")
-                p.write_bytes(b + b"\n")
-                notes.append(f"Added the missing trailing newline to {rel} (QLINT-1: a row appended after a missing newline glues onto the previous line and no parser sees it).")
-        except OSError:
-            pass
+        with _vault_files("qlint-newline", rel, lane) as ok:
+            try:
+                b = p.read_bytes() if ok else b""
+                if b and not b.endswith(b"\n"):
+                    rootguard.permit(p, "QLINT trailing-newline repair")
+                    p.write_bytes(b + b"\n")
+                    notes.append(f"Added the missing trailing newline to {rel} (QLINT-1: a row appended after a missing newline glues onto the previous line and no parser sees it).")
+            except OSError:
+                pass
     new_text = ti.get("new_string") or ti.get("content") or ""
     if p.suffix == ".md" and new_text:
         shas = sorted(set(HEX.findall(new_text)))
@@ -612,21 +661,24 @@ def do_inbox(inp: dict) -> None:
         seen = set()
     if key in seen:
         return
-    day = time.strftime("%Y-%m-%d")
-    row = f"- {day} {lane} wrote `{what}` from `{cwd}` (session {sid[:8]}) — fold or verify at your next boot; the writer's own notes live in its lane, not here.\n"
-    new = not inbox.is_file()
-    try:
-        with open(inbox, "a", encoding="utf-8") as fh:
-            if new:
-                fh.write(f"# {region} — Inbox\n\nAppend-only. Rows are written by the Gedächtnis hooks when ANOTHER lane works in this region or its repo, so the record lands where the work happened. The owning lane folds each row into its state files at its next boot and deletes it here.\n\n")
-            fh.write(row)
-        common.STATE.mkdir(parents=True, exist_ok=True)
-        with open(seen_f, "a", encoding="utf-8") as fh:
-            fh.write(key + "\n")
-    except OSError:
-        return
-    rel = f"{region}/Inbox.md"
-    sha = commit_path_limited(common.VAULT, rel, f"{region} Inbox: {lane} wrote {what.split('/')[-1]}")
+    with _vault_files("inbox", f"{region}/Inbox.md") as ok:     # no lane: the row lands in ANOTHER lane's region, so only a `shared:` or `default:` line names its home
+        if not ok:
+            return
+        day = time.strftime("%Y-%m-%d")
+        row = f"- {day} {lane} wrote `{what}` from `{cwd}` (session {sid[:8]}) — fold or verify at your next boot; the writer's own notes live in its lane, not here.\n"
+        new = not inbox.is_file()
+        try:
+            with open(inbox, "a", encoding="utf-8") as fh:
+                if new:
+                    fh.write(f"# {region} — Inbox\n\nAppend-only. Rows are written by the Gedächtnis hooks when ANOTHER lane works in this region or its repo, so the record lands where the work happened. The owning lane folds each row into its state files at its next boot and deletes it here.\n\n")
+                fh.write(row)
+            common.STATE.mkdir(parents=True, exist_ok=True)
+            with open(seen_f, "a", encoding="utf-8") as fh:
+                fh.write(key + "\n")
+        except OSError:
+            return
+        rel = f"{region}/Inbox.md"
+        sha = commit_path_limited(common.VAULT, rel, f"{region} Inbox: {lane} wrote {what.split('/')[-1]}")
     log("chore", f"inbox\t{region}\t{lane}\t{what}\tcommit={sha}")
     context(EV, f"Recorded in {rel} that {lane} wrote `{what}` (this region is not this session's lane). The owning lane sees it at its next boot"
                 + (f"; committed {sha}." if sha else "; NOT committed (see chore.log)."))
@@ -790,6 +842,17 @@ def do_wtsweep(inp: dict) -> None:
         log("worktrees", f"proposed\t{path}")
 
 
+def do_tmpsweep(inp: dict) -> None:
+    """Stop-time: the session temp folder and the processes dead sessions left (MACFIX-1).
+    `tmpsweep.py` holds every rule; this is only the door. Rate-limited machine-wide, and the pass
+    runs in its own detached process, so a Stop never waits on a removal. Prints nothing: each act
+    is a line in tmpsweep.log / leftovers.log, a proposal is read at the next boot."""
+    import tmpsweep                                           # noqa: PLC0415 — Stop-only cost
+    if not tmpsweep.enabled() or not tmpsweep.due():
+        return
+    tmpsweep.start_detached()
+
+
 def do_sessclose(inp: dict) -> None:
     """Stop-time close sweep of finished sessions (TERMOVERLOAD-1). Only the door: `fleet.py` holds
     every rule. Rate-limited machine-wide, because Stop fires in every session; proposes until
@@ -800,7 +863,24 @@ def do_sessclose(inp: dict) -> None:
     # longer a reason to skip; the machine-wide rate limit is the only gate.
     if not fleet.due():
         return
-    fleet.record_proposals(fleet.sweep(apply=fleet.applies(), by=f"the Stop hook ({fleet.closer()})"))
+    stats: dict = {}
+    items = fleet.sweep(apply=fleet.applies(), by=f"the Stop hook ({fleet.closer()})", resume=True,
+                        cap_s=fleet.SWEEP_CAP_S, stats=stats)
+    fleet.record_proposals(items)
+    closed = sum(1 for i in items if i["closed"])
+    if closed or stats.get("deferred"):      # a pass that judged everyone and closed nothing: no line
+        fleet.close_log(fleet.pass_line("at Stop", stats, len(items), closed))
+
+
+def do_usagecontinue(inp: dict) -> None:
+    """Stop-time: type "continue" into launched sessions the usage window cut, once it has reset
+    (CONTINUITY-1). `autocontinue.py` holds every rule; this is only the door — off unless
+    `usage_continue` is on, rate-limited machine-wide, prints nothing (each outcome is a line in
+    usage_continue.log)."""
+    import autocontinue                                     # noqa: PLC0415 — Stop-only cost
+    if not autocontinue.enabled() or not autocontinue.due():
+        return
+    autocontinue.run_pass(apply=True, by=f"the Stop hook of {inp.get('session_id', '-')}")
 
 
 def do_rowdone(inp: dict) -> None:
@@ -883,7 +963,7 @@ def main() -> None:
     {"artifact": do_artifact, "write": do_write, "inbox": do_inbox,
      "bash": do_bash, "read": do_read, "answers": do_answers,
      "wtsweep": do_wtsweep, "idlenotify": do_idlenotify, "rowdone": do_rowdone,
-     "sessclose": do_sessclose,
+     "sessclose": do_sessclose, "usagecontinue": do_usagecontinue, "tmpsweep": do_tmpsweep,
      "mergesha": do_mergesha, "facet": do_facet, "prompt": do_prompt}.get(which, lambda _i: None)(inp)
 
 

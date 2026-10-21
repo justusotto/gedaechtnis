@@ -38,6 +38,11 @@ REGISTRY = {
                                                "clones in worktrees_dir (moved to a To-delete folder)"),
     "cleanup": ("cleanup_apply", "memory role files: an entry repeated byte for byte in one file, "
                                  "and files over their line limit"),
+    "scratch-sweep": ("tmp_sweep_apply", "session folders `<temp root>/-<project>/<session id>` whose "
+                                         "session is not alive: heavy contents after "
+                                         "tmp_sweep_strip_days, the folder after tmp_sweep_days"),
+    "leftover-procs": ("leftover_procs_apply", "processes started with a dead session's temp folder as "
+                                               "their --user-data-dir (sent SIGTERM)"),
 }
 
 

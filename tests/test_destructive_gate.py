@@ -293,7 +293,7 @@ def test_sweep_records_an_undo_command_that_brings_the_worktree_back(sandbox):
 
 
 # ======================================================== no chore outside the registry ====
-MOVERS = {"compact_file", "append_entries", "atomic_write", "roll_window"}
+MOVERS = {"compact_file", "append_entries", "atomic_write", "roll_window", "remove_tree", "_term"}
 
 
 def _calls_by_function(path: Path):
@@ -319,6 +319,9 @@ REGISTERED_CALLERS = {
     ("maintenance.py", "main"): "boot-roll",
     ("wtsweep.py", "sweep"): "worktree-sweep",
     ("cleanup.py", "apply"): "cleanup",
+    ("tmpsweep.py", "sweep"): "scratch-sweep",          # its five tests: test_tmpsweep.py
+    ("tmpsweep.py", "strip"): "scratch-sweep",
+    ("tmpsweep.py", "end_leftovers"): "leftover-procs",
 }
 # Callers that use a moving primitive on the PLUGIN'S OWN state, never on a user file. Each needs
 # its reason written here; the list is not a pattern.

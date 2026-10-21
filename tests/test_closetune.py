@@ -518,6 +518,7 @@ def _sessions():
 def test_cli_when_needed_under_the_line_prints_one_line_and_sweeps_nothing(fl, monkeypatch, capsys):
     s = _sessions()
     monkeypatch.setattr(s.fleet, "memory_readings", lambda: {"swap": 0.9, "swap_mb": 800.0, "level": 70.0})
+    monkeypatch.setattr(s.fleet, "launch_guard", lambda: None)     # SESSCLOSE-3: never the live machine's
     monkeypatch.setattr(s.fleet, "sweep", lambda **kw: pytest.fail("no sweep under the line"))
     assert s.main(["close", "--when-needed"]) == 0
     out = capsys.readouterr().out

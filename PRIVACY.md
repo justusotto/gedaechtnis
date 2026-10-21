@@ -19,6 +19,10 @@ analytics and no update check. It sends nothing anywhere and fetches nothing fro
   fetching its commits back; a copy holding uncommitted work goes to the Trash instead. With
   `worktree_sweep_apply` on, a finished copy is moved to `~/Downloads/To delete <date>/`, with a
   ledger file and a short README there.
+- **Session temp folders, only if you turn this on.** With `tmp_sweep_apply` on, the plugin
+  removes large files and copied folders from the temp folders of Claude Code sessions that are no
+  longer alive, and writes a `SWEPT.txt` file in each folder listing what it removed; after `tmp_sweep_days` it
+  removes such a folder whole. None of this goes to the Trash.
 - **Two lines in each project you set up.** An `.atlas-lane` file that names the project's memory
   folder, and an import line in the project's `CLAUDE.md`.
 - **Optional.** If you ask for the plugin-outage check (`init.py --install-outage-check`), one entry

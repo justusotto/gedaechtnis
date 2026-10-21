@@ -70,7 +70,7 @@ import glob as _glob, os, re, subprocess, sys, time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import common, config, mergesha, rootguard
+import common, config, homes, mergesha, rootguard
 
 MARKER = ".rowdone"
 OK, USAGE, NOT_ON_MAIN, ABSENT, FOREIGN, PYTEST, AMBIGUOUS, DIRTY, NO_ROW = 0, 2, 3, 4, 5, 6, 7, 8, 9
@@ -332,18 +332,19 @@ def owe(qid: str, sha: str, by: str, repo: Path, lane: str | None, vault_sha: bo
     """Record a mark the vault was too busy to take. One entry per (row, sha, lane) — the lane
     is part of the key because only the entry's own lane ever applies it: were another lane's
     entry to stand in for the owner's, the owner would be told "owed" and the row would never flip.
-    No lane, no entry: a session without a lane could not flip the row at a quiet vault either."""
+    No lane, no entry: a session without a lane could not flip the row at a quiet vault either.
+    True only when the entry IS in the list as written: a list that could not be written (a full
+    disk, a refused path) must not be reported to the caller as "owed"."""
     if not lane:
         return False
+    mine = lambda e: e.get("qid") == qid and same_sha(str(e.get("sha")), sha) and e.get("lane") == lane
 
     def add(doc: list) -> list:
-        if not any(e.get("qid") == qid and same_sha(str(e.get("sha")), sha) and e.get("lane") == lane
-                   for e in doc):
+        if not any(mine(e) for e in doc):
             doc.append({"qid": qid, "sha": sha, "by": by, "repo": str(repo), "lane": lane,
                         "vault_sha": bool(vault_sha), "handoff": handoff, "at": time.time()})
         return doc
-    _owed_update(add)
-    return True
+    return any(mine(e) for e in _owed_update(add))
 
 
 def apply_owed(lane: str | None, prefixes: list[str], ps_lines: list[str] | None = None,
@@ -428,6 +429,9 @@ def flip(qid: str, sha: str, by: str, repo: Path, lane: str | None, prefixes: li
         note = _notice(lane, owner, qid, sha, by, rel, prefixes) if owner else None
         tail = f"notice {note}" if note else "no notice (owner unknown or outbox not ours)"
         return FOREIGN, f"REFUSED q:{qid} — {rel} is {owner or 'not this lane'}'s; {tail}"
+    wh = homes.refusal(rel, lane)
+    if wh:
+        return FOREIGN, f"REFUSED q:{qid} — {wh}"
     st = _git(config.vault(), "status", "--porcelain", "--", rel)
     if st.returncode != 0 or st.stdout.strip():
         return DIRTY, (f"REFUSED q:{qid} — {rel} has uncommitted changes; a path-limited commit "
@@ -441,13 +445,19 @@ def flip(qid: str, sha: str, by: str, repo: Path, lane: str | None, prefixes: li
     after = "\n".join(lines)
     if not after.endswith("\n"):
         after += "\n"
-    if f.read_text(encoding="utf-8") != before:                  # somebody wrote it meanwhile
-        return DIRTY, f"REFUSED q:{qid} — {rel} changed while it was being edited; nothing written"
-    tmp = f.with_name(f".{f.name}.rowdone-tmp")
-    rootguard.permit(f, "rowdone row flip in a queue file")
-    rootguard.permit(tmp, "rowdone row flip, atomic temp beside the queue file")
-    tmp.write_text(after, encoding="utf-8")
-    os.replace(tmp, f)
+    # The re-read and the write are ONE step against a vault sync moving the files (VAULTSYNC-2).
+    if not common.vault_files_hold():
+        return DIRTY, f"REFUSED q:{qid} — a vault sync held the vault's files; nothing written{owed()}"
+    try:
+        if f.read_text(encoding="utf-8") != before:              # somebody wrote it meanwhile
+            return DIRTY, f"REFUSED q:{qid} — {rel} changed while it was being edited; nothing written"
+        tmp = f.with_name(f".{f.name}.rowdone-tmp")
+        rootguard.permit(f, "rowdone row flip in a queue file")
+        rootguard.permit(tmp, "rowdone row flip, atomic temp beside the queue file")
+        tmp.write_text(after, encoding="utf-8")
+        os.replace(tmp, f)
+    finally:
+        common.vault_files_release()
     what = f"vault commit {sha}" if vault_sha else f"merge {sha}"
     got = _commit(rel, f"rowdone: q:{qid} done — {what}{'' if vault_sha else ' on main'} (by {by})")
     if not got:

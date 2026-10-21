@@ -75,7 +75,12 @@ def test_the_four_doors_ship_off_in_the_file_and_in_the_fallback_table():
         assert limits.DEFAULTS[k] is False, k
         assert shipped["_key_class"][k] == "live", k
     assert limits.PROFILES["public"] == {}
-    assert limits.PROFILES["atlas"] == {k: True for k in FOUR}
+    # CONTINUITY-1: the atlas profile also turns on auto-continue after a usage reset.
+    # VAULTSYNC-3: and the write-homes door, which stays inert until `topology.homes_file` names a file.
+    assert limits.PROFILES["atlas"] == {**{k: True for k in FOUR}, "usage_continue": True, **limits.PROFILE_MAC,
+                                        "write_homes_door": True}
+    assert limits.PROFILE_MAC == {"tmp_sweep_apply": True, "leftover_procs_apply": True, "chrome_clone_door": True,
+                                  "deploy_door": True, "chrome_launcher_hint": "scripts/chrome_launch.py"}
 
 
 def test_the_other_rule_doors_still_ship_on():

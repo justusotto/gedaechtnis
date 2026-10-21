@@ -4,13 +4,51 @@ What changed, when, and what it means for someone running this plugin. Newest fi
 
 Dates are the day the work landed. Versions follow the `version` field in
 `.claude-plugin/plugin.json`, and a release's tag is always `v` plus that version (from 0.5.0 on;
-the earlier tags v0.2–v0.4 were cut from a plugin.json that still said 0.2.0). A patch (0.5.0 →
-0.5.1) is fixes and polish, a minor version (0.5 → 0.6) a capability a user notices, and a major
-version a rework or a complete new feature set. This is pre-1.0 software, so a minor version may
-still change behaviour — where it does, the entry says so under **Changed** and names what to
-re-check.
+the earlier tags v0.2–v0.4 were cut from a plugin.json that still said 0.2.0). A patch (0.6.0 →
+0.6.1) is fixes, polish and small additions such as a new tool or setting; a minor version (0.6 →
+0.7) is a larger capability a user notices, and a major version a rework or a complete new feature
+set. This is pre-1.0 software, so a minor version may still change behaviour — where it does, the
+entry says so under **Changed** and names what to re-check.
 
 Sections used: **Added** · **Changed** · **Fixed** · **Removed** · **Known limits**.
+
+## 0.6.2 — 2026-10-21
+
+### Added
+
+- At Stop, at most once per `tmp_sweep_every_s` (6 hours), the plugin can tidy the session temp folder (`tmp_sweep`, `tmp_sweep_root`): the folders of sessions that are no longer alive lose their files of `tmp_sweep_big_file_mb` (100) or more, copied repositories, browser profiles and dependency folders after `tmp_sweep_strip_days` (2), and are removed after `tmp_sweep_days` (7), at most `tmp_sweep_max_per_pass` (60) folders a pass; it only lists what it would do until `tmp_sweep_apply` is on, and what it removes is not moved to the Trash.
+- The same pass can end, with SIGTERM, a headless browser older than `leftover_procs_min_age_s` (a day) that a session which is no longer alive left running in its temp folder (`leftover_procs`); it only lists them until `leftover_procs_apply` is on.
+- Session start says what the temp sweep would remove while it only lists, and `python3 hooks/tmpsweep.py run [--apply] [--all]` runs one pass by hand.
+- `sessions.py close --tick` is one command for a timer: over the memory line it closes as `close --when-needed` does, and under it it closes finished sessions at most once per `session_close_every_s` (300).
+- `sessions.py launch` refuses a folder the CLI records as not trusted, so a launch no longer sits at the trust question (`--untrusted-ok` overrides).
+- `sessions.py ls` shows how long a prompt has been on a session's screen, and marks it `FLAGGED` after `session_prompt_flag_minutes` (5).
+- With `usage_continue` on (off by default), a session started by `sessions.py launch` that the usage limit stopped is sent one "continue" line once the reset time in its limit message has passed and the resume check allows it, checked at Stop at most once per `usage_continue_every_s` (300) or by hand with `sessions.py continue [--dry-run]`.
+- A session is told once per context window, at `context_handoff_warn_share` (80 %) of its hand-off line, to run its review and checks before it builds more; the line comes from `GEDAECHTNIS_HANDOFF_LINE`, from "hand off at <n>k" in its opening prompt, or from `context_handoff_line_tokens` (0, none).
+- `tools/run_reviewed.sh --python <interpreter>` runs a reviewed script with its repository's own virtual environment, if you have listed that interpreter for that repository with `tools/reviewed.py allow-interpreter` (stored as `reviewed_interpreters` in `config.json`).
+
+### Changed
+
+- `sessions.py close --when-needed` and `--tick` also count the machine as over its memory line whenever the launch memory test would refuse a launch. Re-check: `session_launch_memory_floor` and `session_launch_swap_free_mb`.
+- A launch the memory test refuses now runs the session closer first and, if that closes a session, goes ahead when the test passes within `session_launch_wait_s` (30; 0 turns this off). Re-check: `session_launch_wait_s`.
+- A file a session wrote counts as saved when it was committed after the write and any change git still lists was made after the session's last turn.
+- A report sent to the launching session's socket address counts as a report, as one sent to its name does, and the quiet a session needs after it is now the key `session_close_report_minutes` (30, as before).
+- A session that has reported is no longer kept open only by `sleep` wait loops it started before the report, once its last turn is `session_close_stale_shell_minutes` (60) old. Re-check: `session_close_stale_shell_minutes`.
+- After `session_close_abandoned_minutes` (a day), a session with nothing unsaved is no longer kept open by idle shells or `sleep` wait loops, whether or not it reported. Re-check: `session_close_abandoned_minutes`.
+- After `session_close_child_still_minutes` (a day), a shell, text filter or browser that stood still between two readings a day apart (no processor time, or for a browser at most `session_close_browser_idle_cpu_seconds`, 120 s) no longer keeps a finished session open. Re-check: `session_close_child_still_minutes`.
+- `"profile": "atlas"` now also turns on `usage_continue`, `tmp_sweep_apply` and `leftover_procs_apply`; the default profile leaves them off.
+
+### Fixed
+
+- The close pass at Stop could run out of time on ended sessions before it reached a live one; ended sessions are now set aside first.
+- The close pass at Stop and `close --when-needed` / `--all-finished` remember the last session they judged, and the next pass of that kind begins after it.
+- `sessions.py close` run by hand has 240 seconds instead of 35, and says how many sessions it did not judge.
+- `sessions.py close --when-needed` over the memory line keeps looking until it has found one session to close, up to three time budgets.
+- A pass that leaves sessions unjudged writes one line with a count to `session-close.log`, not one line per session.
+- The worktree clone sweep counts more kinds of unsaved work as work (a commit only a removed worktree held, a changed file mode, a path that changed type), so it proposes fewer clones that still hold something.
+
+### Known limits
+
+- `chrome_clone_door`, `deploy_door` and `chrome_launcher_hint` in `rules/limits.json` are reserved for doors that are not built yet; setting them does nothing.
 
 ## 0.6.1 — 2026-10-02
 

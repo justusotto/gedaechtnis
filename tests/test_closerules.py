@@ -421,7 +421,9 @@ def test_standing_dirt_of_a_shared_checkout_is_not_the_sessions(fl, tmp_path):
     assert fl.session_unsaved(str(repo), None, {}) == []
     assert fl.session_unsaved(str(repo), None, {str(repo / "mine.py"): 1}) == []
     (repo / "mine.py").write_text("changed by the session")
-    got = fl.session_unsaved(str(repo), None, {str(repo / "mine.py"): 1})
+    # SESSCLOSE-3: the write time is the session's own (after the commit above); a write BEFORE
+    # the file's last commit is saved — tests/test_sessclose3.py.
+    got = fl.session_unsaved(str(repo), None, {str(repo / "mine.py"): time.time() + 60})
     assert got == [os.path.join(os.path.realpath(repo), "mine.py")]
 
 
