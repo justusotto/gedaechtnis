@@ -1,7 +1,9 @@
 # Privacy
 
 Gedächtnis runs on your computer and keeps everything there. It has no server, no account, no
-analytics and no update check. It sends nothing anywhere and fetches nothing from anywhere.
+analytics and no update check. Its own scripts send nothing anywhere and fetch nothing from
+anywhere; Claude Code itself does make network calls, and sends the notes it loads to the model
+as part of the session.
 
 ## What it stores, and where
 
@@ -33,8 +35,8 @@ analytics and no update check. It sends nothing anywhere and fetches nothing fro
 To do its job the plugin reads, on your computer only: the memory folder; the Claude Code session
 transcripts under `~/.claude/projects/` (to measure a session's size and to see whether a
 sub-agent's brief allows it to start another); the list of projects in `~/.claude.json`, when
-`init.py` offers to set them up; and git status and history of the projects it works in. None of
-it is copied anywhere else.
+`init.py` offers to set them up; and git status and history of the projects it works in. The plugin
+copies none of it anywhere else.
 
 ## Removing it
 

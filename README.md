@@ -3,7 +3,7 @@
 A memory for Claude Code, kept as plain Markdown files in a git repository on your own disk. Each
 project gets a small set of notes (status, decisions, mistakes, open questions). Every session in
 that project loads them at start, and at the end the session's own changes to them are committed
-with git. The rules that protect those notes and a script can check, such as "never `git add -A`
+with git. The rules that protect those notes and that a script can check, such as "never `git add -A`
 in the notes repository", are hooks: the tool call is refused with the reason, so a session does
 not have to remember the rule. Rules that need judgment stay as prose.
 
@@ -18,7 +18,7 @@ cd ~/src/my-project                     # any git repository you work in
 python3 ~/src/gedaechtnis/init.py --repo .
 ```
 
-`init.py` creates the notes repository (`~/Gedaechtnis`), a folder in it for this project, one
+`init.py` creates the notes repository (the *vault*, `~/Gedaechtnis`), a folder in it for this project, one
 `@`-import line in the project's `CLAUDE.md`, a `.atlas-lane` marker naming what this project's
 sessions may write (a *lane* is that writer identity: one per project, so the hooks can tell
 whose writes are whose), and the symlink that loads the plugin. It overwrites nothing; a second run
